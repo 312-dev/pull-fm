@@ -1,0 +1,78 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - LOCAL DEVELOPMENT STACK ONLY. Never used for staging or production
+# (those are provisioned by Terraform + Nomad under infra/).
+#
+# The point of this file is that "the stack runs" is provable on a laptop with
+# one command, so every gate below Phase 4 can be tested without cloud spend.
+#
+#   pnpm stack:up      start
+#   pnpm stack:reset   wipe volumes and restart (destroys local data)
+# ---------------------------------------------------------------------------
+
+name: pullfm-dev
+
+services:
+  postgres:
+    # Pinned to the same major we run in production. A version skew between dev
+    # and prod is how "migrations passed locally" turns into a prod incident.
+    image: postgres:17-alpine
+    container_name: pullfm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pullfm
+      POSTGRES_DB: pullfm
+      # Local-only throwaway credential. Documented as non-secret so the value
+      # is obvious to a reader and to gitleaks; production credentials come from
+      # the vault and never appear in a file.
+      POSTGRES_PASSWORD: pullfm_local_dev_not_a_secret
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/local/postgres-init:/docker-entrypoint-initdb.d:ro
+    command:
+      # WAL settings mirror the production replication + PITR configuration so
+      # the Phase 5 backup/restore drill exercises a realistic setup locally.
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=4
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=/bin/true
+      - -c
+      - log_min_duration_statement=200
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pullfm -d pullfm"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: pullfm-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    command:
+      # Cache + rate-limit buckets. allkeys-lru so a hot-cache eviction storm
+      # degrades gracefully instead of returning OOM errors under load test.
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --appendonly
+      - "no"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  pgdata:
+    driver: local
