@@ -1,0 +1,12 @@
+{
+  "name": "@pull-fm/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "verify": "node scripts/verify-migrations.mjs",
+    "test": "node scripts/verify-migrations.mjs",
+    "typecheck": "echo 'no typescript in this package'"
+  }
+}

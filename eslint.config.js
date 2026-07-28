@@ -73,10 +73,11 @@ export default tseslint.config(
       "*.ts",
       "**/*.config.js",
       "**/*.config.ts",
-      // k6 scripts run in the k6 runtime, not Node, and are deliberately
-      // outside the TypeScript project graph.
+      // k6 scripts run in the k6 runtime, not Node, and tooling scripts sit
+      // outside the TypeScript project graph on purpose.
       "load/**/*.js",
-      "security/**/*.js",
+      "security/**/*.{js,mjs}",
+      "packages/db/scripts/**/*.mjs",
     ],
     ...tseslint.configs.disableTypeChecked,
   },
@@ -85,7 +86,12 @@ export default tseslint.config(
   // TypeScript-specific rules cannot apply to untyped JS, and these files run in
   // Node or the k6 runtime rather than the browser.
   {
-    files: ["load/**/*.js", "security/**/*.js", "*.config.js"],
+    files: [
+      "load/**/*.js",
+      "security/**/*.{js,mjs}",
+      "packages/db/scripts/**/*.mjs",
+      "*.config.js",
+    ],
     languageOptions: {
       globals: {
         process: "readonly",
