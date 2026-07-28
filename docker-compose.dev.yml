@@ -90,6 +90,7 @@ services:
       timeout: 5s
       retries: 6
 
+  # Cache Redis. Evictable by design.
   redis:
     image: redis:7-alpine
     container_name: pullfm-redis
@@ -97,13 +98,45 @@ services:
     ports:
       - "127.0.0.1:6379:6379"
     command:
-      # Cache + rate-limit buckets. allkeys-lru so a hot-cache eviction storm
-      # degrades gracefully instead of returning OOM errors under load test.
       - redis-server
       - --maxmemory
       - 256mb
       - --maxmemory-policy
       - allkeys-lru
+      - --appendonly
+      - "no"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Quota Redis. SEPARATE INSTANCE, and this separation is a security control.
+  #
+  # Rate-limit counters must never share an eviction policy with the cache. On
+  # a single `allkeys-lru` instance, a cache-fill event evicts quota keys and
+  # every rate limit then fails OPEN: no error, no alert, no signal at all,
+  # while the abuse protections are simply gone. That is the highest-likelihood
+  # defect in the threat model (T11).
+  #
+  # `noeviction` makes the failure mode loud instead: writes error rather than
+  # silently discarding a counter, so the limiter can fail CLOSED. Eviction
+  # policy is per-instance in Redis, not per-database, so a second instance is
+  # the only way to express this.
+  redis-quota:
+    image: redis:7-alpine
+    container_name: pullfm-redis-quota
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6380:6379"
+    command:
+      - redis-server
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - noeviction
+      # Counters are short-lived and reconstructible, so persistence would cost
+      # fsync latency on the hot path for no benefit.
       - --appendonly
       - "no"
     healthcheck:

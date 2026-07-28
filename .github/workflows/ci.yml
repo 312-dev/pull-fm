@@ -46,19 +46,31 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # Separate instance with noeviction. Rate-limit counters must never share
+      # an eviction policy with the cache: on allkeys-lru they are silently
+      # evicted and every limit fails open. See THREAT-MODEL T11.
+      redis-quota:
+        image: redis:7-alpine
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     env:
       DATABASE_URL: postgres://pullfm:pullfm_ci_not_a_secret@localhost:5432/pullfm_test
       REDIS_URL: redis://localhost:6379
+      REDIS_QUOTA_URL: redis://localhost:6380
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm

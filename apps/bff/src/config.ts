@@ -69,7 +69,19 @@ const schema = z.object({
     .positive()
     .default(10_000),
 
+  /** Cache store. Evictable (`allkeys-lru`); losing a key is a cache miss. */
   REDIS_URL: z.string().url(),
+
+  /**
+   * Quota and rate-limit store. MUST be a separate instance configured with
+   * `noeviction`, not a second logical database on the cache instance.
+   *
+   * Eviction policy in Redis is per-instance, not per-database. If counters
+   * share an `allkeys-lru` instance with the cache, a cache-fill event evicts
+   * them and every rate limit fails OPEN with no error and no alert, leaving
+   * the abuse protections silently absent. See THREAT-MODEL T11.
+   */
+  REDIS_QUOTA_URL: z.string().url(),
 
   /** Envelope encryption keys for the per-user credential vault. */
   CREDENTIAL_KEKS: kekSetSchema,
