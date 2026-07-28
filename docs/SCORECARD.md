@@ -18,8 +18,8 @@ a machine checks it and the command to re-run it is written down.
 | **4** | Restore from scratch <30 min, RPO <=5 min                           | **not started** | R2 bucket defined in Terraform                                               |
 | **5** | Synthetic failure alerts <60s, runbook links resolve                | **not started** |                                                                              |
 | **6** | Maintenance window, zero non-2xx rolling deploy, replica promotion  | **partial**     | Maintenance mode verified; deploy pipeline pending                           |
-| **7** | Capacity model + SLOs under mocked upstreams                        | **in progress** | k6 suite and mock upstreams being built                                      |
-| **8** | Zero high/critical, pinned tools, accepted risks unexpired          | **partial**     | All scanners clean; DAST and audit pending                                   |
+| **7** | Capacity model + SLOs under mocked upstreams                        | **partial**     | Harness proven in both directions against the mock; needs a real BFF         |
+| **8** | Zero high/critical, pinned tools, accepted risks unexpired          | **partial**     | Scanners clean, tools pinned, register enforced; ZAP DAST needs a live host  |
 | **L** | Privacy policy, ToS, DPAs, deletion + export end to end             | **not started** | Endpoints exist; policies and cascade pending                                |
 | **S** | Store accounts, privacy labels, web deletion URL                    | **not started** | May be dropped if web-only, see PLAN.md section 11.6                         |
 | **$** | Billing alerts on every vendor                                      | **not started** | Must precede provisioning                                                    |
@@ -97,6 +97,30 @@ Verified: `MAINTENANCE_MODE=true` returns 503 with `Retry-After: 300` on
 application routes while `/healthz` still returns 200, so the orchestrator can
 distinguish intentional downtime from a crash.
 
+### Load harness (Gate 7, partial)
+
+```bash
+node load/mock-upstreams/server.js --bff-stub    # never touches a real upstream
+k6 run load/scenarios/steady-10k.js
+```
+
+Proven in **both** directions, which matters more than a green run:
+
+- Against a cache-first architecture: passes, 93.1% warm cache hit, zero quota
+  violations, MusicBrainz egress capped at 1 req/s and iTunes at 20/min.
+- With `MOCK_SYNC_RESOLVE=1` (naive synchronous upstream calls): fails on
+  `upstream_quota_violations` alone, while latency and cache hit rate still
+  look perfect. That is exactly the failure this gate exists to catch, and a
+  latency-only gate would have missed it.
+
+The mock returns each provider's real refusal shape rather than a generic 429
+(MusicBrainz 503 with no `Retry-After`, iTunes 403 plain text, Deezer HTTP 200
+with an error object), so code that only handles 429 fails here instead of in
+production.
+
+**Gap:** every run so far used the BFF stub, so records are marked
+`gate_valid: false`. Gate 7 needs real handlers.
+
 ### Scanners (Gate 8, partial)
 
 ```bash
@@ -111,9 +135,13 @@ pnpm scan:all
 | Trivy dependencies         | 0 high/critical                     |
 | Trivy Terraform (3 roots)  | 0 misconfigurations                 |
 
-**Gaps before Gate 8 closes:** tool versions are not pinned, OWASP ZAP DAST has
-not run, TLS grade is unmeasured (needs a deployed host), and the threat model
-has not been reviewed by anyone other than its author.
+Tool versions are now pinned to commit SHAs and enforced by
+`node security/scripts/check-action-pinning.mjs`, and the accepted-risk register
+is validated on every push.
+
+**Gaps before Gate 8 closes:** OWASP ZAP DAST has not run (needs a deployed
+host), TLS grade is unmeasured for the same reason, and the threat model has not
+been reviewed by anyone other than its author.
 
 ---
 
