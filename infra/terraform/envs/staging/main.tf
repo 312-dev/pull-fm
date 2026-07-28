@@ -39,6 +39,7 @@ module "firewall" {
   cloudflare_ipv4_cidrs = data.cloudflare_ip_ranges.cloudflare.ipv4_cidrs
   cloudflare_ipv6_cidrs = data.cloudflare_ip_ranges.cloudflare.ipv6_cidrs
   restrict_egress       = var.restrict_egress
+  ssh_allowlist_cidrs   = var.ssh_allowlist_cidrs
 }
 
 module "compute" {

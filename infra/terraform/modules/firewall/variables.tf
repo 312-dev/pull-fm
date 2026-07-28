@@ -29,3 +29,27 @@ variable "restrict_egress" {
   description = "Apply an outbound allowlist. Hetzner allows all egress when a firewall declares no 'out' rules, which means a compromised node can freely scan, mine or exfiltrate. Set false only while debugging a suspected egress block."
   default     = true
 }
+
+variable "ssh_allowlist_cidrs" {
+  type        = list(string)
+  description = <<-DESC
+    Break-glass only. Source CIDRs permitted to reach TCP 22 on the nodes.
+
+    Empty by default and expected to stay empty: SSH is reached over Tailscale
+    (see modules/compute cloud-init), so an inbound rule for 22 adds public
+    attack surface without adding access the operator uses. It exists for
+    exactly one case - bootstrapping a node that has no tailnet membership yet,
+    which is a chicken-and-egg problem with no other solution short of the
+    rescue console.
+
+    Set it to a single /32 in a local tfvars file, apply, bootstrap, then remove
+    it and apply again. Never commit a value. A non-empty value in a committed
+    file is a finding, not a convenience.
+  DESC
+  default     = []
+
+  validation {
+    condition     = !contains(var.ssh_allowlist_cidrs, "0.0.0.0/0") && !contains(var.ssh_allowlist_cidrs, "::/0")
+    error_message = "ssh_allowlist_cidrs must never contain a default route. Break-glass access is a single operator address, not the internet."
+  }
+}

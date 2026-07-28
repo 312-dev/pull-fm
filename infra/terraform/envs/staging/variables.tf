@@ -108,3 +108,9 @@ variable "backup_bucket_name" {
   description = "R2 bucket for pgBackRest."
   default     = "pull-fm-backups-staging"
 }
+
+variable "ssh_allowlist_cidrs" {
+  type        = list(string)
+  description = "Break-glass SSH source CIDRs. See modules/firewall/variables.tf. Empty in every committed configuration."
+  default     = []
+}

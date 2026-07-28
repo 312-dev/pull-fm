@@ -61,6 +61,20 @@ resource "hcloud_firewall" "app" {
     description = "Tailscale direct WireGuard endpoint (no public SSH)"
   }
 
+  # Break-glass SSH. Empty in every committed configuration; see the variable's
+  # own documentation. Rendered as zero rules when the list is empty, so the
+  # normal posture is byte-identical to having no such rule at all.
+  dynamic "rule" {
+    for_each = length(var.ssh_allowlist_cidrs) > 0 ? [1] : []
+    content {
+      direction   = "in"
+      protocol    = "tcp"
+      port        = "22"
+      source_ips  = var.ssh_allowlist_cidrs
+      description = "BREAK-GLASS SSH from operator allowlist. Must be removed after bootstrap."
+    }
+  }
+
   # Dropping ICMP wholesale black-holes path MTU discovery, which shows up much
   # later as large TLS responses hanging rather than as an obvious firewall bug.
   rule {
@@ -112,6 +126,20 @@ resource "hcloud_firewall" "db" {
     port        = tostring(var.tailscale_udp_port)
     source_ips  = local.anywhere
     description = "Tailscale direct WireGuard endpoint (no public SSH)"
+  }
+
+  # Break-glass SSH. Empty in every committed configuration; see the variable's
+  # own documentation. Rendered as zero rules when the list is empty, so the
+  # normal posture is byte-identical to having no such rule at all.
+  dynamic "rule" {
+    for_each = length(var.ssh_allowlist_cidrs) > 0 ? [1] : []
+    content {
+      direction   = "in"
+      protocol    = "tcp"
+      port        = "22"
+      source_ips  = var.ssh_allowlist_cidrs
+      description = "BREAK-GLASS SSH from operator allowlist. Must be removed after bootstrap."
+    }
   }
 
   rule {
