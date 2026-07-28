@@ -233,6 +233,7 @@ function handleProvider(req, res, url, { name, cfg, pathname }) {
         contentType: shape.contentType,
         headers,
         body: shape.body,
+        isRefusal: true,
       });
     }
   }
@@ -284,7 +285,11 @@ function finish(res, stats, delayMs, descriptor) {
   const timer = setTimeout(() => {
     state.openHangs.delete(timer);
     if (res.writableEnded || res.destroyed) return;
-    stats.recordResponse(descriptor.status ?? 200, delayMs);
+    stats.recordResponse(
+      descriptor.status ?? 200,
+      delayMs,
+      descriptor.isRefusal === true,
+    );
     send(res, descriptor);
   }, delayMs);
   state.openHangs.add(timer);
@@ -506,6 +511,9 @@ server.listen(options.port, options.host, () => {
   if (options.bffStub) {
     log("");
     log("  *** BFF STUB ENABLED ***");
+    log(
+      `  crosswalk pre-seeded with ${stub.seeded} hot-set entries (MOCK_SEED_HOT_SET)`,
+    );
     log(
       "  Serving a fake /v1 API so the load suite can be exercised before the",
     );

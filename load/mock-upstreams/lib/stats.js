@@ -44,9 +44,12 @@ export class ProviderStats {
     this.perSecond.set(sec, (this.perSecond.get(sec) ?? 0) + 1);
   }
 
-  recordResponse(status, latencyMs) {
+  /** @param {boolean} isRefusal true when the status came from the quota
+   *  limiter. MusicBrainz refuses with 503, so counting refusals as server
+   *  errors would make every quota breach look like an upstream outage. */
+  recordResponse(status, latencyMs, isRefusal = false) {
     this.byStatus[status] = (this.byStatus[status] ?? 0) + 1;
-    if (status >= 500) this.serverErrors += 1;
+    if (status >= 500 && !isRefusal) this.serverErrors += 1;
     const l = this.latency;
     l.count += 1;
     l.sumMs += latencyMs;

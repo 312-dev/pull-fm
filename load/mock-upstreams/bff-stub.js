@@ -23,6 +23,7 @@
  */
 import {
   artistFor,
+  artistMbid,
   recordingFor,
   recordingMbid,
   fnv1a,
@@ -45,6 +46,53 @@ const TTL_MS = {
  *  resolved inside this window is dropped and the section is marked degraded,
  *  which is the Gate 7 behavior under test. */
 const UPSTREAM_BUDGET_MS = 400;
+
+/**
+ * How many hot-set entries to pre-resolve at startup.
+ *
+ * This is not cheating, it is the architecture. PLAN.md section 3: every
+ * MBID-keyed fact is written on first resolution and served from there forever,
+ * and preview resolution is a background job that is never on the request path.
+ * By the time a warm measurement means anything, the head of the catalog has
+ * been resolved for weeks.
+ *
+ * Without this the stub cannot warm up at all, and for an instructive reason:
+ * resolving a 2,000 item head through iTunes at 20 calls/minute takes 100
+ * minutes. That is exactly the arithmetic in PLAN.md section 3, and it is why
+ * synchronous resolution is forbidden rather than merely discouraged.
+ *
+ * Set MOCK_SEED_HOT_SET=0 to watch a cold system fail to warm.
+ */
+const SEED_HOT_SET = Number(process.env.MOCK_SEED_HOT_SET ?? 2000);
+
+/** Shared cache TTL for the upstream recommendation payload. Recommendations
+ *  are a periodic computation, not a per-request one, so a real BFF does not
+ *  call ListenBrainz once per feed load either. Short enough that a 45 second
+ *  injected fault is guaranteed to be visible in the feed. */
+const REC_POOL_TTL_MS = 15_000;
+
+/**
+ * Resolve cache misses on a rate-limited background queue instead of on the
+ * request path (PLAN.md section 3 rule 3: "preview resolution is a background
+ * job, never a synchronous request path").
+ *
+ * Set MOCK_SYNC_RESOLVE=1 to get the naive behavior instead: resolve inline on
+ * every miss. That version is worth running once, because it fails the
+ * upstream_quota_violations gate within a minute and shows what the gate is
+ * for. Nothing else about the run looks wrong: latency is fine, the cache hit
+ * rate is fine, and the service would be banned by MusicBrainz inside a day.
+ */
+const SYNC_RESOLVE = process.env.MOCK_SYNC_RESOLVE === "1";
+
+/** Drain intervals, one job per tick, sized to stay INSIDE each provider's
+ *  published ceiling rather than at it. */
+const DRAIN_INTERVAL_MS = { musicbrainz: 1100, itunes: 3100 };
+
+/** Bounded. A queue that grows without limit under sustained tail traffic is a
+ *  memory leak dressed as a backlog, and at 20 iTunes calls/minute the tail
+ *  genuinely cannot be drained. That is PLAN.md section 3's argument for a
+ *  local mirror, not something a queue size fixes. */
+const MAX_QUEUE = 5000;
 
 export function attachBffStub({ publicBase }) {
   const cache = new Map();
@@ -128,6 +176,36 @@ export function attachBffStub({ publicBase }) {
     }
   }
 
+  // --- background resolver -------------------------------------------------
+  /** @type {Map<string, {provider:string, run:() => Promise<void>}>} */
+  const queue = new Map();
+
+  function enqueue(key, provider, run) {
+    if (queue.has(key)) return;
+    if (queue.size >= MAX_QUEUE) {
+      // Drop the oldest: a stale resolution request is worth less than a fresh
+      // one, and the backlog is unbounded by construction.
+      const oldest = queue.keys().next().value;
+      queue.delete(oldest);
+    }
+    queue.set(key, { provider, run });
+  }
+
+  function startDrain() {
+    for (const [provider, interval] of Object.entries(DRAIN_INTERVAL_MS)) {
+      const timer = setInterval(() => {
+        for (const [key, job] of queue) {
+          if (job.provider !== provider) continue;
+          queue.delete(key);
+          void job.run();
+          return;
+        }
+      }, interval);
+      timer.unref();
+    }
+  }
+  if (!SYNC_RESOLVE) startDrain();
+
   function subjectOf(req) {
     return req.headers["x-load-test-user"] ?? "anonymous";
   }
@@ -159,6 +237,18 @@ export function attachBffStub({ publicBase }) {
     res.end(body);
   }
 
+  /** Recommendation payload, fetched for the pool rather than per request. */
+  async function recommendationPool(subject) {
+    const cached = cacheGet("lb:pool");
+    if (cached) return { ok: true, body: cached, cached: true };
+    const rec = await callUpstream(
+      "listenbrainz",
+      `/1/cf/recommendation/user/${encodeURIComponent(subject)}/recording?count=20`,
+    );
+    if (rec.ok) cacheSet("lb:pool", rec.body, REC_POOL_TTL_MS);
+    return rec;
+  }
+
   async function handleFeed(req, res, url) {
     const subject = subjectOf(req);
     const key = `feed:${subject}:${url.searchParams.get("cursor") ?? ""}`;
@@ -178,10 +268,7 @@ export function attachBffStub({ publicBase }) {
     });
 
     // One upstream derived section, which is what degrades under chaos.
-    const rec = await callUpstream(
-      "listenbrainz",
-      `/1/cf/recommendation/user/${encodeURIComponent(subject)}/recording?count=20`,
-    );
+    const rec = await recommendationPool(subject);
     if (rec.ok) {
       sections.push({
         kind: "recommended_for_you",
@@ -212,6 +299,44 @@ export function attachBffStub({ publicBase }) {
     if (cached) return reply(res, 200, cached, { "x-cache": "HIT" });
 
     const r = recordingFor(mbid);
+
+    if (!SYNC_RESOLVE) {
+      // Miss: hand back a 200 that says "not resolved yet" and queue the work.
+      // The client gets a fast, honest answer and the upstream quota is spent
+      // at the rate the provider allows, not at the rate users arrive.
+      enqueue(key, "itunes", async () => {
+        const job = await callUpstream(
+          "itunes",
+          `/lookup?id=${r.itunesTrackId}&entity=song`,
+        );
+        if (!job.ok) return;
+        cacheSet(
+          key,
+          {
+            mbid,
+            title: r.title,
+            artist: r.artist.name,
+            previewUrl: job.body.results?.[0]?.previewUrl ?? null,
+            provider: "itunes",
+            degraded: false,
+          },
+          TTL_MS.preview,
+        );
+      });
+      return reply(
+        res,
+        200,
+        {
+          mbid,
+          previewUrl: null,
+          provider: null,
+          degraded: true,
+          reason: "pending-resolution",
+        },
+        { "x-cache": "MISS" },
+      );
+    }
+
     const lookup = await callUpstream(
       "itunes",
       `/lookup?id=${r.itunesTrackId}&entity=song`,
@@ -247,6 +372,43 @@ export function attachBffStub({ publicBase }) {
     const key = `artist:${mbid}`;
     const cached = cacheGet(key);
     if (cached) return reply(res, 200, cached, { "x-cache": "HIT" });
+
+    if (!SYNC_RESOLVE) {
+      // Same rule as previews, and it binds harder here: MusicBrainz allows
+      // 1 req/s for the entire service.
+      enqueue(key, "musicbrainz", async () => {
+        const job = await callUpstream(
+          "musicbrainz",
+          `/ws/2/artist/${mbid}?fmt=json`,
+        );
+        if (!job.ok) return;
+        const seen = artistFor(mbid);
+        cacheSet(
+          key,
+          {
+            mbid,
+            name: job.body.name ?? seen.name,
+            country: seen.country,
+            degraded: false,
+          },
+          TTL_MS.artist,
+        );
+      });
+      const a = artistFor(mbid);
+      return reply(
+        res,
+        200,
+        {
+          mbid,
+          name: a.name,
+          country: a.country,
+          degraded: true,
+          reason: "pending-resolution",
+        },
+        { "x-cache": "MISS" },
+      );
+    }
+
     const upstream = await callUpstream(
       "musicbrainz",
       `/ws/2/artist/${mbid}?fmt=json`,
@@ -357,7 +519,40 @@ export function attachBffStub({ publicBase }) {
     return out;
   }
 
+  /** Stand in for weeks of background resolution. See SEED_HOT_SET. */
+  function seedCrosswalk() {
+    for (let i = 0; i < SEED_HOT_SET; i++) {
+      const mbid = recordingMbid(i);
+      const r = recordingFor(mbid);
+      cacheSet(
+        `preview:${mbid}`,
+        {
+          mbid,
+          title: r.title,
+          artist: r.artist.name,
+          previewUrl: `${publicBase()}/itunes/cdn/preview/${r.itunesTrackId}.m4a`,
+          provider: "itunes",
+          degraded: false,
+        },
+        TTL_MS.preview * 100,
+      );
+      // Keyed on artistMbid(i), which is what the k6 scenarios request. Keying
+      // on this recording's artist would seed a different set and leave every
+      // artist view a miss.
+      const amb = artistMbid(i);
+      const a = artistFor(amb);
+      cacheSet(
+        `artist:${amb}`,
+        { mbid: amb, name: a.name, country: a.country, degraded: false },
+        TTL_MS.artist * 100,
+      );
+    }
+  }
+  if (SEED_HOT_SET > 0) seedCrosswalk();
+
   return {
+    seeded: SEED_HOT_SET,
+
     owns(pathname) {
       return OWNED.some((p) => pathname === p || pathname.startsWith(p + "/"));
     },

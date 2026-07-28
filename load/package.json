@@ -1,0 +1,23 @@
+{
+  "name": "@pullfm/load",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pull.fm scalability suite: k6 scenarios plus a mock upstream layer. Zero runtime dependencies.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "mock": "node mock-upstreams/server.js",
+    "mock:stub": "node mock-upstreams/server.js --bff-stub",
+    "mock:stats": "curl -s http://127.0.0.1:8787/__admin/stats",
+    "mock:reset": "curl -s -X POST http://127.0.0.1:8787/__admin/reset",
+    "results:dir": "mkdir -p ${RESULTS_DIR:-k6-results}",
+    "smoke": "pnpm results:dir && SMOKE=1 DURATION=30s RAMP_UP=5s RAMP_DOWN=5s ARRIVAL_RATE=2 k6 run scenarios/steady-10k.js",
+    "steady": "pnpm results:dir && k6 run scenarios/steady-10k.js",
+    "cold": "pnpm results:dir && k6 run scenarios/cold-cache.js",
+    "soak": "pnpm results:dir && k6 run scenarios/soak.js",
+    "chaos": "pnpm results:dir && k6 run scenarios/chaos.js",
+    "inspect": "for f in scenarios/*.js; do printf '%-24s' \"$(basename $f)\"; k6 inspect -e I_UNDERSTAND_BURST_50K_IS_DEFERRED=1 \"$f\" > /dev/null || exit 1; echo 'parses'; done"
+  }
+}
