@@ -75,11 +75,21 @@ pnpm --filter @pull-fm/crypto test
 
 ### Log redaction (Gate 3, partial)
 
-Verified manually against a running server: a bearer token in `Authorization`
-and a secret in the query string both stay out of the logs. Requests log the
-path only, never the query string or headers.
+```bash
+pnpm --filter @pull-fm/bff test
+```
 
-**Gap:** this is not yet automated. It needs to be a test before Gate 3 closes.
+10 tests asserting on emitted log bytes rather than on the redaction config,
+because config assertions only prove the config says what it says.
+
+- Tokens are redacted at the top level, nested, and in the snake_case form
+  upstream APIs actually return.
+- The `Authorization` header and cookies never appear.
+- Query strings are stripped (they can carry a token or a search term) while
+  the path survives, so logs stay useful for debugging.
+- Credentials that an HTTP client attached to a thrown error do not leak, which
+  the default pino error serializer would have emitted in full.
+- Client IP and user agent are retained, since abuse investigation needs them.
 
 ### Maintenance mode (Gate 6, partial)
 
