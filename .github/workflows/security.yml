@@ -33,12 +33,23 @@ jobs:
           # Full history: a secret committed earlier and reverted is still
           # exposed in the object store and must still fail the build.
           fetch-depth: 0
-      - name: gitleaks
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+      # The gitleaks ACTION requires a paid licence for organization-owned
+      # repositories. The gitleaks binary itself is MIT licensed and free, so we
+      # run the CLI directly. This also removes a third-party action from the
+      # supply chain of the job that guards our secrets.
+      - name: install gitleaks
         env:
-          GITLEAKS_CONFIG: .gitleaks.toml
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
-          GITLEAKS_ENABLE_SUMMARY: "true"
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: scan history for secrets
+        run: gitleaks git --config .gitleaks.toml --redact --no-banner --verbose
 
   sast:
     name: SAST (semgrep)
