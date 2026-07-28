@@ -1,0 +1,61 @@
+#cloud-config
+# Rendered by Terraform. Deliberately minimal: this brings a node to the point
+# where config management can reach it over Tailscale and does nothing else.
+# Anything that needs a secret belongs in a Nomad variable, not here, because
+# user_data is persisted in Terraform state and stays readable from the Hetzner
+# API for the life of the server.
+hostname: ${hostname}
+fqdn: ${hostname}
+preserve_hostname: false
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - unattended-upgrades
+  - fail2ban
+  - chrony
+
+users:
+  - name: ${admin_user}
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+%{ for key in ssh_public_keys ~}
+      - ${key}
+%{ endfor ~}
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/10-pullfm-hardening.conf
+    permissions: "0644"
+    content: |
+      # The Hetzner firewall has no inbound rule for 22, so this listener is
+      # only reachable across the tailnet. These settings harden the tailnet
+      # side too, so a compromised tailnet device still cannot brute force in.
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      PermitEmptyPasswords no
+      X11Forwarding no
+      MaxAuthTries 3
+      LoginGraceTime 20
+
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+runcmd:
+  - [systemctl, restart, ssh]
+  - [systemctl, enable, --now, fail2ban]
+%{ if tailscale_auth_key != "" ~}
+  - curl -fsSL https://tailscale.com/install.sh | sh
+  - tailscale up --authkey "${tailscale_auth_key}" --hostname "${hostname}" --ssh=false --accept-routes=false
+%{ endif ~}

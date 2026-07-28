@@ -1,0 +1,19 @@
+# Copy to backend.hcl (gitignored) and fill in.
+#   terraform init -backend-config=backend.hcl
+
+bucket = "pull-fm-tfstate"
+key    = "shared/terraform.tfstate"
+region = "auto"
+
+endpoints = {
+  s3 = "https://REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID.eu.r2.cloudflarestorage.com"
+}
+
+use_lockfile = true
+
+skip_credentials_validation = true
+skip_region_validation      = true
+skip_requesting_account_id  = true
+skip_metadata_api_check     = true
+skip_s3_checksum            = true
+use_path_style              = true

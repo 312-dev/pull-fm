@@ -1,0 +1,70 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - production variables (EXAMPLE)
+#
+# Copy to terraform.tfvars, which is gitignored, and fill in the placeholders.
+#
+# THERE IS NO SECRET IN THIS FILE AND THERE MUST NEVER BE ONE. This repository
+# is public and gitleaks blocks CI. Credentials are supplied as environment
+# variables read directly by the providers:
+#
+#   export HCLOUD_TOKEN="$(op read 'op://MCP/hetzner/pull-fm/API_TOKEN')"
+#   export CLOUDFLARE_API_TOKEN="$(op read 'op://MCP/cloudflare/pull-fm/API_TOKEN')"
+#
+# The two IDs below are public identifiers shown in the Cloudflare dashboard,
+# not credentials, but they are still left as placeholders here so that a
+# copy-paste of this file can never be mistaken for a working config.
+# ---------------------------------------------------------------------------
+
+cloudflare_account_id = "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"
+cloudflare_zone_id    = "REPLACE_WITH_PULL_FM_ZONE_ID"
+
+# --- placement -------------------------------------------------------------
+# EU only. fsn1 (Falkenstein) and hel1 (Helsinki) both carry CAX stock.
+location = "fsn1"
+
+network_ip_range = "10.30.0.0/16"
+subnet_ip_range  = "10.30.1.0/24"
+
+# --- sizing ----------------------------------------------------------------
+# CAX is Ampere ARM64 and is the only permitted family; the module validates
+# it. Hetzner raised CPX/CCX by 150-210 percent on 2026-06-15 while CAX rose
+# about 30 percent (docs/PLAN.md section 2).
+app_node_count  = 2
+app_server_type = "cax21" # 4 vCPU ARM / 8 GB
+db_server_type  = "cax31" # 8 vCPU ARM / 16 GB
+
+# --- durability ------------------------------------------------------------
+# Prod puts Postgres on a dedicated volume so the data outlives the machine:
+# a bricked node becomes a reattach instead of a 30 minute restore from R2.
+# About EUR 4.40/mo at 100 GB, which is not in the PLAN section 2 table.
+db_data_volume_size = 100
+enable_db_backups   = true
+enable_app_backups  = false
+
+# --- access ----------------------------------------------------------------
+# Public keys only. The matching private keys live in 1Password and never in
+# this repository. SSH reaches these nodes over Tailscale; the firewall has no
+# inbound rule for port 22.
+ssh_public_keys = {
+  operator = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIREPLACE_WITH_YOUR_PUBLIC_KEY operator@pull.fm"
+}
+
+# Optional. Prefer leaving this unset and enrolling nodes into the tailnet out
+# of band: cloud-init is stored in Terraform state and stays readable from the
+# Hetzner API. If it is set, use a single-use ephemeral key and treat it as
+# burned after first boot. Supply it as TF_VAR_tailscale_auth_key, never here.
+# tailscale_auth_key = null
+
+# --- behaviour -------------------------------------------------------------
+# The origin must be configured to parse PROXY protocol before this is true,
+# or every connection through the load balancer fails.
+enable_proxy_protocol = true
+
+# Outbound allowlist on both firewalls. First thing to flip while debugging a
+# suspected egress block, and the first thing to flip back.
+restrict_egress = true
+
+# --- naming ----------------------------------------------------------------
+api_hostname       = "api.pull.fm"
+app_hostname       = "app.pull.fm"
+backup_bucket_name = "pull-fm-backups-prod"

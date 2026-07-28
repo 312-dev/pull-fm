@@ -26,6 +26,10 @@ export class ProviderStats {
     this.timeouts = 0;
     this.clientAborts = 0;
     this.latency = { count: 0, sumMs: 0, maxMs: 0, samples: [] };
+    /** Free-form provider-specific counters, e.g. Deezer preview URL outcomes.
+     *  Kept open-ended so a provider quirk can be counted without a schema
+     *  change on both sides of the harness. */
+    this.extra = {};
     /** epoch second -> count. Bounded by sweep(). */
     this.perSecond = new Map();
     this.firstSeenAt = null;
@@ -50,6 +54,10 @@ export class ProviderStats {
     // Reservoir capped so a 4 hour soak cannot grow this without bound. The
     // first 5,000 samples are enough to sanity check the configured profile.
     if (l.samples.length < 5000) l.samples.push(latencyMs);
+  }
+
+  bump(name, by = 1) {
+    this.extra[name] = (this.extra[name] ?? 0) + by;
   }
 
   /** Highest count in any single one second bucket. */
@@ -119,6 +127,7 @@ export class ProviderStats {
         p99: this.percentile(99),
         max: this.latency.maxMs,
       },
+      extra: this.extra,
     };
   }
 }

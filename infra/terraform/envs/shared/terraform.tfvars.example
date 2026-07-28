@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+# No secret belongs in this file. CLOUDFLARE_API_TOKEN comes from the
+# environment; see the README.
+
+cloudflare_zone_id = "REPLACE_WITH_PULL_FM_ZONE_ID"
+
+# Move to "strict" only after Cloudflare Origin CA certificates are installed
+# on the BFF nodes. Applying strict first produces an immediate 526.
+ssl_mode        = "full"
+min_tls_version = "1.2"
+
+# HSTS is close to irreversible for the length of max_age. Ship it once the
+# certificate chain is proven, starting at a low max_age.
+enable_hsts             = false
+hsts_max_age            = 86400
+hsts_include_subdomains = false
+hsts_preload            = false
