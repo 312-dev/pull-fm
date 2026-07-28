@@ -54,10 +54,13 @@ jobs:
   sast:
     name: SAST (semgrep)
     runs-on: ubuntu-latest
-    container:
-      image: semgrep/semgrep:1.171.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Installed rather than run as a container image: semgrep's image runs as
+      # a non-root user against a root-owned checkout and fails at startup
+      # before scanning anything. The version stays pinned either way.
+      - name: install semgrep
+        run: pipx install semgrep==1.171.0
       - name: semgrep scan
         run: |
           semgrep scan \
