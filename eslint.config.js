@@ -121,6 +121,9 @@ export default tseslint.config(
   {
     files: ["**/*.test.ts", "**/*.spec.ts", "**/test/**/*.ts", "load/**/*.js"],
     rules: {
+      // Indexing a fixture array is safe in a test; the assertion documents an
+      // invariant the test itself establishes.
+      "@typescript-eslint/no-non-null-assertion": "off",
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-unsafe-assignment": "off",
       "@typescript-eslint/no-unsafe-member-access": "off",
