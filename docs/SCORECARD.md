@@ -118,8 +118,24 @@ The mock returns each provider's real refusal shape rather than a generic 429
 with an error object), so code that only handles 429 fails here instead of in
 production.
 
+Measured run (2026-07-28, 3m28s, ramp to 300 VUs against the mock): **all 9
+thresholds pass**, including `cache_hit_rate > 0.90`, `upstream_quota_violations
+< 1`, and p95 under 300ms on feed, search, config, and preview.
+
+The egress evidence from the mock control plane is the part that matters, since
+k6 cannot see it:
+
+| Provider     | Peak req/s | Peak req/min | Rate-limited |
+| ------------ | ---------- | ------------ | ------------ |
+| MusicBrainz  | 1          | 12           | 0            |
+| iTunes       | 1          | 20           | 0            |
+| ListenBrainz | 2          | 11           | 0            |
+
+MusicBrainz never exceeded its 1 req/s global ceiling and iTunes sat at exactly
+its ~20/min limit, under a load representing 10,000 users.
+
 **Gap:** every run so far used the BFF stub, so records are marked
-`gate_valid: false`. Gate 7 needs real handlers.
+`gate_valid: false`. Gate 7 needs real handlers before it can close.
 
 ### Scanners (Gate 8, partial)
 
