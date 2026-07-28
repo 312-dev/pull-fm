@@ -9,21 +9,21 @@ a machine checks it and the command to re-run it is written down.
 
 ## Status
 
-| Gate  | Criterion                                                           | Status          | Evidence                                                                     |
-| ----- | ------------------------------------------------------------------- | --------------- | ---------------------------------------------------------------------------- |
-| **0** | TLS hello-world reachable, IaC applies with zero drift              | **blocked**     | Terraform written and validating; requires `pull.fm` delegated + credentials |
-| **1** | Migrations reversible, cascade transactional, constraints fire      | **GREEN**       | `node packages/db/scripts/verify-migrations.mjs` (12 checks)                 |
-| **2** | All endpoints correct vs upstreams, contract tests, cache hit >=90% | **not started** | Contract locked; handlers stubbed at 501                                     |
-| **3** | Auth flow, BOLA isolation, tokens encrypted, no plaintext in logs   | **partial**     | Crypto and redaction proven; authz suite pending                             |
-| **4** | Restore from scratch <30 min, RPO <=5 min                           | **not started** | R2 bucket defined in Terraform                                               |
-| **5** | Synthetic failure alerts <60s, runbook links resolve                | **not started** |                                                                              |
-| **6** | Maintenance window, zero non-2xx rolling deploy, replica promotion  | **partial**     | Maintenance mode verified; deploy pipeline pending                           |
-| **7** | Capacity model + SLOs under mocked upstreams                        | **partial**     | Harness proven in both directions against the mock; needs a real BFF         |
-| **8** | Zero high/critical, pinned tools, accepted risks unexpired          | **partial**     | Scanners clean, tools pinned, register enforced; ZAP DAST needs a live host  |
-| **L** | Privacy policy, ToS, DPAs, deletion + export end to end             | **not started** | Endpoints exist; policies and cascade pending                                |
-| **S** | Store accounts, privacy labels, web deletion URL                    | **not started** | May be dropped if web-only, see PLAN.md section 11.6                         |
-| **$** | Billing alerts on every vendor                                      | **not started** | Must precede provisioning                                                    |
-| **D** | Commit to main reaches prod with a verified rollback                | **not started** |                                                                              |
+| Gate  | Criterion                                                           | Status          | Evidence                                                                                                              |
+| ----- | ------------------------------------------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------- |
+| **0** | TLS hello-world reachable, IaC applies with zero drift              | **blocked**     | Plans clean vs live APIs (22 add/0 change/0 destroy); blocked on a Hetzner project + R2 enablement, both console-only |
+| **1** | Migrations reversible, cascade transactional, constraints fire      | **GREEN**       | `node packages/db/scripts/verify-migrations.mjs` (12 checks)                                                          |
+| **2** | All endpoints correct vs upstreams, contract tests, cache hit >=90% | **not started** | Contract locked; handlers stubbed at 501                                                                              |
+| **3** | Auth flow, BOLA isolation, tokens encrypted, no plaintext in logs   | **partial**     | Crypto and redaction proven; authz suite pending                                                                      |
+| **4** | Restore from scratch <30 min, RPO <=5 min                           | **not started** | R2 bucket defined in Terraform                                                                                        |
+| **5** | Synthetic failure alerts <60s, runbook links resolve                | **not started** |                                                                                                                       |
+| **6** | Maintenance window, zero non-2xx rolling deploy, replica promotion  | **partial**     | Maintenance mode verified; deploy pipeline pending                                                                    |
+| **7** | Capacity model + SLOs under mocked upstreams                        | **partial**     | Harness proven in both directions against the mock; needs a real BFF                                                  |
+| **8** | Zero high/critical, pinned tools, accepted risks unexpired          | **partial**     | Scanners clean, tools pinned, register enforced; ZAP DAST needs a live host                                           |
+| **L** | Privacy policy, ToS, DPAs, deletion + export end to end             | **not started** | Endpoints exist; policies and cascade pending                                                                         |
+| **S** | ~~Store accounts, privacy labels, web deletion URL~~                | **RETIRED**     | Distribution is GitHub Releases, not app stores. See PLAN.md section 11.6                                             |
+| **$** | Billing alerts on every vendor                                      | **not started** | Must precede provisioning                                                                                             |
+| **D** | Commit to main reaches prod with a verified rollback                | **not started** |                                                                                                                       |
 
 ---
 
@@ -166,8 +166,11 @@ been reviewed by anyone other than its author.
 
 ## Honest notes
 
-- **Nothing is provisioned.** All infrastructure is plan-only. Gate 0 cannot be
-  attempted until `pull.fm` is delegated and credentials are supplied.
+- **Nothing is provisioned.** The Terraform is validated against live Hetzner
+  and Cloudflare APIs and plans clean, but two prerequisites are console-only:
+  a `pull-fm` Hetzner project (the Cloud API has no project endpoint, confirmed
+  by a 404) and R2 enablement (confirmed by a 403, code 10042). `pull.fm`
+  itself is delegated and active.
 - **`burst-50k` is deliberately deferred** to post-launch. Load-testing against
   an invented traffic model produces false confidence; the pre-launch
   substitute is a written capacity model with the arithmetic shown.

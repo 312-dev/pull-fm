@@ -372,6 +372,27 @@ v1 assumed a human is available. The opposite assumption is now explicit.
 
 ---
 
+## 10a. Provisioning blockers (verified 2026-07-28 against live APIs)
+
+Credentials work. Two prerequisites are **console-only** and cannot be scripted.
+
+| Blocker                          | Evidence                                                                                                                                                                           | Needed                                                                     |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **No `pull-fm` Hetzner project** | `GET /v1/projects` returns **404**; the Cloud API has no project endpoint. The supplied token is scoped to the personal project (it enumerates `ente-jellyfin` and `hetzner-box`). | Create project `pull-fm` in the Hetzner console, mint a token scoped to it |
+| **R2 not enabled**               | `POST /accounts/.../r2/buckets` returns **403 code 10042**, "Please enable R2 through the Cloudflare Dashboard."                                                                   | Enable R2 once in the Cloudflare dashboard                                 |
+
+**Confirmed working:** `pull.fm` is an active Cloudflare zone (id `70f6a577591a0cf4813b0e1456699a28`),
+delegated from Porkbun. Terraform plans clean against the real APIs: **22 to add, 0 to change,
+0 to destroy.**
+
+**Why the Hetzner project matters rather than just using the personal one:** Pull.fm stores other
+people's ListenBrainz tokens and Last.fm session keys. Sharing a project with the personal fleet
+means a shared firewall namespace, shared token blast radius, and a compromise of either side
+reaching the other. Section 1 locked project isolation for exactly this reason, so provisioning
+into the personal project would silently reverse a security decision to save one console click.
+
+---
+
 ## 11. Open decisions requiring the operator
 
 These cannot be resolved by engineering judgment.
@@ -383,6 +404,16 @@ These cannot be resolved by engineering judgment.
    distribution regardless of commercial status. Start whenever store release becomes real.
 4. **Cloudflare account separation** - separate account for Pull.fm, or accept shared blast radius?
 5. **MusicBrainz mirror** - commit to it for 50k, or cap the service at ~10k and say so?
-6. **Distribution target** - app stores, or web-only PWA? Non-commercial removes the revenue
-   reason for store presence; web-only would drop Gate S, the D-U-N-S wait, and the $99+$25
-   developer fees entirely. Worth deciding before Gate S work begins.
+6. ~~**Distribution target**~~ **RESOLVED 2026-07-28: GitHub Releases.** Ship signed APK and
+   desktop artifacts as GitHub Release assets rather than through app stores. **Gate S is
+   retired**, along with the D-U-N-S wait and the $99 + $25 developer fees.
+
+   What still applies despite leaving the stores: `DELETE /v1/me` and `GET /v1/me/export` stay,
+   because GDPR and CCPA require them regardless of distribution channel. What no longer
+   applies: privacy nutrition labels, the Data Safety form, reviewer demo accounts, and the
+   web-accessible deletion URL Google mandates.
+
+   New obligations this creates: releases must be **signed and reproducible**, the APK signing
+   key becomes a critical secret with the same escrow requirement as the KEK, and users get no
+   automatic update channel, which makes `GET /v1/config` min-supported-build enforcement more
+   important rather than less.
