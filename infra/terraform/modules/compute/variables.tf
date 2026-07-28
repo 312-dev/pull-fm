@@ -42,8 +42,17 @@ variable "app_server_type" {
   default     = "cax21"
 
   validation {
-    condition     = startswith(var.app_server_type, "cax")
-    error_message = "Only CAX (Ampere ARM64) types are permitted. Hetzner raised CPX/CCX pricing 150-210 percent on 2026-06-15 while CAX rose about 30 percent; see docs/PLAN.md section 2. Changing this is a cost decision, not a sizing one."
+    # CAX (ARM) remains preferred on price/perf, but as of 2026-07-28 it is out
+    # of stock in every EU datacenter, so the allowlist also admits the cpx_1_
+    # series. The 150-210 percent June 2026 increase applied to the US region
+    # and to the cpx_2_ generation; in nbg1/hel1 cpx21 is EUR 10.99 and cpx31 is
+    # EUR 20.49, which is within the original CAX budget. The cpx_2_ and ccx
+    # families stay excluded because they are 2-3x the price for the same specs.
+    condition = anytrue([
+      startswith(var.app_server_type, "cax"),
+      contains(["cpx11", "cpx21", "cpx31", "cpx41", "cpx51"], var.app_server_type),
+    ])
+    error_message = "app_server_type must be a CAX (ARM) type or one of the legacy-priced cpx_1_ types. The cpx_2_ and ccx families cost 2-3x for identical specs; see docs/PLAN.md section 2."
   }
 }
 
@@ -53,8 +62,11 @@ variable "db_server_type" {
   default     = "cax31"
 
   validation {
-    condition     = startswith(var.db_server_type, "cax")
-    error_message = "Only CAX (Ampere ARM64) types are permitted. See docs/PLAN.md section 2."
+    condition = anytrue([
+      startswith(var.db_server_type, "cax"),
+      contains(["cpx11", "cpx21", "cpx31", "cpx41", "cpx51"], var.db_server_type),
+    ])
+    error_message = "db_server_type must be a CAX (ARM) type or one of the legacy-priced cpx_1_ types. See docs/PLAN.md section 2."
   }
 }
 

@@ -393,6 +393,45 @@ into the personal project would silently reverse a security decision to save one
 
 ---
 
+## 10b. Hetzner capacity reality (measured 2026-07-28, live API)
+
+Gate 0 partially applied. **DNS, load balancer, network, and firewalls are live.
+All three servers failed**, and the reason is supply, not configuration.
+
+| Family                   | EU status                                    | Price (nbg1/hel1)                                 |
+| ------------------------ | -------------------------------------------- | ------------------------------------------------- |
+| **CAX (ARM)**            | **out of stock in every EU datacenter**      | would have been EUR 20.99                         |
+| **CX (x86 shared)**      | **out of stock in every EU datacenter**      | -                                                 |
+| **cpx_1_ (cpx21/31/41)** | **discontinued: "can no longer be ordered"** | legacy prices apply only to existing servers      |
+| cpx_2_                   | orderable                                    | cpx22 EUR 22.99, cpx32 EUR 41.99, cpx42 EUR 69.49 |
+| ccx (dedicated)          | orderable                                    | ccx13 EUR 50.49                                   |
+
+`fsn1-dc14` reports **zero** available server types of any kind.
+
+This confirms the June 2026 repricing finding rather than contradicting it: the
+cheap cpx_1_ prices visible in the API are grandfathered, and the only types a
+new project can actually order are the repriced generation.
+
+**Cost consequence.** The plan's sizing (2 app + 1 database) now costs about
+**EUR 95/mo for staging alone** on cpx22 + cpx32, against the EUR 55 the CAX
+plan assumed. Options, cheapest first:
+
+1. **Single-node staging** (one cpx32 running app + Postgres + Redis, no load
+   balancer): ~EUR 42/mo. Loses the rolling-deploy and load-balancer rehearsal
+   that Gate 6 needs.
+2. **One app node + one database node** behind the existing load balancer
+   (cpx22 + cpx22): ~EUR 53/mo. Keeps every gate testable; the second app node
+   is only needed to prove the balancer distributes, which one node cannot show.
+3. **As planned** (2x cpx22 + cpx32): ~EUR 95/mo. Full fidelity to production.
+4. **Wait for CAX restock.** Unpredictable, and blocks Gate 0 indefinitely.
+
+Recommendation: **option 2**. It preserves the load balancer, rolling deploys,
+and a separate database host, which are the parts the gates actually exercise,
+while the second app node adds cost without adding a new failure mode to test
+before there are users.
+
+---
+
 ## 11. Open decisions requiring the operator
 
 These cannot be resolved by engineering judgment.
