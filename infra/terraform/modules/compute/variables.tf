@@ -50,7 +50,7 @@ variable "app_server_type" {
     # families stay excluded because they are 2-3x the price for the same specs.
     condition = anytrue([
       startswith(var.app_server_type, "cax"),
-      contains(["cpx11", "cpx21", "cpx31", "cpx41", "cpx51"], var.app_server_type),
+      contains(["cpx11", "cpx12", "cpx21", "cpx22", "cpx31", "cpx41", "cpx51"], var.app_server_type),
     ])
     error_message = "app_server_type must be a CAX (ARM) type or one of the legacy-priced cpx_1_ types. The cpx_2_ and ccx families cost 2-3x for identical specs; see docs/PLAN.md section 2."
   }
@@ -64,7 +64,7 @@ variable "db_server_type" {
   validation {
     condition = anytrue([
       startswith(var.db_server_type, "cax"),
-      contains(["cpx11", "cpx21", "cpx31", "cpx41", "cpx51"], var.db_server_type),
+      contains(["cpx11", "cpx12", "cpx21", "cpx22", "cpx31", "cpx41", "cpx51"], var.db_server_type),
     ])
     error_message = "db_server_type must be a CAX (ARM) type or one of the legacy-priced cpx_1_ types. See docs/PLAN.md section 2."
   }

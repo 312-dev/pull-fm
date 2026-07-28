@@ -1,9 +1,17 @@
-# CAX is Ampere ARM64. The image name has to be resolved to an architecture
-# specific image ID: passing "ubuntu-24.04" straight through picks the x86 build
-# and the server fails to boot on a CAX type.
-data "hcloud_image" "arm" {
+# The image name must be resolved to an architecture-specific image ID. Passing
+# "ubuntu-24.04" straight through picks the x86 build, which then fails to boot
+# on a CAX (Ampere ARM64) type with "image has wrong architecture".
+#
+# Architecture is derived from the server type rather than configured
+# separately, so the two cannot drift: CAX is arm, everything else is x86.
+data "hcloud_image" "app" {
   name              = var.image_name
-  with_architecture = "arm"
+  with_architecture = startswith(var.app_server_type, "cax") ? "arm" : "x86"
+}
+
+data "hcloud_image" "db" {
+  name              = var.image_name
+  with_architecture = startswith(var.db_server_type, "cax") ? "arm" : "x86"
 }
 
 locals {
@@ -41,7 +49,7 @@ resource "hcloud_server" "app" {
 
   name        = "${var.name_prefix}-app-${count.index + 1}"
   server_type = var.app_server_type
-  image       = data.hcloud_image.arm.id
+  image       = data.hcloud_image.app.id
   location    = var.location
   ssh_keys    = local.ssh_key_ids
   backups     = var.enable_app_backups
@@ -80,7 +88,7 @@ resource "hcloud_server" "app" {
 resource "hcloud_server" "db" {
   name        = "${var.name_prefix}-db-1"
   server_type = var.db_server_type
-  image       = data.hcloud_image.arm.id
+  image       = data.hcloud_image.db.id
   location    = var.location
   ssh_keys    = local.ssh_key_ids
   backups     = var.enable_db_backups
