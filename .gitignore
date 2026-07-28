@@ -82,10 +82,13 @@ playwright-report/
 k6-results/
 *.k6.json
 zap-report.*
-.semgrep/
 .trivycache/
 sbom.json
 *.sarif
+# `.semgrep/` holds our own committed rules and must NOT be ignored; semgrep's
+# own cache lives elsewhere. An earlier ignore here silently kept the custom
+# security rules out of the repo while CI looked configured.
+.semgrep_logs/
 
 # --- Databases / dumps (may contain real user data) -------------------------
 *.sqlite

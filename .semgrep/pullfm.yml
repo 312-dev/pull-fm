@@ -1,0 +1,104 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - project-specific Semgrep rules
+#
+# These encode invariants the generic rulesets cannot know about. They exist to
+# make Gate 3 ("no plaintext tokens in logs") and Gate 8 (BOLA) mechanically
+# enforceable rather than review-dependent.
+# ---------------------------------------------------------------------------
+rules:
+  # -------------------------------------------------------------------------
+  # Gate 3: per-user third-party tokens must never reach a log sink, an error
+  # message, or a telemetry span. A leaked Last.fm session key or ListenBrainz
+  # token in a log aggregator is a real credential compromise.
+  # -------------------------------------------------------------------------
+  - id: pullfm-no-token-in-logs
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Potential plaintext credential in a log/telemetry sink. Per-user tokens
+      (ListenBrainz, Last.fm session keys) and API secrets must never be logged.
+      Log a stable non-reversible identifier instead (e.g. connection id).
+    patterns:
+      - pattern-either:
+          - pattern: $LOGGER.$LEVEL(..., <... $OBJ.accessToken ...>, ...)
+          - pattern: $LOGGER.$LEVEL(..., <... $OBJ.refreshToken ...>, ...)
+          - pattern: $LOGGER.$LEVEL(..., <... $OBJ.sessionKey ...>, ...)
+          - pattern: $LOGGER.$LEVEL(..., <... $OBJ.userToken ...>, ...)
+          - pattern: $LOGGER.$LEVEL(..., <... $OBJ.apiSecret ...>, ...)
+          - pattern: $LOGGER.$LEVEL(..., <... $OBJ.plaintext ...>, ...)
+          - pattern: console.$LEVEL(..., <... $OBJ.accessToken ...>, ...)
+          - pattern: console.$LEVEL(..., <... $OBJ.sessionKey ...>, ...)
+      - metavariable-regex:
+          metavariable: $LEVEL
+          regex: ^(log|info|warn|error|debug|trace|fatal)$
+
+  # -------------------------------------------------------------------------
+  # Decrypted credentials must stay in memory for the duration of one upstream
+  # call. Assigning one onto a long-lived object widens the blast radius of any
+  # future serialization bug (error reporter, response body, cache write).
+  # -------------------------------------------------------------------------
+  - id: pullfm-no-decrypted-token-on-request
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Do not attach a decrypted credential to the request/reply object. It will
+      eventually be serialized by an error handler or telemetry hook. Pass it
+      as a local argument to the upstream client instead.
+    pattern-either:
+      - pattern: $REQ.accessToken = $V
+      - pattern: $REQ.sessionKey = $V
+      - pattern: $REQ.userToken = $V
+
+  # -------------------------------------------------------------------------
+  # Gate 8 / OWASP API #1 (BOLA): any query filtered only by a client-supplied
+  # id, without an ownership predicate, is an IDOR. This catches the common
+  # shape; the automated authz suite is the real proof, this is the tripwire.
+  # -------------------------------------------------------------------------
+  - id: pullfm-bola-missing-owner-predicate
+    languages: [typescript]
+    severity: WARNING
+    message: >-
+      Query appears to select a user-owned row by id without a user_id / owner
+      predicate. Every object read or write must be scoped to the authenticated
+      subject (OWASP API Security Top 10 #1, BOLA). Confirm the ownership check.
+    patterns:
+      - pattern-regex: (?i)(select|delete|update)[\s\S]{0,200}?\bwhere\b\s+(?:\w+\.)?id\s*=\s*\$\{?\d?
+      - pattern-not-regex: (?i)user_id|owner_id|account_id|subject_id
+
+  # -------------------------------------------------------------------------
+  # Secrets must be resolved at runtime from the vault/op:// reference, never
+  # read from a committed file or hardcoded. This repo is public.
+  # -------------------------------------------------------------------------
+  - id: pullfm-no-hardcoded-upstream-secret
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Hardcoded credential-shaped literal. Secrets resolve at runtime from the
+      environment (populated from 1Password / the vault). Never inline a value.
+    patterns:
+      - pattern-either:
+          - pattern: $K = "sk_live_..."
+          - pattern: $K = "sk_test_..."
+          - pattern-regex: \b(?:apiKey|apiSecret|clientSecret|password|token)\s*[:=]\s*["'][A-Za-z0-9_\-]{24,}["']
+      - pattern-not-regex: op://
+      - pattern-not-regex: process\.env
+      - pattern-not-regex: (?i)(example|placeholder|changeme|redacted|test-only|fixture)
+
+  # -------------------------------------------------------------------------
+  # Upstream ToS compliance: MusicBrainz requires a descriptive User-Agent with
+  # contact info on every request and enforces 1 req/s. Calls must route through
+  # our rate-limited client, never raw fetch.
+  # -------------------------------------------------------------------------
+  - id: pullfm-musicbrainz-must-use-ratelimited-client
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Direct call to musicbrainz.org. All MusicBrainz traffic must go through
+      the shared rate-limited client (1 req/s + required User-Agent), or we risk
+      being blocked and violating their terms.
+    # The rate-limited client itself is the one sanctioned caller.
+    paths:
+      exclude:
+        - "**/musicbrainz/client.ts"
+        - "**/*.test.ts"
+    pattern-regex: (?i)\bfetch\s*\(\s*["'`][^"'`]*musicbrainz\.org
