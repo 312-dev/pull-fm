@@ -143,6 +143,9 @@ its ~20/min limit, under a load representing 10,000 users.
 pnpm scan:all
 ```
 
+All of the below run as blocking CI jobs on every push, and both workflows are
+green as of 2026-07-28.
+
 | Scanner                    | Result                              |
 | -------------------------- | ----------------------------------- |
 | gitleaks                   | no leaks (whole repo, full history) |
@@ -173,3 +176,10 @@ been reviewed by anyone other than its author.
   have ended the project inside the gate meant to prove it was ready.
 - **Gate 8 is a self-assessment, not an audit.** One person signing off on
   their own checklist is worth stating plainly.
+- **A control that looks configured can still be absent.** The custom Semgrep
+  rules were referenced by CI, validated locally against fixtures, and produced
+  clean runs, while never actually being in the repository: a `.gitignore` entry
+  meant for Semgrep's cache also matched `.semgrep/`. It surfaced only after the
+  job was changed to print its output instead of writing it to a SARIF file.
+  This is the argument for the distinction this document draws between green and
+  written, and for preferring evidence over configuration as proof.
