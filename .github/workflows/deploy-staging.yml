@@ -93,9 +93,9 @@ jobs:
           expected='${{ github.sha }}'
           deadline=$(( $(date +%s) + 480 ))
 
-          echo "waiting for https://api.staging.pull.fm/healthz to report ${expected}"
+          echo "waiting for https://api-staging.pull.fm/healthz to report ${expected}"
           while [ "$(date +%s)" -lt "${deadline}" ]; do
-            body=$(curl -sf --max-time 10 https://api.staging.pull.fm/healthz || true)
+            body=$(curl -sf --max-time 10 https://api-staging.pull.fm/healthz || true)
             actual=$(printf '%s' "${body}" | jq -r '.version // empty' 2>/dev/null || true)
 
             if [ "${actual}" = "${expected}" ]; then

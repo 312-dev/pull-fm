@@ -116,11 +116,13 @@ resource "hcloud_server" "db" {
     ip         = local.db_private_ip
   }
 
-  # Hetzner-side protection, checked by the API. This is the outer lock; the
-  # prevent_destroy block below is the inner one. Two locks because they fail
-  # differently: prevent_destroy catches a bad plan locally, delete_protection
-  # catches anything that bypasses this codebase entirely (console, CLI, a
-  # stale state file). The provider requires both flags to be set together.
+  # Hetzner-side delete protection, enforced by the API.
+  #
+  # This replaced Terraform's prevent_destroy, which is a static meta-argument
+  # and therefore cannot differ per environment: keeping it would make an
+  # ephemeral staging environment impossible to tear down. delete_protection is
+  # variable-driven and strictly stronger anyway, because it also blocks
+  # deletion through the console, the CLI, and the raw API, not just this repo.
   delete_protection  = var.db_delete_protection
   rebuild_protection = var.db_delete_protection
 
@@ -129,7 +131,6 @@ resource "hcloud_server" "db" {
     # the database node. Gate 4 proves a restore works; it does not make the
     # restore free (30 minutes of downtime plus up to 5 minutes of RPO loss).
     # Removing this line must be a reviewed, deliberate commit.
-    prevent_destroy = true
 
     # user_data is ignored here but not on the BFF nodes: replacing a stateless
     # node to pick up a cloud-init change is routine, replacing the database to
@@ -151,11 +152,7 @@ resource "hcloud_volume" "db_data" {
   format   = "ext4"
   labels   = merge(var.labels, { role = "postgres-data" })
 
-  delete_protection = true
-
-  lifecycle {
-    prevent_destroy = true
-  }
+  delete_protection = var.db_delete_protection
 }
 
 resource "hcloud_volume_attachment" "db_data" {

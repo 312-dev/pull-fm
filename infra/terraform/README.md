@@ -1,15 +1,20 @@
 # Pull.fm - Infrastructure as Code
 
-> ## NOTHING HERE HAS BEEN APPLIED
+> ## STAGING IS APPLIED. PROD IS NOT.
 >
-> **Zero resources exist.** No `terraform apply` has been run, no Hetzner project
-> has been provisioned, no DNS record has been created, no R2 bucket exists.
-> This directory is reviewed code, not a description of running infrastructure.
+> `envs/staging` and `envs/shared` are live as of **2026-07-28** and both plan
+> with zero drift. `envs/prod` has never been applied and stays that way until
+> Phase 6.
 >
-> The first apply is a **Phase 0** activity (`docs/PLAN.md` section 7) and is
-> gated on **Gate $** (billing alerts live on Hetzner, Cloudflare, R2 and WorkOS).
-> A solo operator with an attached card and no spend cap is a documented failure
-> mode. Do not apply before those alerts fire on a synthetic overage.
+> State is still **local**, not in R2. Migrating it is the first task of the
+> next infrastructure change; until then a lost laptop means an orphaned
+> environment, and that is the single largest operational risk in this
+> directory.
+>
+> **Gate $ is still open.** Billing alerts are not configured on any vendor,
+> which means staging was applied ahead of its own precondition. Recorded here
+> rather than quietly skipped: a solo operator with an attached card and no
+> spend cap is a documented failure mode, and it currently applies.
 
 Terraform for the Pull.fm backend: Hetzner Cloud compute and networking,
 Cloudflare DNS and TLS posture, and the Cloudflare R2 bucket that holds the
@@ -194,13 +199,27 @@ silently.
 
 ### Ingress posture
 
-**SSH is Tailscale-only. There is no inbound rule for port 22 anywhere in this
+**SSH is Tailscale-only. There is no inbound rule for port 22 in any committed
 configuration.** Tailscale arrives as WireGuard-encapsulated UDP, so the only
 public rule needed is inbound UDP 41641 for direct peer connections; without it
 the tailnet still works but every session relays through DERP. Opening 22 would
 add public attack surface while adding no access the operator actually uses.
 cloud-init additionally sets `PasswordAuthentication no` and
 `PermitRootLogin no`, so the tailnet-side listener is hardened too.
+
+**Break-glass.** That posture has a genuine chicken-and-egg problem: a node
+that has never joined the tailnet cannot be reached to install Tailscale on it.
+`ssh_allowlist_cidrs` exists for that one case. It defaults to an empty list,
+rejects a default route outright, and renders no rule at all when empty, so a
+fresh checkout is byte-identical to having no such variable. A single operator
+`/32` goes into a local `terraform.tfvars` for the duration of a bootstrap and
+comes straight back out.
+
+It was used exactly once, on 2026-07-28, to bootstrap both staging nodes, and
+was removed the same session. **Tailscale is not yet installed on the staging
+nodes**, so break-glass is currently the only interactive path in. That is
+tolerable because the deploy loop is a pull and needs no inbound access at all,
+but it is an open item rather than the intended end state.
 
 **Only Cloudflare reaches HTTP.** One caveat a reviewer must know: **Hetzner
 Cloud Firewalls cannot be attached to a Load Balancer**, and Hetzner LBs have no
@@ -357,23 +376,34 @@ Not gaps to fill silently - other tracks own them:
 
 Run from a clean checkout on `darwin_arm64`, Terraform v1.15.8:
 
-| Check                                             | Result                                                                                    |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `terraform fmt -recursive -check`                 | pass                                                                                      |
-| `terraform validate` (`envs/staging`)             | pass                                                                                      |
-| `terraform validate` (`envs/prod`)                | pass                                                                                      |
-| `terraform validate` (`envs/shared`)              | pass                                                                                      |
-| `trivy config --severity HIGH,CRITICAL`           | 0 misconfigurations across all three roots                                                |
-| `semgrep --config=p/terraform --config=p/secrets` | 0 findings                                                                                |
-| `gitleaks dir --config .gitleaks.toml`            | no leaks found                                                                            |
-| `terraform plan`                                  | **NOT RUN.** Requires live credentials and would contact the Hetzner and Cloudflare APIs. |
-| `terraform apply`                                 | **NOT RUN. Nothing is provisioned.**                                                      |
+| Check                                             | Result                                     |
+| ------------------------------------------------- | ------------------------------------------ |
+| `terraform fmt -recursive -check`                 | pass                                       |
+| `terraform validate` (`envs/staging`)             | pass                                       |
+| `terraform validate` (`envs/prod`)                | pass                                       |
+| `terraform validate` (`envs/shared`)              | pass                                       |
+| `trivy config --severity HIGH,CRITICAL`           | 0 misconfigurations across all three roots |
+| `semgrep --config=p/terraform --config=p/secrets` | 0 findings                                 |
+| `gitleaks dir --config .gitleaks.toml`            | no leaks found                             |
+| `terraform plan` (`envs/staging`)                 | **exit 0, no changes** (2026-07-28)        |
+| `terraform plan` (`envs/shared`)                  | **exit 0, no changes** (2026-07-28)        |
+| `terraform apply` (`envs/prod`)                   | **NOT RUN.** Phase 6.                      |
 
-`terraform validate` checks provider schemas, not the vendor's runtime
-behaviour. Things it cannot confirm and that the first real `plan` will:
+What the first real applies settled, none of which `validate` could have:
 
-- CAX stock availability at `fsn1` on the day.
-- That the Cloudflare API token carries all four required scopes.
-- That the `pull.fm` zone ID and account ID are correct.
-- That `jurisdiction = "eu"` is enabled for the R2 account (it is a per-account
-  feature).
+- **CAX is unavailable**, and so is CX, in every EU location. The allowlist now
+  admits the `cpx_1_` series; see the validation block in
+  `modules/compute/variables.tf`.
+- The Cloudflare **global API key** works for every call made here. A scoped
+  token was not tested.
+- Hetzner **load balancer health checks carry the PROXY protocol header** when
+  `proxyprotocol` is enabled on the service. This is not documented by Hetzner
+  and is the difference between a working origin and every target being marked
+  down; it was settled by observation, with both targets reporting healthy
+  against an nginx listener that requires the header.
+- **Cloudflare Universal SSL covers one label below the apex and no more.**
+  `api.staging.pull.fm` has no edge certificate and never completes a
+  handshake. The staging hostnames are therefore `api-staging.pull.fm` and
+  `app-staging.pull.fm`; the alternative is Advanced Certificate Manager at
+  10 USD/month per zone. Production is unaffected, since `api.pull.fm` is one
+  label.

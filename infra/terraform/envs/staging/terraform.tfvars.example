@@ -63,6 +63,18 @@ enable_proxy_protocol = true
 restrict_egress = true
 
 # --- naming ----------------------------------------------------------------
-api_hostname       = "api.staging.pull.fm"
-app_hostname       = "app.staging.pull.fm"
+# Single label under the apex, deliberately, and NOT api.staging.pull.fm.
+#
+# Cloudflare's free Universal SSL certificate covers `pull.fm` and `*.pull.fm`
+# and nothing deeper. A hostname two labels down has no edge certificate at
+# all, so every TLS handshake to it fails before it reaches the origin, and the
+# only fix Cloudflare sells is Advanced Certificate Manager at 10 USD/month per
+# zone. That is about a third of this environment's entire budget, spent purely
+# on the shape of a name. Production is unaffected: `api.pull.fm` is one label
+# and Universal SSL already covers it.
+#
+# Switching to the dotted form is a two-line change here plus buying ACM, if
+# the naming ever matters more than the money.
+api_hostname       = "api-staging.pull.fm"
+app_hostname       = "app-staging.pull.fm"
 backup_bucket_name = "pull-fm-backups-staging"

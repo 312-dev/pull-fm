@@ -94,6 +94,31 @@ deletion URL, or any security obligation. **Gate L and Gate S remain in force.**
 
 ---
 
+## 1b. Deviations recorded during execution (Gate 0, 2026-07-28)
+
+Four decisions in section 1 did not survive contact with the environment. Each
+is recorded here rather than quietly absorbed, with the trigger that would
+reverse it.
+
+| Locked in section 1                       | What actually shipped                                  | Why                                                                                                                                                                                                                                                                                               | Reversal trigger                                       |
+| ----------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| **Orchestration: Nomad v2.0.4**           | **Docker Compose under systemd**, staging only         | Staging is one application node with 2 GB. A single-node Nomad cluster spends 200-300 MB running a scheduler that places one task in the only location it could go. Every megabyte comes out of Postgres' page cache.                                                                             | A second application node, which Gate 6 needs anyway   |
+| **App secrets: Nomad variables**          | Root-owned `0600` env files placed from 1Password      | Follows from the above. The capability is unchanged: secrets are still injected as environment, still never in git, still sourced from 1Password.                                                                                                                                                 | Same as above; the compose file maps to a job spec 1:1 |
+| **Deploy: implied push**                  | **Pull.** A systemd timer polls the registry every 60s | A push deploy needs an inbound path to the origin and a CI credential with shell access to the node holding every user's OAuth tokens. Section 10's ingress posture exists to ensure neither. CI verifies from the public URL instead.                                                            | None expected; this is stronger, not weaker            |
+| **Staging hostnames `*.staging.pull.fm`** | `api-staging.pull.fm`, `app-staging.pull.fm`           | Cloudflare Universal SSL covers `pull.fm` and `*.pull.fm` and nothing deeper, so a two-label hostname has **no edge certificate and never completes a handshake**. The fix Cloudflare sells is ACM at 10 USD/month per zone, about a third of this environment's budget, for a naming preference. | Buy ACM, if the dotted form is ever worth 120 USD/year |
+
+**The hostname finding does not affect production.** `api.pull.fm` is one label
+below the apex and Universal SSL already covers it, so section 2's cost model
+stands unchanged.
+
+**Verifying from the public URL is the substantive change.** A deploy job that
+connects to a node and reports its own exit code proves the deployer ran. The
+staging job polls `/healthz` until it reports the commit SHA just built, which
+proves that commit is serving real traffic through Cloudflare, the load
+balancer, nginx and the container. Gate D should be written the same way.
+
+---
+
 ## 2. Corrected cost model
 
 v1 had no dollar figure. At the sizes it named, it would have cost **~$350-550/mo pre-launch**.
@@ -429,6 +454,42 @@ Recommendation: **option 2**. It preserves the load balancer, rolling deploys,
 and a separate database host, which are the parts the gates actually exercise,
 while the second app node adds cost without adding a new failure mode to test
 before there are users.
+
+---
+
+## 10c. Staging is ephemeral (decided 2026-07-28)
+
+Staging exists to run gates, not to serve traffic. A standing environment costs
+about **EUR 35/mo to sit idle**; Hetzner bills hourly, so a three hour gate
+session costs about **EUR 0.15**. Realistic usage lands near **EUR 1-2/mo**, a
+95 percent saving with no architectural loss.
+
+This is not a compromise: rebuilding from IaC is already a Gate 4 requirement,
+so tearing down exercises the capability we have to prove anyway. Keeping
+staging permanently running was the unusual choice, not destroying it.
+
+```bash
+./infra/staging-env.sh up      # provision for a gate run
+./infra/staging-env.sh down    # destroy compute, keep backups and DNS
+./infra/staging-env.sh cost    # current run rate
+```
+
+**Survives teardown:** the R2 backup bucket (free, and destroying it would make
+the Gate 4 restore drill meaningless), DNS records, Terraform state.
+**Does not survive:** servers, load balancer, private network, and all staging
+Postgres data. If a teardown loses something that mattered, it belonged in R2.
+
+**Enabling change:** Terraform's `prevent_destroy` was removed from the compute
+module. It is a static meta-argument that cannot vary per environment, so
+keeping it would have made staging impossible to tear down. Hetzner's
+`delete_protection` replaces it, is variable-driven, and is strictly stronger
+because it also blocks deletion through the console, the CLI, and the raw API
+rather than only through this repository. Production sets it true; staging false.
+
+**Production sizing, for later:** a single `cpx22` (EUR 22.99/mo) is expected to
+be sufficient. The cache-first architecture means upstream quota binds long
+before CPU does, so scaling pressure arrives as a licence problem rather than a
+compute one.
 
 ---
 
