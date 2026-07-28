@@ -20,6 +20,8 @@ export interface HealthDeps {
   checkDatabase?: () => Promise<boolean>;
   /** Returns true when Redis answers PING. */
   checkRedis?: () => Promise<boolean>;
+  /** Git commit this build came from. Reported so a deploy is externally verifiable. */
+  version?: string;
 }
 
 const startedAt = Date.now();
@@ -36,6 +38,9 @@ export async function registerHealthRoutes(
   app.get("/healthz", { logLevel: "silent" }, () => ({
     status: "ok",
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+    // The commit actually serving traffic. A deploy pipeline that only reports
+    // its own exit code proves the deployer ran, not that the code shipped.
+    version: deps.version ?? "unknown",
   }));
 
   /**

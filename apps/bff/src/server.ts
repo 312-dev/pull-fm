@@ -165,7 +165,7 @@ export async function buildServer(cfg: Config): Promise<FastifyInstance> {
       .send(internalProblem(req.id));
   });
 
-  await app.register(registerHealthRoutes);
+  await app.register(registerHealthRoutes, { version: cfg.BUILD_SHA });
   await app.register(registerV1Routes, { prefix: "/v1" });
 
   return app;

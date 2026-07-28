@@ -49,6 +49,16 @@ const schema = z.object({
   /** staging and production are distinct deployments of NODE_ENV=production. */
   DEPLOY_ENV: z.enum(["local", "staging", "production"]).default("local"),
 
+  /**
+   * Git commit this image was built from, baked in at build time.
+   *
+   * Surfaced by /healthz so a deploy can be verified from outside the box, by
+   * anything that can reach the public URL, without SSH and without trusting
+   * the deployer's own report that it worked. The staging deploy job asserts on
+   * exactly this value; see .github/workflows/deploy-staging.yml.
+   */
+  BUILD_SHA: z.string().default("unknown"),
+
   HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().int().positive().max(65535).default(3000),
   LOG_LEVEL: z
