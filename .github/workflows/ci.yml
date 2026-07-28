@@ -75,5 +75,21 @@ jobs:
       - name: format check
         run: pnpm format:check
 
-      - name: test
+      - name: build
+        run: pnpm build
+
+      - name: unit tests
         run: pnpm test
+
+      # Gate 1: migrations must be reversible over two full cycles, the account
+      # deletion cascade must be transactional, and the schema's defensive
+      # constraints must actually fire. See docs/PLAN.md.
+      - name: "Gate 1: migration verification"
+        run: node packages/db/scripts/verify-migrations.mjs
+        env:
+          ADMIN_URL: postgres://pullfm:pullfm_ci_not_a_secret@localhost:5432/postgres
+
+      # Gate 8: an accepted risk with no expiry is a permanently ignored
+      # finding, so an expired entry fails the build.
+      - name: "Gate 8: accepted-risk register"
+        run: node security/scripts/check-accepted-risks.mjs
