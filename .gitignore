@@ -1,0 +1,119 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - .gitignore
+# This repository is PUBLIC. Nothing secret may ever be committed.
+# Secrets are referenced as op:// URIs and resolved at runtime; never inlined.
+# ---------------------------------------------------------------------------
+
+# --- Secrets & credentials (deny broadly; there is no legitimate reason for
+# --- any of these to exist in the tree) -------------------------------------
+.env
+.env.*
+!.env.example
+*.env
+!example.env
+secrets/
+*.pem
+*.key
+!**/testdata/**/*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+id_rsa*
+id_ed25519*
+*.ppk
+credentials.json
+service-account*.json
+gha-creds-*.json
+.npmrc
+.netrc
+*.age
+*.kdbx
+
+# --- Terraform / OpenTofu ---------------------------------------------------
+.terraform/
+.terraform.lock.hcl.bak
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!*.auto.tfvars.example
+!example.tfvars
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+tfplan
+*.tfplan
+
+# --- Node / TypeScript ------------------------------------------------------
+node_modules/
+dist/
+build/
+out/
+.next/
+.turbo/
+*.tsbuildinfo
+.eslintcache
+coverage/
+.nyc_output/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+
+# --- Test / tooling artifacts -----------------------------------------------
+/tmp/
+.tmp/
+*.tmp
+test-results/
+playwright-report/
+.vitest/
+k6-results/
+*.k6.json
+zap-report.*
+.semgrep/
+.trivycache/
+sbom.json
+*.sarif
+
+# --- Databases / dumps (may contain real user data) -------------------------
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+pgdata/
+/backups/
+
+# --- OS / editor ------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+*.swp
+*.swo
+*~
+
+# --- Local dev --------------------------------------------------------------
+.direnv/
+.envrc.local
+.nomad-token
+.docker/

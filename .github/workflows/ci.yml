@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - build / typecheck / test
+#
+# Kept separate from security.yml so a CVE disclosure on unchanged code does not
+# masquerade as a build failure, and so the security gate can run on a schedule
+# independently of code changes.
+# ---------------------------------------------------------------------------
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: typecheck, lint, test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: pullfm
+          POSTGRES_PASSWORD: pullfm_ci_not_a_secret
+          POSTGRES_DB: pullfm_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pullfm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://pullfm:pullfm_ci_not_a_secret@localhost:5432/pullfm_test
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: install
+        run: pnpm install --frozen-lockfile
+
+      - name: typecheck
+        run: pnpm typecheck
+
+      - name: lint
+        run: pnpm lint
+
+      - name: format check
+        run: pnpm format:check
+
+      - name: test
+        run: pnpm test

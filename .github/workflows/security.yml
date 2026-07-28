@@ -1,0 +1,116 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - Security gates (Gate 8)
+#
+# BLOCKING on high/critical. This repo is public, so `secrets` runs first and
+# fails fast: a leaked credential in a public repo is compromised the moment it
+# is pushed, so the scan must gate the merge, not merely report on it.
+# ---------------------------------------------------------------------------
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Re-scan weekly: new CVEs land against unchanged code.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a secret committed earlier and reverted is still
+          # exposed in the object store and must still fail the build.
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
+  sast:
+    name: SAST (semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: semgrep scan
+        run: |
+          semgrep scan \
+            --config=p/default \
+            --config=p/typescript \
+            --config=p/nodejs \
+            --config=p/owasp-top-ten \
+            --config=p/secrets \
+            --config=p/dockerfile \
+            --config=p/terraform \
+            --config=.semgrep/ \
+            --error \
+            --severity=ERROR \
+            --sarif --output=semgrep.sarif \
+            --metrics=off
+      - name: upload sarif
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          if-no-files-found: ignore
+
+  deps:
+    name: dependencies + filesystem (trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table
+      - name: generate SBOM
+        if: always()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: cyclonedx
+          output: sbom.json
+      - name: upload SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+          if-no-files-found: ignore
+
+  iac:
+    name: IaC misconfiguration (trivy config)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: trivy config scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: table

@@ -1,0 +1,54 @@
+{
+  "name": "pull-fm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pull.fm - music discovery that respects ownership. Backend monorepo.",
+  "license": "Apache-2.0",
+  "author": "312.dev LLC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/312-dev/pull-fm.git"
+  },
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "scan:secrets": "gitleaks git --config .gitleaks.toml --redact --verbose",
+    "scan:sast": "semgrep scan --config=p/default --config=p/typescript --config=p/owasp-top-ten --config=.semgrep/ --severity=ERROR --metrics=off",
+    "scan:deps": "trivy fs . --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed",
+    "scan:all": "pnpm scan:secrets && pnpm scan:sast && pnpm scan:deps",
+    "stack:up": "docker compose -f docker-compose.dev.yml up -d",
+    "stack:down": "docker compose -f docker-compose.dev.yml down",
+    "stack:reset": "docker compose -f docker-compose.dev.yml down -v && pnpm stack:up",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.3.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.19.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,mjs}": [
+      "eslint --fix --max-warnings=0",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  }
+}

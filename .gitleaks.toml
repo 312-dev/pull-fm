@@ -1,0 +1,106 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - gitleaks configuration
+#
+# This repo is PUBLIC. Secret scanning is a BLOCKING CI gate (Gate 8) and runs
+# as a pre-commit hook locally. We extend the upstream default ruleset rather
+# than replacing it, then add rules for the specific vendors this project uses.
+#
+# Run locally:  gitleaks git   --config .gitleaks.toml --redact
+#               gitleaks dir   --config .gitleaks.toml --redact
+# ---------------------------------------------------------------------------
+
+title = "pull-fm"
+
+[extend]
+# Inherit all upstream default rules (AWS, GCP, Stripe, generic entropy, ...).
+useDefault = true
+
+# --- Project-specific vendor rules -----------------------------------------
+
+[[rules]]
+id = "workos-api-key"
+description = "WorkOS API key (sk_...)"
+regex = '''\bsk_(?:test|live)_[A-Za-z0-9_\-]{20,}\b'''
+keywords = ["sk_test_", "sk_live_"]
+tags = ["workos", "auth"]
+
+[[rules]]
+id = "lastfm-api-secret"
+description = "Last.fm API key or shared secret (32-char hex assigned to a lastfm-ish name)"
+regex = '''(?i)\b(?:last[_.-]?fm|lastfm)[_.-]?(?:api[_.-]?)?(?:key|secret)\b\s*[:=]\s*["']?\b([a-f0-9]{32})\b'''
+secretGroup = 1
+keywords = ["lastfm", "last_fm", "last-fm"]
+tags = ["lastfm"]
+
+[[rules]]
+id = "listenbrainz-user-token"
+description = "ListenBrainz user token (UUID assigned to a listenbrainz-ish name)"
+regex = '''(?i)\b(?:listen[_.-]?brainz|lb)[_.-]?(?:user[_.-]?)?token\b\s*[:=]\s*["']?\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b'''
+secretGroup = 1
+keywords = ["listenbrainz", "listen_brainz"]
+tags = ["listenbrainz", "per-user-token"]
+
+[[rules]]
+id = "hetzner-cloud-token"
+description = "Hetzner Cloud API token (64 alphanumeric chars)"
+regex = '''(?i)\b(?:hcloud|hetzner)[_.-]?(?:api[_.-]?)?token\b\s*[:=]\s*["']?\b([A-Za-z0-9]{64})\b'''
+secretGroup = 1
+keywords = ["hcloud", "hetzner"]
+tags = ["hetzner", "infra"]
+
+[[rules]]
+id = "cloudflare-api-token"
+description = "Cloudflare API token"
+regex = '''(?i)\b(?:cloudflare|cf)[_.-]?(?:api[_.-]?)?(?:token|key)\b\s*[:=]\s*["']?\b([A-Za-z0-9_-]{40})\b'''
+secretGroup = 1
+keywords = ["cloudflare", "cf_api"]
+tags = ["cloudflare", "infra"]
+
+[[rules]]
+id = "resend-api-key"
+description = "Resend API key (re_...)"
+regex = '''\bre_[A-Za-z0-9]{8,}_[A-Za-z0-9]{16,}\b'''
+keywords = ["re_"]
+tags = ["resend", "email"]
+
+[[rules]]
+id = "nomad-token"
+description = "Nomad ACL token (UUID assigned to a nomad-ish name)"
+regex = '''(?i)\bnomad[_.-]?(?:acl[_.-]?)?token\b\s*[:=]\s*["']?\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b'''
+secretGroup = 1
+keywords = ["nomad"]
+tags = ["nomad", "infra"]
+
+[[rules]]
+id = "pullfm-private-key-block"
+description = "Any PEM private key block"
+regex = '''-----BEGIN[ A-Z]*PRIVATE KEY-----'''
+keywords = ["BEGIN", "PRIVATE KEY"]
+tags = ["crypto"]
+
+# --- Global allowlist -------------------------------------------------------
+# Values here are PUBLIC BY DESIGN and must not trip the scanner.
+
+[[allowlists]]
+description = "Known-public, non-secret project identifiers and documentation placeholders"
+regexTarget = "match"
+regexes = [
+  # WorkOS Client ID is a public identifier (shipped to clients), not a secret.
+  '''client_01KYMZ05X60BJKZKY5RTA5YP8B''',
+  # op:// references contain a POINTER to a secret, never a secret value.
+  '''op://[A-Za-z0-9 _./-]+''',
+  # Obvious placeholders used in docs and examples.
+  '''(?i)(REPLACE_ME|CHANGEME|CHANGE_ME|YOUR_[A-Z_]+_HERE|<[a-z-]+>|xxxx+|placeholder|example\.com)''',
+]
+
+[[allowlists]]
+description = "Paths that legitimately contain fixture/sample credential-shaped strings"
+paths = [
+  '''\.gitleaks\.toml$''',
+  '''(^|/)LICENSE$''',
+  '''(^|/)pnpm-lock\.yaml$''',
+  '''(^|/)\.terraform\.lock\.hcl$''',
+  '''(^|/)docs/.*\.md$''',
+  '''(^|/).*\.example$''',
+  '''(^|/)security/testdata/''',
+]

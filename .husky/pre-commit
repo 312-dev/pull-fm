@@ -1,0 +1,24 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# Pull.fm pre-commit gate.
+#
+# This repo is PUBLIC. A secret is compromised the instant it is pushed, and
+# rewriting history does not un-leak it. So we block at commit time, which is
+# the last point where prevention is still cheap.
+# ---------------------------------------------------------------------------
+set -e
+
+if command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: scanning staged changes for secrets..."
+  # --staged scans the index only: fast, and exactly what is about to be committed.
+  gitleaks git --staged --config .gitleaks.toml --redact --no-banner
+else
+  echo "pre-commit: WARNING - gitleaks not installed, secret scan SKIPPED."
+  echo "            install it:  brew install gitleaks"
+  echo "            CI will still block, but fix your local setup."
+fi
+
+# Format/lint only the staged files. Skipped cleanly before the first install.
+if [ -d node_modules ]; then
+  pnpm exec lint-staged
+fi
