@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# Pull.fm staging deploy agent.
+#
+# The staging deploy is a PULL, not a push. A timer on the node polls the
+# registry for a new build of the tracked channel and applies it. The reasoning
+# is in infra/staging/README.md; the short version is that a push deploy needs
+# an inbound path and a long-lived CI credential with shell access to the box,
+# and the whole point of the ingress posture is that neither exists.
+#
+# Ordering matters and is not arbitrary:
+#   1. resolve the tag to an immutable digest
+#   2. bail out if it is what is already running
+#   3. run forward migrations with the NEW image, before it serves traffic
+#   4. only then swap the container
+#
+# Running migrations from the new image rather than a separate migration image
+# means the schema and the code that expects it can never be deployed apart.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+REPO=${PULLFM_IMAGE_REPO:-ghcr.io/312-dev/pull-fm/bff}
+CHANNEL=${PULLFM_CHANNEL:-main}
+COMPOSE_DIR=/opt/pullfm
+DEPLOY_ENV=/etc/pullfm/deploy.env
+APP_ENV=/etc/pullfm/bff.env
+
+log() { echo "[pullfm-deploy] $*"; }
+
+# --- 1. resolve the channel tag to a digest --------------------------------
+# `docker pull` on an unchanged tag is a cheap manifest HEAD, so polling this
+# once a minute costs a few hundred bytes.
+docker pull --quiet "${REPO}:${CHANNEL}" >/dev/null
+
+DIGEST=$(docker image inspect "${REPO}:${CHANNEL}" \
+  --format '{{index .RepoDigests 0}}' 2>/dev/null || true)
+
+if [ -z "${DIGEST}" ]; then
+  log "could not resolve a digest for ${REPO}:${CHANNEL}"
+  exit 1
+fi
+
+# --- 2. no-op when already current -----------------------------------------
+CURRENT=""
+if [ -f "${DEPLOY_ENV}" ]; then
+  # shellcheck disable=SC1090
+  CURRENT=$(grep -E '^BFF_IMAGE=' "${DEPLOY_ENV}" | cut -d= -f2- || true)
+fi
+
+RUNNING=$(docker inspect --format '{{.Image}}' pullfm-bff-1 2>/dev/null || true)
+
+if [ "${CURRENT}" = "${DIGEST}" ] && [ -n "${RUNNING}" ]; then
+  exit 0
+fi
+
+log "deploying ${DIGEST}"
+
+# --- 3. migrate with the new image, before it takes traffic ----------------
+# A migration failure must stop the deploy. The old container keeps serving in
+# the meantime, which is the correct outcome: a schema this build cannot get
+# into place is a build that must not run.
+log "running forward migrations"
+docker run --rm --network host --env-file "${APP_ENV}" \
+  "${DIGEST}" node /app/migrate.mjs
+
+# --- 4. swap the container -------------------------------------------------
+install -m 0640 -o root -g root /dev/null "${DEPLOY_ENV}.new"
+printf 'BFF_IMAGE=%s\n' "${DIGEST}" >"${DEPLOY_ENV}.new"
+mv "${DEPLOY_ENV}.new" "${DEPLOY_ENV}"
+
+cd "${COMPOSE_DIR}"
+docker compose --env-file "${DEPLOY_ENV}" up -d --remove-orphans
+
+# --- 5. prove it came up ---------------------------------------------------
+for _ in $(seq 1 30); do
+  if curl -fsS --max-time 3 http://127.0.0.1:3000/healthz >/dev/null 2>&1; then
+    log "healthy on ${DIGEST}"
+    # Keep the previous image so a rollback is a local retag rather than a
+    # registry round trip, but do not let the disk fill with every build.
+    docker image prune --force --filter "until=72h" >/dev/null || true
+    exit 0
+  fi
+  sleep 2
+done
+
+log "FAILED to become healthy within 60s on ${DIGEST}"
+docker compose --env-file "${DEPLOY_ENV}" logs --tail 50 bff || true
+exit 1

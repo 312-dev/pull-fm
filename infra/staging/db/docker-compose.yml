@@ -1,0 +1,138 @@
+# Pull.fm staging - data plane on the database node (10.20.1.21).
+#
+# Nothing here is reachable from the internet. The node has no public IPv4 at
+# all, and every published port is bound explicitly to the private address, so
+# a future change that gives the node a public interface does not silently
+# expose Postgres along with it.
+#
+# Deployed to /opt/pullfm-db/docker-compose.yml. Secrets come from
+# /etc/pullfm/db.env, which is root-owned 0600 and placed by bootstrap.sh from
+# 1Password. It is passed with --env-file so its values are available for
+# interpolation here; `env_file:` alone would not be.
+name: pullfm-db
+
+services:
+  postgres:
+    image: postgres:17.10-alpine3.24
+    restart: unless-stopped
+    command:
+      - postgres
+      # PgBouncer in transaction mode is what absorbs client concurrency
+      # (docs/PLAN.md Gate 1); it lands in Phase 1. Until then this is sized for
+      # a single BFF node with a pool of 10 plus headroom for migrations and
+      # psql sessions.
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=384MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=96MB
+      # WAL settings that pgBackRest needs in Phase 1. Set now because changing
+      # wal_level requires a restart, and doing it later means an outage during
+      # the backup work rather than during the build.
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=3
+      - -c
+      - archive_mode=on
+      # Replaced by the pgBackRest command in Phase 1. `true` archives nothing
+      # while still keeping archive_mode on, so enabling backups later is a
+      # config reload rather than a restart.
+      - -c
+      - archive_command=/bin/true
+      - -c
+      - log_min_duration_statement=1000
+      # log_statement stays off deliberately: 'all' would write query
+      # parameters, and the credential vault's ciphertext and the KEK id both
+      # travel as parameters. See docs/PLAN.md section 5.
+      - -c
+      - log_statement=none
+    environment:
+      POSTGRES_USER: pullfm
+      POSTGRES_DB: pullfm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    ports:
+      - "${PRIVATE_IP:?PRIVATE_IP is required}:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 900m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pullfm -d pullfm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- Cache: evictable ----------------------------------------------------
+  redis-cache:
+    image: redis:7.4.10-alpine3.21
+    restart: unless-stopped
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+    volumes:
+      - /etc/pullfm/redis/cache.conf:/usr/local/etc/redis/redis.conf:ro
+    ports:
+      - "${PRIVATE_IP}:6379:6379"
+    mem_limit: 320m
+    healthcheck:
+      # NOAUTH is a healthy answer: it proves the server is up and enforcing
+      # authentication. redis-cli exits 0 either way, so the reply itself has
+      # to be inspected, and passing the password in as an argument would put
+      # it in the container's process list.
+      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|NOAUTH'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- Quota and rate limit counters: MUST NOT evict -----------------------
+  # A separate instance, not a second logical database. Eviction policy in
+  # Redis is per-instance, so counters sharing an allkeys-lru instance with the
+  # cache are silently evicted by a cache-fill event and every rate limit then
+  # fails OPEN, with no error and no alert. See THREAT-MODEL T11 and the
+  # comment on REDIS_QUOTA_URL in apps/bff/src/config.ts.
+  redis-quota:
+    image: redis:7.4.10-alpine3.21
+    restart: unless-stopped
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+    volumes:
+      - /etc/pullfm/redis/quota.conf:/usr/local/etc/redis/redis.conf:ro
+      - redisquota:/data
+    ports:
+      - "${PRIVATE_IP}:6380:6379"
+    mem_limit: 192m
+    healthcheck:
+      # NOAUTH is a healthy answer: it proves the server is up and enforcing
+      # authentication. redis-cli exits 0 either way, so the reply itself has
+      # to be inspected, and passing the password in as an argument would put
+      # it in the container's process list.
+      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|NOAUTH'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pgdata:
+  redisquota:

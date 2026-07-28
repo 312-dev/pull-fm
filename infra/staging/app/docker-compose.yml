@@ -1,0 +1,61 @@
+# Pull.fm staging - BFF task on the application node.
+#
+# Deployed to /opt/pullfm/docker-compose.yml. See infra/staging/README.md for
+# why this is Compose rather than Nomad on a single 2 GB node, and what the
+# migration path back to Nomad is.
+name: pullfm
+
+services:
+  bff:
+    # Always a digest, never a tag. A mutable tag makes "did the new build
+    # actually start" unanswerable after the fact, and makes a rollback a
+    # matter of hoping the registry still points where it did. Written by
+    # /usr/local/bin/pullfm-deploy into /etc/pullfm/deploy.env.
+    image: ${BFF_IMAGE:?BFF_IMAGE must be pinned to a digest by pullfm-deploy}
+    restart: unless-stopped
+
+    # Root-owned, 0600, placed by bootstrap.sh from 1Password. Never in git,
+    # never in the image, never in the compose file.
+    env_file:
+      - /etc/pullfm/bff.env
+
+    # Bound to loopback. nginx is the only thing that may reach the BFF; the
+    # node's public interface must never carry an unterminated 3000.
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    # 2 GB node shared with nginx and the OS. A runaway task hits its own
+    # cgroup rather than triggering the kernel OOM killer against sshd.
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 0.8
+
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      # node rather than curl: the runtime image has no shell utilities, and
+      # adding some to satisfy a health check widens the attack surface of the
+      # container for the sake of a probe.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s

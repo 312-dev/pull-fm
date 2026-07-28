@@ -1,0 +1,14 @@
+[Unit]
+Description=Poll the registry for a new Pull.fm build
+
+[Timer]
+# Deploy latency budget for Gate 0 is ten minutes end to end. The image build
+# dominates it; this poll adds at most one minute.
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5s
+# Prevents a slow deploy from queueing further runs behind it.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

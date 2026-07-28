@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh the nginx Cloudflare edge allowlist
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pullfm-cf-ranges

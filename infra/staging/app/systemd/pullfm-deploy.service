@@ -1,0 +1,11 @@
+[Unit]
+Description=Pull.fm staging deploy agent (pull model)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pullfm-deploy
+# The timer fires every minute; a deploy that is still pulling a layer must not
+# have a second copy started underneath it.
+TimeoutStartSec=600
