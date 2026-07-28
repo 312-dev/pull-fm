@@ -1,0 +1,113 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - staging deploy (Gate 0, criterion 4).
+#
+# "A commit to main auto-deploys to staging in under ten minutes with no human
+# step." This workflow builds the image and then PROVES the deploy landed by
+# asking the public URL what commit it is serving. It does not push.
+#
+# The deploy itself is a pull: a systemd timer on the application node polls
+# the registry once a minute and applies any new digest (see
+# infra/staging/app/pullfm-deploy). That design is not an accident, and the
+# reasoning is in infra/staging/README.md. The short version: a push deploy
+# needs an inbound path to the origin and a long-lived credential in CI with
+# shell access to the box, and the entire ingress posture exists to ensure
+# neither of those things is true.
+#
+# The consequence for this workflow is the useful one: it cannot fake success.
+# A job that SSHes in and reports its own exit code proves the deployer ran. A
+# job that polls the public endpoint until it reports the new commit proves the
+# code is serving traffic, through Cloudflare, through the load balancer,
+# through nginx, from the container.
+# ---------------------------------------------------------------------------
+name: deploy-staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/312-dev/pull-fm/bff
+
+jobs:
+  build:
+    name: build and publish image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      sha: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: apps/bff/Dockerfile
+          push: true
+          # linux/amd64 only. The nodes are cpx12 (x86); a multi-arch build
+          # would double the build time to produce an image nothing runs.
+          platforms: linux/amd64
+          # `main` is what the node's deploy agent tracks. The SHA tag exists so
+          # a rollback names a commit rather than a digest nobody can read.
+          tags: |
+            ${{ env.IMAGE }}:main
+            ${{ env.IMAGE }}:${{ github.sha }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  verify:
+    name: verify staging is serving this commit
+    needs: build
+    runs-on: ubuntu-latest
+    # Gate 0's budget is ten minutes from commit to serving. The build job has
+    # already spent part of it, so this waits for what is left rather than for
+    # a fresh ten.
+    timeout-minutes: 9
+
+    steps:
+      - name: poll /healthz until it reports this commit
+        run: |
+          set -uo pipefail
+          expected='${{ github.sha }}'
+          deadline=$(( $(date +%s) + 480 ))
+
+          echo "waiting for https://api.staging.pull.fm/healthz to report ${expected}"
+          while [ "$(date +%s)" -lt "${deadline}" ]; do
+            body=$(curl -sf --max-time 10 https://api.staging.pull.fm/healthz || true)
+            actual=$(printf '%s' "${body}" | jq -r '.version // empty' 2>/dev/null || true)
+
+            if [ "${actual}" = "${expected}" ]; then
+              echo "staging is serving ${expected}"
+              printf '%s\n' "${body}"
+              exit 0
+            fi
+
+            echo "  serving '${actual:-<unreachable>}', waiting"
+            sleep 15
+          done
+
+          echo "::error::staging did not pick up ${expected} within the deploy budget."
+          echo "The node polls the registry every 60s; check 'journalctl -u pullfm-deploy' on the app node."
+          exit 1
