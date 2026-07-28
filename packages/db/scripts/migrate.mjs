@@ -25,17 +25,36 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import pg from "pg";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-// Resolved relative to this file so the layout inside a container image and the
-// layout in the repository can differ without a second code path.
-const MIGRATIONS_DIR =
-  process.env["MIGRATIONS_DIR"] ?? join(HERE, "..", "migrations");
+
+/**
+ * The migrations live one directory up in the repository (`packages/db/`) and
+ * alongside this file inside the runtime image, where the flattened layout is
+ * `/app/migrate.mjs` plus `/app/migrations`. Probing both beats maintaining a
+ * second code path, and beats a MIGRATIONS_DIR that must be remembered on the
+ * deploy path.
+ */
+function resolveMigrationsDir() {
+  const override = process.env["MIGRATIONS_DIR"];
+  if (override) return override;
+
+  for (const candidate of [
+    join(HERE, "migrations"),
+    join(HERE, "..", "migrations"),
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    `no migrations directory found next to ${HERE} or its parent. ` +
+      `Set MIGRATIONS_DIR to point at one.`,
+  );
+}
 
 // Any 64-bit constant works; it only has to be the same in every runner.
 const LOCK_KEY = 8_527_413_006_115_002n;
@@ -61,11 +80,13 @@ async function main() {
     throw new Error("DATABASE_URL is required");
   }
 
-  const files = readdirSync(MIGRATIONS_DIR)
+  const migrationsDir = resolveMigrationsDir();
+
+  const files = readdirSync(migrationsDir)
     .filter((f) => f.endsWith(".sql"))
     .sort();
   if (files.length === 0) {
-    throw new Error(`no migrations found in ${MIGRATIONS_DIR}`);
+    throw new Error(`no migrations found in ${migrationsDir}`);
   }
 
   const client = new pg.Client({ connectionString: url });
@@ -92,7 +113,7 @@ async function main() {
     let ran = 0;
     for (const file of files) {
       const version = file.replace(/\.sql$/, "");
-      const text = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
+      const text = readFileSync(join(migrationsDir, file), "utf8");
       const checksum = createHash("sha256").update(text).digest("hex");
 
       const previous = applied.get(version);

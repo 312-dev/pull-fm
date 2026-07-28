@@ -19,4 +19,6 @@ module "zone_settings" {
   hsts_max_age            = var.hsts_max_age
   hsts_include_subdomains = var.hsts_include_subdomains
   hsts_preload            = var.hsts_preload
+
+  enable_authenticated_origin_pulls = var.enable_authenticated_origin_pulls
 }

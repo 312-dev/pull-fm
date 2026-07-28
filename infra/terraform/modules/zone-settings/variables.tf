@@ -43,3 +43,9 @@ variable "hsts_preload" {
   description = "Set the preload flag. Only enable when submission to the browser preload list is actually intended: removal from that list takes months."
   default     = false
 }
+
+variable "enable_authenticated_origin_pulls" {
+  type        = bool
+  description = "Require a Cloudflare client certificate on every origin connection (mTLS). The origin must already be configured to verify it, and to check the certificate subject: the origin-pull CA is shared across all Cloudflare customers."
+  default     = false
+}

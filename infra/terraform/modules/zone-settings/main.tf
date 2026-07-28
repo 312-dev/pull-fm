@@ -53,3 +53,26 @@ resource "cloudflare_zone_setting" "security_header" {
     }
   }
 }
+
+# Authenticated Origin Pulls, zone wide.
+#
+# Cloudflare presents a client certificate on every origin connection, and the
+# origin refuses the handshake without one. This is the layer that survives an
+# attacker who learns the origin IP: the Hetzner firewall cannot help on the
+# load-balanced path (that traffic arrives on the private interface, and
+# Hetzner Cloud Firewalls filter only the public one), so mTLS is what makes
+# the origin unusable to anyone not coming through Cloudflare.
+#
+# The CA behind this is shared by every Cloudflare customer, so the origin must
+# also check the certificate subject. See the nginx config in
+# infra/staging/app/nginx-pullfm.conf; enabling this without that check is a
+# weaker control than it appears.
+#
+# Ordering: the origin must be configured to REQUIRE the client certificate
+# only once this is enabled, or Cloudflare's handshake fails and the zone
+# serves 526.
+resource "cloudflare_zone_setting" "authenticated_origin_pulls" {
+  zone_id    = var.zone_id
+  setting_id = "tls_client_auth"
+  value      = var.enable_authenticated_origin_pulls ? "on" : "off"
+}

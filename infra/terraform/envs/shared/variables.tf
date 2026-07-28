@@ -38,3 +38,9 @@ variable "hsts_preload" {
   description = "Set the HSTS preload flag."
   default     = false
 }
+
+variable "enable_authenticated_origin_pulls" {
+  type        = bool
+  description = "Zone-wide mTLS from Cloudflare to the origin. Requires the origin to present ssl_verify_client on with Cloudflare's origin-pull CA."
+  default     = false
+}
