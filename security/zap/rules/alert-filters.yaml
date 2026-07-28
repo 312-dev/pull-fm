@@ -1,0 +1,221 @@
+# =============================================================================
+# Pull.fm - ZAP rule configuration and alert filters
+#
+# CANONICAL SOURCE. Embedded verbatim into every plan under
+# security/zap/plans/ between the `--8<-- shared:` markers; drift is caught by
+# `node security/scripts/check-zap-fragments.mjs`.
+#
+# The content below is a fragment of a `jobs:` list (indented by two spaces so
+# it drops straight in), holding the two jobs that decide what counts as a
+# finding: `passiveScan-config` (thresholds) and `alertFilter` (per-alert
+# re-grading).
+#
+# GROUND RULES FOR ANYTHING ADDED HERE
+#
+#  1. Downgrade to "Info", not "False Positive", unless the alert is provably
+#     impossible. "Info" keeps the finding in the report where a human can see
+#     it change; "False Positive" hides it, and a hidden alert that becomes
+#     real later is invisible forever.
+#  2. Scope by `urlRegex` whenever the noise comes from specific routes. A
+#     global filter on a rule blinds every current and future endpoint.
+#  3. Every filter carries a comment naming the concrete Pull.fm behaviour that
+#     produces the noise. A filter whose reason is "it was noisy" is an
+#     undocumented accepted risk, and those belong in accepted-risks.md.
+#
+# Rule ids and names below were checked against https://www.zaproxy.org/docs/alerts/
+# =============================================================================
+# region:shared
+- type: passiveScan-config
+  parameters:
+    # Only alert on our own host. Combined with the context `urls`, this is
+    # what keeps upstream providers out of the report entirely.
+    scanOnlyInScope: true
+    # 10 is enough to show a systemic problem without a single missing header
+    # producing one alert per endpoint and burying everything else.
+    maxAlertsPerRule: 10
+    # Feed and search responses can be large; the default 0 means "scan
+    # everything", which on a catalogue payload wastes most of the scan
+    # budget on regexing artist biographies.
+    maxBodySizeInBytesToScan: 262144
+    enableTags: false
+    disableAllRules: false
+  rules:
+    # -- Kept at default (Medium) and deliberately NOT filtered ------------
+    # These are the passive findings that actually matter for this API, listed
+    # explicitly so a future reader can see they were considered rather than
+    # forgotten. Gate 8 requires Observatory >= A+, which is essentially a
+    # restatement of 10035 / 10038 / 10020 / 10021 all passing.
+    - id: 10035
+      name: "Strict-Transport-Security Header"
+      threshold: "Medium"
+    - id: 10038
+      name: "Content Security Policy (CSP) Header Not Set"
+      # A JSON API's correct CSP is `default-src 'none'; frame-ancestors 'none'`.
+      # It costs nothing and it is what makes 10020 and 90004 moot.
+      threshold: "Medium"
+    - id: 10020
+      name: "Anti-clickjacking Header"
+      threshold: "Medium"
+    - id: 10021
+      name: "X-Content-Type-Options Header Missing"
+      # Load-bearing here rather than cosmetic: upstream-supplied strings
+      # (artist names, biographies) are echoed in our responses, so content
+      # sniffing is a real path from an upstream value to script execution in
+      # a browser client. See THREAT-MODEL.md T17.
+      threshold: "Medium"
+    - id: 10098
+      name: "Cross-Domain Misconfiguration"
+      # A permissive Access-Control-Allow-Origin on a bearer-token API is a
+      # genuine finding. Never filter this one.
+      threshold: "Low"
+    - id: 10024
+      name: "Information Disclosure - Sensitive Information in URL"
+      # Lowered threshold on purpose. A per-user token or a session key
+      # appearing in a query string is the single worst passive finding this
+      # scan could produce (THREAT-MODEL.md A1), so we want it flagged early
+      # and noisily rather than tuned for signal.
+      threshold: "Low"
+    - id: 10023
+      name: "Information Disclosure - Debug Error Messages"
+      threshold: "Low"
+    - id: 90022
+      name: "Application Error Disclosure"
+      # RFC 9457 problem+json bodies must not carry stack traces or SQL text.
+      threshold: "Low"
+    - id: 10015
+      name: "Re-examine Cache-control Directives"
+      # True positive for this API: every authenticated response is per-user
+      # data and must be `Cache-Control: no-store`. A shared cache holding a
+      # /v1/feed or /v1/me body is a cross-subject disclosure.
+      threshold: "Medium"
+
+    # -- Rules that cannot apply to a JSON API -----------------------------
+    # Turned off at source rather than filtered after the fact, because they
+    # can only fire on HTML we do not serve. If Pull.fm ever serves a page,
+    # these must come back on.
+    - id: 10110
+      name: "Dangerous JS Functions"
+      threshold: "Off"
+    - id: 10109
+      name: "Modern Web Application"
+      threshold: "Off"
+    - id: 10063
+      name: "Permissions Policy Header Not Set"
+      # Permissions-Policy governs browser feature access on a document.
+      # There is no document. With `CSP: default-src 'none'` already required
+      # above, this adds a header for a scanner rather than for a user.
+      threshold: "Off"
+
+- type: alertFilter
+  parameters:
+    deleteGlobalAlerts: false
+  alertFilters:
+    # ---------------------------------------------------------------------
+    # 10096 Timestamp Disclosure - Unix
+    # Every response body in this API is timestamped by design: wishlist
+    # `created_at`, connection `access_expires_at`, feed section freshness,
+    # cursor payloads. The rule matches on integers that look like epochs, so
+    # it fires on essentially every endpoint and drowns the report.
+    # Downgraded, not suppressed, so a timestamp appearing somewhere new (an
+    # error body, a header) is still visible.
+    # ---------------------------------------------------------------------
+    - ruleId: 10096
+      ruleName: "Timestamp Disclosure - Unix"
+      newRisk: "Info"
+      context: "pullfm-api"
+
+    # ---------------------------------------------------------------------
+    # 10027 Information Disclosure - Suspicious Comments
+    # Matches SQL and debug keywords ("select", "from", "query", "admin")
+    # inside response bodies. Our bodies contain artist names, album titles
+    # and biographies drawn from MusicBrainz and Last.fm, so the corpus of
+    # real music metadata trips this constantly. There are no comments in
+    # JSON, so every hit is a keyword match on user-facing content.
+    # ---------------------------------------------------------------------
+    - ruleId: 10027
+      ruleName: "Information Disclosure - Suspicious Comments"
+      newRisk: "Info"
+      context: "pullfm-api"
+
+    # ---------------------------------------------------------------------
+    # 100000 An Error response code was returned by the server
+    # Only raised by the packaged API scan (zap-api-scan.py enables two extra
+    # passive scripts, 100000 and 100001), so this filter is inert in the
+    # Automation Framework plans and kept here for parity between the two
+    # entrypoints.
+    #
+    # Scoped to /v1/artists/{mbid}/events, which returns 501 BY DESIGN:
+    # docs/PLAN.md §1 disables events because no provider was approved. The
+    # scanner is correctly reporting a deliberate contract.
+    #
+    # NOT filtered globally, and that restraint is the point. The 401, 403
+    # and 404 responses this API returns to a foreign subject are the
+    # observable proof of the BOLA design (see BOLA-TESTING.md). Filtering
+    # 100000 across the whole context would hide exactly the responses we
+    # most want to see in a DAST report.
+    # ---------------------------------------------------------------------
+    - ruleId: 100000
+      ruleName: "An Error response code was returned by the server"
+      newRisk: "Info"
+      context: "pullfm-api"
+      url: ".*/v1/artists/[^/]+/events.*"
+      urlRegex: true
+
+    # ---------------------------------------------------------------------
+    # 100001 Unexpected Content-Type was returned
+    # docs/PLAN.md §6 mandates RFC 9457 problem details, so every error
+    # response is `application/problem+json`. The rule compares against the
+    # content types declared in the OpenAPI document and flags the mismatch.
+    # This is a correct design being reported as a defect.
+    #
+    # Scoped by evidence rather than by URL so that an unexpected content
+    # type anywhere else (text/html from an origin error page, for instance,
+    # which would mean requests are bypassing the app) still surfaces.
+    # ---------------------------------------------------------------------
+    - ruleId: 100001
+      ruleName: "Unexpected Content-Type was returned"
+      newRisk: "Info"
+      context: "pullfm-api"
+      evidence: "application/problem\\+json"
+      evidenceRegex: true
+
+    # ---------------------------------------------------------------------
+    # 10036 HTTP Server Response Header
+    # Cloudflare terminates TLS and always answers with `Server: cloudflare`.
+    # That is neither hideable by us nor informative to an attacker: the
+    # target is on Cloudflare, which is observable from DNS anyway.
+    # Scoped by evidence so that a `Server:` header leaking Fastify, Node or
+    # a version number (which WOULD be actionable) still alerts at full risk.
+    # ---------------------------------------------------------------------
+    - ruleId: 10036
+      ruleName: "HTTP Server Response Header"
+      newRisk: "Info"
+      context: "pullfm-api"
+      evidence: "cloudflare"
+
+    # ---------------------------------------------------------------------
+    # DELIBERATELY NOT FILTERED, recorded so the decision is not relitigated
+    # from scratch each time the report is read:
+    #
+    #   10202 Absence of Anti-CSRF Tokens
+    #   90005 Fetch Metadata Request Headers
+    #     Both are false positives IF sessions are bearer-token only, and
+    #     true positives IF the WorkOS AuthKit sealed session cookie is used
+    #     as the browser credential. That decision is Phase 2 work and is not
+    #     made yet, so filtering now would pre-commit the answer in the wrong
+    #     direction. Revisit when the session model is settled; if cookies
+    #     are used, these two alerts are the ones that matter most.
+    #
+    #   10054 Cookie without SameSite Attribute
+    #   90033 Loosely Scoped Cookie
+    #     Same condition. Cannot fire today because no cookie is set.
+    #
+    #   10049 Content Cacheability
+    #     Overlaps 10015 above but reports storability rather than
+    #     directives. Both are wanted: authenticated JSON must be no-store.
+    #
+    #   90004 Insufficient Site Isolation Against Spectre Vulnerability
+    #     Satisfied by Cross-Origin-Resource-Policy plus the CSP already
+    #     required above, so it should simply pass rather than be filtered.
+    # ---------------------------------------------------------------------
+# endregion:shared

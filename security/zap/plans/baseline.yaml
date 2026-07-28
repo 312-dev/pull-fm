@@ -1,0 +1,411 @@
+# =============================================================================
+# Pull.fm - ZAP baseline plan (PASSIVE ONLY). This is the Gate 8 DAST plan.
+#
+# Gate 8 (docs/PLAN.md §7): "Zero high/critical from Semgrep, Trivy, gitleaks,
+# ZAP baseline with pinned tool versions."
+#
+# WHAT THIS PLAN DOES
+#   Imports the DAST-safe OpenAPI document, lets ZAP issue one well-formed
+#   request per operation, waits for the passive scanner, and grades the result.
+#   It sends NO attack payloads, so it is safe to run against staging on every
+#   pull request and safe to run against a local BFF.
+#
+# WHY THERE IS NO SPIDER
+#   Pull.fm serves JSON, not HTML. A traditional or AJAX spider would find
+#   nothing a link parser can follow, and the one thing it might follow is an
+#   OAuth redirect to last.fm or listenbrainz.org. The OpenAPI document is the
+#   complete and authoritative route inventory (docs/PLAN.md Gate 2 makes the
+#   spec the source of truth), so import is strictly better than crawling.
+#
+# RUN IT:  see security/zap/README.md
+# =============================================================================
+
+# region:shared security/zap/context/pullfm-api.context.yaml
+env:
+  contexts:
+    - name: "pullfm-api"
+      urls:
+        - "${PULLFM_ZAP_TARGET}"
+
+      # No `includePaths`. Scope is everything under the target host, which is
+      # deliberate: /healthz, /readyz and especially /metrics must stay IN
+      # scope. Detecting that /metrics answers from the public edge is one of
+      # the things this scan exists to do, so excluding it to keep the report
+      # tidy would remove the finding we most want.
+      #
+      # Because `urls` pins scope to our own host, and every job below runs
+      # with `scanOnlyInScope: true`, ZAP will not attack last.fm,
+      # listenbrainz.org, itunes.apple.com or any other upstream even if a
+      # response redirects there. That is a hard requirement, not a nicety:
+      # actively scanning a provider we depend on is both a terms breach and
+      # the fastest route to the revocation described in docs/UPSTREAM-TERMS.md.
+      excludePaths:
+        # Completing an OAuth callback mid-scan mutates the connection under
+        # test and drives real traffic at a third party. Never touched.
+        - ".*/v1/connections/[^/]+/callback.*"
+        # Every hit generates a full personal-data export (GDPR portability).
+        # Fuzzing it is a self-inflicted denial of service on the worker tier.
+        - ".*/v1/me/export.*"
+
+      # NOTE ON DESTRUCTIVE OPERATIONS. ZAP context exclusions are URL-scoped,
+      # not method-scoped, so excluding `/v1/me` to protect `DELETE /v1/me`
+      # would also blind the scan to `GET /v1/me`. Method-level control is
+      # therefore enforced upstream of ZAP, by importing a pruned OpenAPI
+      # document (see security/zap/scripts/prune-openapi.mjs) rather than the
+      # full one. These excludePaths are the backstop for anything that reaches
+      # ZAP some other way, such as a redirect.
+
+      authentication:
+        # 'manual' is the correct choice when the credential is injected by the
+        # `replacer` job rather than obtained by ZAP itself. Pull.fm has no
+        # login form to drive: WorkOS AuthKit is social plus magic-link only
+        # (docs/PLAN.md §4), so there is no password for ZAP to submit and
+        # scripting a magic-link round trip would make the scan depend on an
+        # email inbox. The token is minted out of band and handed to ZAP.
+        method: "manual"
+
+      sessionManagement:
+        # Bearer tokens, not cookies: there is no session state for ZAP to
+        # track, and 'cookie' management would silently drop the Authorization
+        # header on some request paths.
+        method: "http"
+
+      technology:
+        # Turning off rules for stacks we do not run removes both scan time and
+        # a whole class of false positive. Pull.fm is Node 22 + Fastify +
+        # Postgres 17 on Linux/ARM64 behind Cloudflare.
+        # Authoritative tag list: https://www.zaproxy.org/techtags/ (use the
+        # last name only). Verify this list after any ZAP major upgrade; an
+        # unrecognised name is ignored rather than rejected, so a typo here
+        # fails silently and quietly re-enables the rules it was meant to skip.
+        exclude:
+          - "ASP"
+          - "C"
+          - "Db2"
+          - "Firebird"
+          - "IIS"
+          - "MacOS"
+          - "MsSQL"
+          - "MySQL"
+          - "Oracle"
+          - "PHP"
+          - "Python"
+          - "Ruby"
+          - "SQLite"
+          - "Sybase"
+          - "Tomcat"
+          - "Windows"
+
+  parameters:
+    # failOnError true: a plan that could not run must not report "no issues".
+    # A DAST job that silently no-ops is worse than no DAST job, because it
+    # produces a green tick that someone will later cite as evidence.
+    failOnError: true
+    # failOnWarning false: individual findings are graded by the `exitStatus`
+    # job at the end of each plan, so warnings here would double-count.
+    failOnWarning: false
+    continueOnFailure: false
+    progressToStdout: true
+# endregion:shared
+
+jobs:
+  # region:shared security/zap/rules/alert-filters.yaml
+  - type: passiveScan-config
+    parameters:
+      # Only alert on our own host. Combined with the context `urls`, this is
+      # what keeps upstream providers out of the report entirely.
+      scanOnlyInScope: true
+      # 10 is enough to show a systemic problem without a single missing header
+      # producing one alert per endpoint and burying everything else.
+      maxAlertsPerRule: 10
+      # Feed and search responses can be large; the default 0 means "scan
+      # everything", which on a catalogue payload wastes most of the scan
+      # budget on regexing artist biographies.
+      maxBodySizeInBytesToScan: 262144
+      enableTags: false
+      disableAllRules: false
+    rules:
+      # -- Kept at default (Medium) and deliberately NOT filtered ------------
+      # These are the passive findings that actually matter for this API, listed
+      # explicitly so a future reader can see they were considered rather than
+      # forgotten. Gate 8 requires Observatory >= A+, which is essentially a
+      # restatement of 10035 / 10038 / 10020 / 10021 all passing.
+      - id: 10035
+        name: "Strict-Transport-Security Header"
+        threshold: "Medium"
+      - id: 10038
+        name: "Content Security Policy (CSP) Header Not Set"
+        # A JSON API's correct CSP is `default-src 'none'; frame-ancestors 'none'`.
+        # It costs nothing and it is what makes 10020 and 90004 moot.
+        threshold: "Medium"
+      - id: 10020
+        name: "Anti-clickjacking Header"
+        threshold: "Medium"
+      - id: 10021
+        name: "X-Content-Type-Options Header Missing"
+        # Load-bearing here rather than cosmetic: upstream-supplied strings
+        # (artist names, biographies) are echoed in our responses, so content
+        # sniffing is a real path from an upstream value to script execution in
+        # a browser client. See THREAT-MODEL.md T17.
+        threshold: "Medium"
+      - id: 10098
+        name: "Cross-Domain Misconfiguration"
+        # A permissive Access-Control-Allow-Origin on a bearer-token API is a
+        # genuine finding. Never filter this one.
+        threshold: "Low"
+      - id: 10024
+        name: "Information Disclosure - Sensitive Information in URL"
+        # Lowered threshold on purpose. A per-user token or a session key
+        # appearing in a query string is the single worst passive finding this
+        # scan could produce (THREAT-MODEL.md A1), so we want it flagged early
+        # and noisily rather than tuned for signal.
+        threshold: "Low"
+      - id: 10023
+        name: "Information Disclosure - Debug Error Messages"
+        threshold: "Low"
+      - id: 90022
+        name: "Application Error Disclosure"
+        # RFC 9457 problem+json bodies must not carry stack traces or SQL text.
+        threshold: "Low"
+      - id: 10015
+        name: "Re-examine Cache-control Directives"
+        # True positive for this API: every authenticated response is per-user
+        # data and must be `Cache-Control: no-store`. A shared cache holding a
+        # /v1/feed or /v1/me body is a cross-subject disclosure.
+        threshold: "Medium"
+
+      # -- Rules that cannot apply to a JSON API -----------------------------
+      # Turned off at source rather than filtered after the fact, because they
+      # can only fire on HTML we do not serve. If Pull.fm ever serves a page,
+      # these must come back on.
+      - id: 10110
+        name: "Dangerous JS Functions"
+        threshold: "Off"
+      - id: 10109
+        name: "Modern Web Application"
+        threshold: "Off"
+      - id: 10063
+        name: "Permissions Policy Header Not Set"
+        # Permissions-Policy governs browser feature access on a document.
+        # There is no document. With `CSP: default-src 'none'` already required
+        # above, this adds a header for a scanner rather than for a user.
+        threshold: "Off"
+
+  - type: alertFilter
+    parameters:
+      deleteGlobalAlerts: false
+    alertFilters:
+      # ---------------------------------------------------------------------
+      # 10096 Timestamp Disclosure - Unix
+      # Every response body in this API is timestamped by design: wishlist
+      # `created_at`, connection `access_expires_at`, feed section freshness,
+      # cursor payloads. The rule matches on integers that look like epochs, so
+      # it fires on essentially every endpoint and drowns the report.
+      # Downgraded, not suppressed, so a timestamp appearing somewhere new (an
+      # error body, a header) is still visible.
+      # ---------------------------------------------------------------------
+      - ruleId: 10096
+        ruleName: "Timestamp Disclosure - Unix"
+        newRisk: "Info"
+        context: "pullfm-api"
+
+      # ---------------------------------------------------------------------
+      # 10027 Information Disclosure - Suspicious Comments
+      # Matches SQL and debug keywords ("select", "from", "query", "admin")
+      # inside response bodies. Our bodies contain artist names, album titles
+      # and biographies drawn from MusicBrainz and Last.fm, so the corpus of
+      # real music metadata trips this constantly. There are no comments in
+      # JSON, so every hit is a keyword match on user-facing content.
+      # ---------------------------------------------------------------------
+      - ruleId: 10027
+        ruleName: "Information Disclosure - Suspicious Comments"
+        newRisk: "Info"
+        context: "pullfm-api"
+
+      # ---------------------------------------------------------------------
+      # 100000 An Error response code was returned by the server
+      # Only raised by the packaged API scan (zap-api-scan.py enables two extra
+      # passive scripts, 100000 and 100001), so this filter is inert in the
+      # Automation Framework plans and kept here for parity between the two
+      # entrypoints.
+      #
+      # Scoped to /v1/artists/{mbid}/events, which returns 501 BY DESIGN:
+      # docs/PLAN.md §1 disables events because no provider was approved. The
+      # scanner is correctly reporting a deliberate contract.
+      #
+      # NOT filtered globally, and that restraint is the point. The 401, 403
+      # and 404 responses this API returns to a foreign subject are the
+      # observable proof of the BOLA design (see BOLA-TESTING.md). Filtering
+      # 100000 across the whole context would hide exactly the responses we
+      # most want to see in a DAST report.
+      # ---------------------------------------------------------------------
+      - ruleId: 100000
+        ruleName: "An Error response code was returned by the server"
+        newRisk: "Info"
+        context: "pullfm-api"
+        url: ".*/v1/artists/[^/]+/events.*"
+        urlRegex: true
+
+      # ---------------------------------------------------------------------
+      # 100001 Unexpected Content-Type was returned
+      # docs/PLAN.md §6 mandates RFC 9457 problem details, so every error
+      # response is `application/problem+json`. The rule compares against the
+      # content types declared in the OpenAPI document and flags the mismatch.
+      # This is a correct design being reported as a defect.
+      #
+      # Scoped by evidence rather than by URL so that an unexpected content
+      # type anywhere else (text/html from an origin error page, for instance,
+      # which would mean requests are bypassing the app) still surfaces.
+      # ---------------------------------------------------------------------
+      - ruleId: 100001
+        ruleName: "Unexpected Content-Type was returned"
+        newRisk: "Info"
+        context: "pullfm-api"
+        evidence: "application/problem\\+json"
+        evidenceRegex: true
+
+      # ---------------------------------------------------------------------
+      # 10036 HTTP Server Response Header
+      # Cloudflare terminates TLS and always answers with `Server: cloudflare`.
+      # That is neither hideable by us nor informative to an attacker: the
+      # target is on Cloudflare, which is observable from DNS anyway.
+      # Scoped by evidence so that a `Server:` header leaking Fastify, Node or
+      # a version number (which WOULD be actionable) still alerts at full risk.
+      # ---------------------------------------------------------------------
+      - ruleId: 10036
+        ruleName: "HTTP Server Response Header"
+        newRisk: "Info"
+        context: "pullfm-api"
+        evidence: "cloudflare"
+
+      # ---------------------------------------------------------------------
+      # DELIBERATELY NOT FILTERED, recorded so the decision is not relitigated
+      # from scratch each time the report is read:
+      #
+      #   10202 Absence of Anti-CSRF Tokens
+      #   90005 Fetch Metadata Request Headers
+      #     Both are false positives IF sessions are bearer-token only, and
+      #     true positives IF the WorkOS AuthKit sealed session cookie is used
+      #     as the browser credential. That decision is Phase 2 work and is not
+      #     made yet, so filtering now would pre-commit the answer in the wrong
+      #     direction. Revisit when the session model is settled; if cookies
+      #     are used, these two alerts are the ones that matter most.
+      #
+      #   10054 Cookie without SameSite Attribute
+      #   90033 Loosely Scoped Cookie
+      #     Same condition. Cannot fire today because no cookie is set.
+      #
+      #   10049 Content Cacheability
+      #     Overlaps 10015 above but reports storability rather than
+      #     directives. Both are wanted: authenticated JSON must be no-store.
+      #
+      #   90004 Insufficient Site Isolation Against Spectre Vulnerability
+      #     Satisfied by Cross-Origin-Resource-Policy plus the CSP already
+      #     required above, so it should simply pass rather than be filtered.
+      # ---------------------------------------------------------------------
+  # endregion:shared
+
+  # ---------------------------------------------------------------------------
+  # Authentication. WorkOS AuthKit issues bearer JWTs and there is no password
+  # to submit (docs/PLAN.md §4: social plus magic-link only), so the credential
+  # is injected on every in-scope request rather than obtained by ZAP.
+  #
+  # `tokenProcessing: false` because the value is a plain JWT with no {{...}}
+  # token syntax that ZAP should try to expand.
+  # ---------------------------------------------------------------------------
+  - type: replacer
+    parameters:
+      deleteAllRules: true
+    rules:
+      - description: "Inject the DAST subject's bearer token"
+        url: "${PULLFM_ZAP_TARGET}.*"
+        matchType: "req_header"
+        matchString: "Authorization"
+        matchRegex: false
+        replacementString: "Bearer ${PULLFM_ZAP_TOKEN}"
+        tokenProcessing: false
+
+  # ---------------------------------------------------------------------------
+  # Fail fast if the token is not working.
+  #
+  # This job is the difference between a real scan and a false green. If the
+  # bearer token is expired, wrong, or silently dropped, every subsequent
+  # request returns 401, the passive scanner finds nothing interesting, and the
+  # plan exits 0 with an empty report that looks exactly like success. Asserting
+  # a 200 on GET /v1/me up front makes that failure mode loud.
+  #
+  # The `url` test additionally proves we are talking to the API rather than to
+  # a Cloudflare error page or a maintenance-mode 503 body.
+  # ---------------------------------------------------------------------------
+  - type: requestor
+    requests:
+      - name: "auth sanity check"
+        url: "${PULLFM_ZAP_TARGET}/v1/me"
+        method: "GET"
+        responseCode: 200
+    tests:
+      - name: "GET /v1/me returns a JSON subject, so the token is live"
+        type: "url"
+        url: "${PULLFM_ZAP_TARGET}/v1/me"
+        operator: "and"
+        responseHeaderRegex: "(?i)content-type:\\s*application/json"
+        responseBodyRegex: "\"id\"\\s*:"
+        onFail: "error"
+
+  # ---------------------------------------------------------------------------
+  # Route discovery. PULLFM_ZAP_OPENAPI must point at the DAST-SAFE document
+  # emitted by security/zap/scripts/prune-openapi.mjs, never the raw spec.
+  #
+  # The importer sends a request for every operation it finds. Against the raw
+  # spec that includes DELETE /v1/me, which would delete the DAST subject
+  # mid-run and turn the rest of the scan into 401s. ZAP context exclusions
+  # cannot prevent this because they are URL-scoped, not method-scoped.
+  # ---------------------------------------------------------------------------
+  - type: openapi
+    parameters:
+      apiFile: "${PULLFM_ZAP_OPENAPI}"
+      targetUrl: "${PULLFM_ZAP_TARGET}"
+      context: "pullfm-api"
+
+  - type: passiveScan-wait
+    parameters:
+      # Bounded so a stuck queue fails the job instead of hanging the CI runner
+      # until the workflow timeout.
+      maxDuration: 5
+
+  # ---------------------------------------------------------------------------
+  # Reports. SARIF is what GitHub code scanning ingests; the HTML copy is what a
+  # human reads when triaging. Both are written to the mounted working directory.
+  # ---------------------------------------------------------------------------
+  - type: report
+    parameters:
+      template: "sarif-json"
+      reportDir: "/zap/wrk/reports"
+      reportFile: "zap-baseline.sarif"
+      reportTitle: "Pull.fm ZAP baseline"
+      reportDescription: "Passive DAST against the Pull.fm platform API."
+    risks: ["high", "medium", "low", "info"]
+
+  - type: report
+    parameters:
+      template: "traditional-html"
+      reportDir: "/zap/wrk/reports"
+      reportFile: "zap-baseline.html"
+      reportTitle: "Pull.fm ZAP baseline"
+      reportDescription: "Passive DAST against the Pull.fm platform API."
+    risks: ["high", "medium", "low", "info"]
+
+  # ---------------------------------------------------------------------------
+  # Gate 8 grading. High is a build failure. Medium is a warning that must be
+  # either fixed or written into security/accepted-risks.md with an expiry;
+  # it is intentionally not silent and intentionally not blocking, because a
+  # blocking medium on a solo project produces filter-and-forget behaviour.
+  # ---------------------------------------------------------------------------
+  - type: exitStatus
+    alwaysRun: true
+    parameters:
+      errorLevel: "High"
+      warnLevel: "Medium"
+      okExitValue: 0
+      errorExitValue: 1
+      warnExitValue: 0

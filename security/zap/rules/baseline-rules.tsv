@@ -1,0 +1,84 @@
+# Pull.fm - rule configuration for the PACKAGED ZAP scans (zap-baseline.py and
+# zap-api-scan.py), which take this file with -c and the GitHub Action takes it
+# as `rules_file_name`.
+#
+# TAB-SEPARATED. Format:  <ruleId>\t<IGNORE|WARN|FAIL>\t(<comment>)
+# ZAP also accepts     :  <ruleId>\tOUTOFSCOPE\t<url regex>
+# Do not convert the tabs to spaces; the parser is literal about them.
+#
+# WHY THIS FILE EXISTS ALONGSIDE security/zap/rules/alert-filters.yaml
+#
+# Two entrypoints, two config formats, same decisions:
+#   - the Automation Framework plans under security/zap/plans/ are the primary
+#     path and take their tuning from alert-filters.yaml;
+#   - the packaged scans (a one-line docker run, and the zaproxy GitHub Action)
+#     cannot read an AF plan and need this.
+# Keep the two in agreement. Where they differ, alert-filters.yaml wins, because
+# that is the file the gating scan actually reads.
+#
+# Grading intent, matching Gate 8 ("zero high/critical"):
+#   FAIL   -> blocks the build
+#   WARN   -> reported, does not block (run the packaged scan with -I)
+#   IGNORE -> suppressed, and every IGNORE below must justify itself
+#
+# Rule ids and names verified against https://www.zaproxy.org/docs/alerts/
+
+# --- Blocking -----------------------------------------------------------------
+# Transport and header controls. Gate 8 also requires Mozilla Observatory >= A+,
+# which is broadly a restatement of these four passing.
+10035	FAIL	(Strict-Transport-Security Header)
+10038	FAIL	(Content Security Policy (CSP) Header Not Set - a JSON API's correct CSP is "default-src 'none'; frame-ancestors 'none'")
+10021	FAIL	(X-Content-Type-Options Header Missing - load-bearing here: upstream-supplied artist names and biographies are echoed in our responses, so sniffing is a real path from an upstream value to script execution)
+10020	FAIL	(Anti-clickjacking Header)
+
+# Disclosure. A per-user ListenBrainz token or Last.fm session key surfacing in a
+# URL, an error body or a debug message is the worst outcome this scan can find
+# (THREAT-MODEL.md asset A1), so these block rather than warn.
+10024	FAIL	(Information Disclosure - Sensitive Information in URL)
+10023	FAIL	(Information Disclosure - Debug Error Messages)
+90022	FAIL	(Application Error Disclosure - RFC 9457 problem+json bodies must carry no stack trace or SQL text)
+
+# Authenticated per-user JSON must be Cache-Control: no-store. A shared cache
+# holding a /v1/feed or /v1/me body is a cross-subject disclosure.
+10015	FAIL	(Re-examine Cache-control Directives)
+
+# A permissive Access-Control-Allow-Origin on a bearer-token API is a real
+# finding, not a hardening nit.
+10098	FAIL	(Cross-Domain Misconfiguration)
+
+# --- Reported, not blocking ---------------------------------------------------
+10049	WARN	(Content Cacheability - overlaps 10015 but reports storability rather than directives; both are wanted)
+90004	WARN	(Insufficient Site Isolation Against Spectre Vulnerability - satisfied by CORP plus the CSP above, so this should simply pass)
+10037	WARN	(Server Leaks Information via "X-Powered-By" HTTP Response Header Field(s) - Fastify does not set it, so a hit means something in front of us does)
+
+# Undecided by design, NOT ignored. Both are false positives if sessions are
+# bearer-token only, and true positives if the WorkOS AuthKit sealed session
+# cookie becomes the browser credential. That decision is Phase 2 work
+# (docs/PLAN.md §4), so suppressing them now would pre-commit the answer in the
+# wrong direction.
+10202	WARN	(Absence of Anti-CSRF Tokens - revisit once the session model is settled)
+90005	WARN	(Fetch Metadata Request Headers - revisit once the session model is settled)
+10054	WARN	(Cookie without SameSite Attribute - cannot fire today, no cookie is set)
+90033	WARN	(Loosely Scoped Cookie - cannot fire today, no cookie is set)
+
+# --- Suppressed ---------------------------------------------------------------
+# Every line here is an assertion that the rule cannot produce a true positive
+# against this system. If one of those assertions stops holding, the line is a
+# vulnerability, so each carries its reason.
+
+10096	IGNORE	(Timestamp Disclosure - Unix: every response is timestamped by design - wishlist created_at, connection access_expires_at, cursor payloads - so this fires on essentially every endpoint)
+10027	IGNORE	(Information Disclosure - Suspicious Comments: matches SQL and debug keywords inside response bodies, and our bodies are artist names, album titles and biographies from MusicBrainz and Last.fm. There are no comments in JSON, so every hit is a keyword match on user-facing content)
+10063	IGNORE	(Permissions Policy Header Not Set: governs browser feature access on a document, and there is no document. The CSP above already denies everything)
+10110	IGNORE	(Dangerous JS Functions: requires JavaScript in the response, and this API serves none)
+10109	IGNORE	(Modern Web Application: informational, and always true of an API)
+10036	IGNORE	(HTTP Server Response Header: Cloudflare always answers "Server: cloudflare", which is neither hideable by us nor informative - the target's use of Cloudflare is visible from DNS. Note this is broader than the equivalent alert filter in alert-filters.yaml, which scopes the suppression by evidence so a leaked Fastify or Node version still alerts. The packaged-scan config format cannot express that, which is one reason the AF plan is the gating path)
+
+# 100000 and 100001 are raised only by zap-api-scan.py, which enables two extra
+# passive scripts. Scoped rather than suppressed, because the 401/403/404
+# responses this API returns to a foreign subject are the observable proof of the
+# BOLA design (BOLA-TESTING.md) and must stay visible.
+#
+# /v1/artists/{mbid}/events returns 501 BY DESIGN: docs/PLAN.md §1 disables
+# events because no provider was approved.
+100000	OUTOFSCOPE	.*/v1/artists/[^/]+/events.*
+100001	WARN	(Unexpected Content-Type was returned: fires on application/problem+json, which docs/PLAN.md §6 mandates for every error. Left as a warning so an unexpected text/html - which would mean requests are bypassing the app - still shows up)

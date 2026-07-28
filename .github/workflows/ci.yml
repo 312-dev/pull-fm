@@ -105,3 +105,14 @@ jobs:
       # finding, so an expired entry fails the build.
       - name: "Gate 8: accepted-risk register"
         run: node security/scripts/check-accepted-risks.mjs
+
+      # Gate 8: a tag can be repointed at different code by whoever controls
+      # the upstream namespace, and that code runs against our checked-out
+      # source. A commit SHA cannot be moved.
+      - name: "Gate 8: action pinning"
+        run: node security/scripts/check-action-pinning.mjs
+
+      - name: "security tooling self-tests"
+        run: |
+          node --test security/scripts/check-accepted-risks.test.mjs
+          node --test security/bola/route-matrix.test.mjs

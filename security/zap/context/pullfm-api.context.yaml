@@ -1,0 +1,103 @@
+# =============================================================================
+# Pull.fm - ZAP context definition (Automation Framework `env` block)
+#
+# CANONICAL SOURCE. This file is embedded verbatim into every plan under
+# security/zap/plans/ between the `--8<-- shared:` markers. The plans are
+# self-contained on purpose (an operator can hand any one of them straight to
+# `zap.sh -autorun` with no build step), and `node security/scripts/
+# check-zap-fragments.mjs` fails CI if a copy drifts from this file.
+#
+# Variables, supplied as process environment variables to the ZAP container:
+#   PULLFM_ZAP_TARGET    base URL, e.g. https://api.staging.pull.fm
+#                        or http://host.docker.internal:3000 for a local BFF
+#   PULLFM_ZAP_OPENAPI   path (inside the container) to the DAST-SAFE spec
+#                        produced by security/zap/scripts/prune-openapi.mjs
+#   PULLFM_ZAP_TOKEN     bearer token for the DAST test subject
+# =============================================================================
+# region:shared
+env:
+  contexts:
+    - name: "pullfm-api"
+      urls:
+        - "${PULLFM_ZAP_TARGET}"
+
+      # No `includePaths`. Scope is everything under the target host, which is
+      # deliberate: /healthz, /readyz and especially /metrics must stay IN
+      # scope. Detecting that /metrics answers from the public edge is one of
+      # the things this scan exists to do, so excluding it to keep the report
+      # tidy would remove the finding we most want.
+      #
+      # Because `urls` pins scope to our own host, and every job below runs
+      # with `scanOnlyInScope: true`, ZAP will not attack last.fm,
+      # listenbrainz.org, itunes.apple.com or any other upstream even if a
+      # response redirects there. That is a hard requirement, not a nicety:
+      # actively scanning a provider we depend on is both a terms breach and
+      # the fastest route to the revocation described in docs/UPSTREAM-TERMS.md.
+      excludePaths:
+        # Completing an OAuth callback mid-scan mutates the connection under
+        # test and drives real traffic at a third party. Never touched.
+        - ".*/v1/connections/[^/]+/callback.*"
+        # Every hit generates a full personal-data export (GDPR portability).
+        # Fuzzing it is a self-inflicted denial of service on the worker tier.
+        - ".*/v1/me/export.*"
+
+      # NOTE ON DESTRUCTIVE OPERATIONS. ZAP context exclusions are URL-scoped,
+      # not method-scoped, so excluding `/v1/me` to protect `DELETE /v1/me`
+      # would also blind the scan to `GET /v1/me`. Method-level control is
+      # therefore enforced upstream of ZAP, by importing a pruned OpenAPI
+      # document (see security/zap/scripts/prune-openapi.mjs) rather than the
+      # full one. These excludePaths are the backstop for anything that reaches
+      # ZAP some other way, such as a redirect.
+
+      authentication:
+        # 'manual' is the correct choice when the credential is injected by the
+        # `replacer` job rather than obtained by ZAP itself. Pull.fm has no
+        # login form to drive: WorkOS AuthKit is social plus magic-link only
+        # (docs/PLAN.md §4), so there is no password for ZAP to submit and
+        # scripting a magic-link round trip would make the scan depend on an
+        # email inbox. The token is minted out of band and handed to ZAP.
+        method: "manual"
+
+      sessionManagement:
+        # Bearer tokens, not cookies: there is no session state for ZAP to
+        # track, and 'cookie' management would silently drop the Authorization
+        # header on some request paths.
+        method: "http"
+
+      technology:
+        # Turning off rules for stacks we do not run removes both scan time and
+        # a whole class of false positive. Pull.fm is Node 22 + Fastify +
+        # Postgres 17 on Linux/ARM64 behind Cloudflare.
+        # Authoritative tag list: https://www.zaproxy.org/techtags/ (use the
+        # last name only). Verify this list after any ZAP major upgrade; an
+        # unrecognised name is ignored rather than rejected, so a typo here
+        # fails silently and quietly re-enables the rules it was meant to skip.
+        exclude:
+          - "ASP"
+          - "C"
+          - "Db2"
+          - "Firebird"
+          - "IIS"
+          - "MacOS"
+          - "MsSQL"
+          - "MySQL"
+          - "Oracle"
+          - "PHP"
+          - "Python"
+          - "Ruby"
+          - "SQLite"
+          - "Sybase"
+          - "Tomcat"
+          - "Windows"
+
+  parameters:
+    # failOnError true: a plan that could not run must not report "no issues".
+    # A DAST job that silently no-ops is worse than no DAST job, because it
+    # produces a green tick that someone will later cite as evidence.
+    failOnError: true
+    # failOnWarning false: individual findings are graded by the `exitStatus`
+    # job at the end of each plan, so warnings here would double-count.
+    failOnWarning: false
+    continueOnFailure: false
+    progressToStdout: true
+# endregion:shared

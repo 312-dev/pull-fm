@@ -1,0 +1,582 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pull.fm platform API (FIXTURE)",
+    "version": "0.0.0-fixture",
+    "description": "FIXTURE: a $ref path item, which this tooling refuses to resolve rather than silently skip."
+  },
+  "servers": [
+    {
+      "url": "https://api.staging.pull.fm"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "workosBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "security": [
+    {
+      "workosBearer": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getHealthz",
+        "security": [],
+        "x-pullfm-authz": "public",
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadyz",
+        "security": [],
+        "x-pullfm-authz": "public",
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "getMetrics",
+        "security": [],
+        "x-pullfm-authz": "system",
+        "x-pullfm-dast": "include",
+        "description": "Deliberately left in DAST scope. If this answers from the public edge, that is the finding.",
+        "responses": {
+          "200": {
+            "description": "Prometheus exposition"
+          }
+        }
+      }
+    },
+    "/v1/config": {
+      "get": {
+        "operationId": "getConfig",
+        "security": [],
+        "x-pullfm-authz": "public",
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "client config"
+          }
+        }
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "operationId": "getMe",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "implicit-subject",
+          "objectType": "subject",
+          "deny": [401]
+        },
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "the authenticated subject"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteMe",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "implicit-subject",
+          "objectType": "subject",
+          "deny": [401]
+        },
+        "x-pullfm-dast": "exclude",
+        "description": "Irreversible cascade delete. Excluded from DAST: importing it would destroy the scan subject mid-run.",
+        "responses": {
+          "204": {
+            "description": "deleted"
+          }
+        }
+      }
+    },
+    "/v1/me/export": {
+      "get": {
+        "operationId": "getMeExport",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "implicit-subject",
+          "objectType": "subject",
+          "deny": [401]
+        },
+        "x-pullfm-dast": "exclude",
+        "description": "Every hit generates a full personal-data export. Excluded from DAST to avoid self-inflicted denial of service on the worker tier.",
+        "responses": {
+          "202": {
+            "description": "export queued"
+          }
+        }
+      }
+    },
+    "/v1/connections": {
+      "get": {
+        "operationId": "listConnections",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "implicit-subject",
+          "objectType": "connection",
+          "deny": [401]
+        },
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "connections owned by the subject, never including a credential"
+          }
+        }
+      }
+    },
+    "/v1/connections/{service}": {
+      "parameters": [
+        {
+          "name": "service",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": ["listenbrainz", "lastfm"]
+          }
+        }
+      ],
+      "post": {
+        "operationId": "startConnection",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "path-param",
+          "objectType": "connection",
+          "param": "service",
+          "deny": [403, 404]
+        },
+        "x-pullfm-dast": "exclude",
+        "description": "Initiates a real OAuth flow against a third party. Excluded from DAST: docs/UPSTREAM-TERMS.md forbids driving provider traffic from a scanner.",
+        "responses": {
+          "201": {
+            "description": "authorization URL"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteConnection",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "path-param",
+          "objectType": "connection",
+          "param": "service",
+          "deny": [403, 404]
+        },
+        "x-pullfm-dast": "exclude",
+        "description": "Tears down the connection the rest of the scan depends on.",
+        "responses": {
+          "204": {
+            "description": "disconnected"
+          }
+        }
+      }
+    },
+    "/v1/connections/{service}/callback": {
+      "parameters": [
+        {
+          "name": "service",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "connectionCallback",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "query-param",
+          "objectType": "connect_state",
+          "param": "state",
+          "deny": [400, 403]
+        },
+        "x-pullfm-dast": "exclude",
+        "description": "Completing a callback mid-scan mutates the connection and drives real third-party traffic.",
+        "responses": {
+          "302": {
+            "description": "redirect back to the client"
+          }
+        }
+      }
+    },
+    "/v1/wishlist": {
+      "get": {
+        "operationId": "listWishlist",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "query-param",
+          "objectType": "wishlist_item",
+          "param": "cursor",
+          "deny": [400, 403]
+        },
+        "x-pullfm-dast": "include",
+        "description": "Cursor is the BOLA vector here: a forged cursor must not page into another subject's rows.",
+        "responses": {
+          "200": {
+            "description": "cursor-paginated wishlist"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createWishlistItem",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "implicit-subject",
+          "objectType": "wishlist_item",
+          "deny": [401]
+        },
+        "x-pullfm-dast": "include",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "created"
+          }
+        }
+      }
+    },
+    "/v1/wishlist/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "delete": {
+        "operationId": "deleteWishlistItem",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "path-param",
+          "objectType": "wishlist_item",
+          "param": "id",
+          "deny": [404]
+        },
+        "x-pullfm-dast": "include",
+        "responses": {
+          "204": {
+            "description": "deleted"
+          }
+        }
+      }
+    },
+    "/v1/wishlist/{id}/acquire": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getWishlistItemAcquireLinks",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "path-param",
+          "objectType": "wishlist_item",
+          "param": "id",
+          "deny": [404]
+        },
+        "x-pullfm-dast": "include",
+        "description": "Purchase links for a wishlist item. Plain links only: docs/PLAN.md \u00a71a.1 forbids affiliate parameters, and a lint rule enforces it.",
+        "responses": {
+          "200": {
+            "description": "purchase links"
+          }
+        }
+      }
+    },
+    "/v1/webhooks/workos": {
+      "post": {
+        "operationId": "workosWebhook",
+        "security": [],
+        "x-pullfm-authz": "webhook",
+        "x-pullfm-dast": "include",
+        "description": "Unauthenticated by definition and handles user.deleted, which cascades. Signature verification is the only control. Kept in DAST scope on purpose.",
+        "responses": {
+          "204": {
+            "description": "accepted"
+          },
+          "401": {
+            "description": "bad signature"
+          }
+        }
+      }
+    },
+    "/v1/feed": {
+      "get": {
+        "operationId": "getFeed",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "query-param",
+          "objectType": "feed",
+          "param": "cursor",
+          "deny": [400, 403]
+        },
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "sections envelope"
+          }
+        }
+      }
+    },
+    "/v1/recommendations": {
+      "get": {
+        "operationId": "getRecommendations",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "implicit-subject",
+          "objectType": "recommendation_set",
+          "deny": [401]
+        },
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "recommendations for the subject"
+          }
+        }
+      }
+    },
+    "/v1/stations": {
+      "get": {
+        "operationId": "listStations",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "implicit-subject",
+          "objectType": "station",
+          "deny": [401]
+        },
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "stations for the subject"
+          }
+        }
+      }
+    },
+    "/v1/stations/{id}/tracks": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getStationTracks",
+        "x-pullfm-authz": "user-scoped",
+        "x-pullfm-bola": {
+          "strategy": "path-param",
+          "objectType": "station",
+          "param": "id",
+          "deny": [404]
+        },
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "tracks in the station"
+          }
+        }
+      }
+    },
+    "/v1/search": {
+      "get": {
+        "operationId": "search",
+        "x-pullfm-authz": "authenticated-shared",
+        "x-pullfm-dast": "include",
+        "description": "Requires a session but returns catalogue data owned by nobody, so object-level authorization does not apply. Rate limiting does: this endpoint spends metered upstream quota.",
+        "responses": {
+          "200": {
+            "description": "search results"
+          }
+        }
+      }
+    },
+    "/v1/artists/{mbid}": {
+      "parameters": [
+        {
+          "name": "mbid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getArtist",
+        "x-pullfm-authz": "authenticated-shared",
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "artist"
+          }
+        }
+      }
+    },
+    "/v1/artists/{mbid}/similar": {
+      "parameters": [
+        {
+          "name": "mbid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getSimilarArtists",
+        "x-pullfm-authz": "authenticated-shared",
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "similar artists"
+          }
+        }
+      }
+    },
+    "/v1/artists/{mbid}/events": {
+      "parameters": [
+        {
+          "name": "mbid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getArtistEvents",
+        "x-pullfm-authz": "authenticated-shared",
+        "x-pullfm-dast": "include",
+        "description": "Returns 501 by design. docs/PLAN.md \u00a71 disables events because no provider was approved.",
+        "responses": {
+          "501": {
+            "description": "not implemented"
+          }
+        }
+      }
+    },
+    "/v1/tracks/{mbid}": {
+      "parameters": [
+        {
+          "name": "mbid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getTrack",
+        "x-pullfm-authz": "authenticated-shared",
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "track"
+          }
+        }
+      }
+    },
+    "/v1/tracks/{mbid}/preview": {
+      "parameters": [
+        {
+          "name": "mbid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getTrackPreview",
+        "x-pullfm-authz": "authenticated-shared",
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "resolved preview URL"
+          }
+        }
+      }
+    },
+    "/v1/albums/{mbid}": {
+      "parameters": [
+        {
+          "name": "mbid",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getAlbum",
+        "x-pullfm-authz": "authenticated-shared",
+        "x-pullfm-dast": "include",
+        "responses": {
+          "200": {
+            "description": "album"
+          }
+        }
+      }
+    },
+    "/v1/aliased": {
+      "$ref": "#/components/pathItems/somewhere"
+    }
+  }
+}

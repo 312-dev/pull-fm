@@ -17,7 +17,9 @@ Every design decision below is downstream of the fact that a single database dis
 be a mass third-party account compromise, and that the operator is one person with no 24/7
 response capability (`PLAN.md` §10), so controls have to fail closed without a human in the loop.
 
-**Status.** The BFF does not exist yet (Phase 2 of `PLAN.md`). Mitigations are therefore marked
+**Status.** The BFF is a route skeleton at the time of writing: the contract, status codes, and
+error shapes are declared in `apps/bff/src/routes/v1.ts`, but the handlers, the auth plugin, and the
+data layer are Phase 2 work. Mitigations are therefore marked
 `spec` (a design rule this document imposes), `partial` (some enforcement exists today, usually a
 scanner rule), or `done`. This is a design-time threat model whose job is to be wrong in public
 before the code is written, not a post-hoc audit.
