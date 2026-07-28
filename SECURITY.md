@@ -7,20 +7,20 @@ public report discloses the issue to everyone before it can be fixed.
 
 Report privately via either:
 
-- **GitHub Security Advisories** — [open a private report](https://github.com/312-dev/pull-fm/security/advisories/new)
+- **GitHub Security Advisories** - [open a private report](https://github.com/312-dev/pull-fm/security/advisories/new)
   (preferred; it gives us a private fix branch and a coordinated disclosure path)
-- **Email** — `ope@312.dev`
+- **Email** - `ope@312.dev`
 
 Please include: what you found, how to reproduce it, the impact you believe it has, and any
 suggested remediation. If you have a proof of concept, include it.
 
 ### What to expect
 
-| Stage | Target |
-| --- | --- |
-| Acknowledgement | within 3 business days |
-| Initial assessment and severity | within 7 business days |
-| Fix or documented mitigation for high/critical | within 30 days |
+| Stage                                          | Target                 |
+| ---------------------------------------------- | ---------------------- |
+| Acknowledgement                                | within 3 business days |
+| Initial assessment and severity                | within 7 business days |
+| Fix or documented mitigation for high/critical | within 30 days         |
 
 Pull.fm is operated by a single maintainer (312.dev LLC). Response times reflect that honestly
 rather than promising a 24/7 rotation that does not exist.

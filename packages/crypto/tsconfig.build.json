@@ -1,0 +1,7 @@
+{
+  // Build config: excludes tests so they are not emitted to dist. The base
+  // tsconfig.json deliberately includes them so the editor and eslint's
+  // type-aware rules can see them.
+  "extends": "./tsconfig.json",
+  "exclude": ["src/**/*.test.ts"]
+}

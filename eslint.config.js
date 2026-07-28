@@ -64,6 +64,52 @@ export default tseslint.config(
     },
   },
 
+  // Build and tool config files live outside every package tsconfig's
+  // `include`, so type-aware rules cannot resolve them. Lint them syntactically
+  // instead of widening the tsconfigs, which would slow every other file down.
+  {
+    files: [
+      "*.js",
+      "*.ts",
+      "**/*.config.js",
+      "**/*.config.ts",
+      // k6 scripts run in the k6 runtime, not Node, and are deliberately
+      // outside the TypeScript project graph.
+      "load/**/*.js",
+      "security/**/*.js",
+    ],
+    ...tseslint.configs.disableTypeChecked,
+  },
+
+  // Plain JavaScript tooling (k6 scenarios, mock upstreams, security scripts).
+  // TypeScript-specific rules cannot apply to untyped JS, and these files run in
+  // Node or the k6 runtime rather than the browser.
+  {
+    files: ["load/**/*.js", "security/**/*.js", "*.config.js"],
+    languageOptions: {
+      globals: {
+        process: "readonly",
+        console: "readonly",
+        Buffer: "readonly",
+        URL: "readonly",
+        URLSearchParams: "readonly",
+        TextEncoder: "readonly",
+        TextDecoder: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        setInterval: "readonly",
+        clearInterval: "readonly",
+        __ENV: "readonly", // k6 injects this
+      },
+    },
+    rules: {
+      "@typescript-eslint/explicit-module-boundary-types": "off",
+      "@typescript-eslint/no-unsafe-assignment": "off",
+      "no-undef": "off",
+      "no-console": "off",
+    },
+  },
+
   // Tests need more latitude: fixtures are intentionally loosely typed and
   // console output is useful when a gate fails in CI.
   {

@@ -26,15 +26,15 @@ This repository is **public**. No secret is ever committed. Credentials are refe
 
 ## Repository layout
 
-| Path | Purpose |
-| --- | --- |
-| `apps/bff/` | Backend-for-frontend (Fastify + TypeScript). All third-party keys live here. |
-| `packages/` | Shared TypeScript packages (DTOs, clients, config). |
-| `infra/` | Terraform (Hetzner, Cloudflare, R2) and Nomad job specs. |
-| `infra/local/` | Local development stack support files. |
-| `load/` | k6 scalability scenarios. |
-| `security/` | Semgrep rules, ZAP config, accepted-risk register. |
-| `docs/` | Execution plan, architecture, runbooks, ADRs. |
+| Path           | Purpose                                                                      |
+| -------------- | ---------------------------------------------------------------------------- |
+| `apps/bff/`    | Backend-for-frontend (Fastify + TypeScript). All third-party keys live here. |
+| `packages/`    | Shared TypeScript packages (DTOs, clients, config).                          |
+| `infra/`       | Terraform (Hetzner, Cloudflare, R2) and Nomad job specs.                     |
+| `infra/local/` | Local development stack support files.                                       |
+| `load/`        | k6 scalability scenarios.                                                    |
+| `security/`    | Semgrep rules, ZAP config, accepted-risk register.                           |
+| `docs/`        | Execution plan, architecture, runbooks, ADRs.                                |
 
 ---
 
@@ -70,12 +70,12 @@ Security issues should **not** be filed as public GitHub issues. See
 
 Gates enforced automatically on every commit and pull request:
 
-- **Secrets** — gitleaks, with rules for the specific credential shapes this project handles.
-- **SAST** — Semgrep (OWASP Top 10, TypeScript, Node) plus [project-specific rules](.semgrep/pullfm.yml)
+- **Secrets** - gitleaks, with rules for the specific credential shapes this project handles.
+- **SAST** - Semgrep (OWASP Top 10, TypeScript, Node) plus [project-specific rules](.semgrep/pullfm.yml)
   that mechanically enforce two invariants: no plaintext per-user token may reach a log sink,
   and all MusicBrainz traffic must route through the rate-limited client.
-- **Dependencies and containers** — Trivy, high/critical blocking, with SBOM generation.
-- **Infrastructure as code** — Trivy misconfiguration scanning.
+- **Dependencies and containers** - Trivy, high/critical blocking, with SBOM generation.
+- **Infrastructure as code** - Trivy misconfiguration scanning.
 
 ---
 
