@@ -24,7 +24,7 @@ const MIGRATIONS_DIR = join(HERE, "..", "migrations");
 
 const ADMIN_URL =
   process.env["ADMIN_URL"] ??
-  "postgres://pullfm:pullfm_local_dev_not_a_secret@localhost:5432/postgres";
+  "postgres://pullfm:pullfm_local_dev_not_a_secret@127.0.0.1:5432/postgres";
 const SCRATCH_DB = process.env["SCRATCH_DB"] ?? "pullfm_migration_verify";
 
 let failures = 0;

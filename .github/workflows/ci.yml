@@ -62,6 +62,8 @@ jobs:
       DATABASE_URL: postgres://pullfm:pullfm_ci_not_a_secret@127.0.0.1:5432/pullfm_test
       REDIS_URL: redis://127.0.0.1:6379
       REDIS_QUOTA_URL: redis://127.0.0.1:6380
+      # Also consumed by `pnpm test`, which runs the migration verifier.
+      ADMIN_URL: postgres://pullfm:pullfm_ci_not_a_secret@127.0.0.1:5432/postgres
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
