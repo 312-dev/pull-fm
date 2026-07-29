@@ -158,7 +158,17 @@ rules:
         # The package barrel re-exports it for the client's own tests.
         - "**/upstream/src/index.ts"
         - "**/*.test.ts"
-    pattern-regex: \bMUSICBRAINZ_BASE_URL\b
+    # A syntactic pattern, NOT a regex on the raw text. The first draft of this
+    # rule was `pattern-regex: \bMUSICBRAINZ_BASE_URL\b`, which fired on three
+    # PROSE COMMENTS in the load harness whose entire point is to record that no
+    # such variable exists (load/safety/upstream-guard.mjs asserts it). That is
+    # the false-positive shape this project already has a precedent for, and the
+    # dangerous resolution would have been to loosen the rule until it went
+    # quiet. Matching the identifier as an expression, plus the import that
+    # would bring it into scope, ignores comments and strings by construction.
+    pattern-either:
+      - pattern: MUSICBRAINZ_BASE_URL
+      - pattern-regex: ^\s*import\s[^;]*\bMUSICBRAINZ_BASE_URL\b
 
   # -------------------------------------------------------------------------
   # A ProviderClient aimed at MusicBrainz with no `rateLimiter` is the failure
