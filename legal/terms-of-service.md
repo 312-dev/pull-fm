@@ -551,7 +551,42 @@ If you are a consumer resident in a jurisdiction whose law gives you a
 non-waivable right to the protection of your local law or to bring proceedings in
 your local courts, nothing in this section removes that right.
 
-`[CONFIRM with counsel: whether to include an arbitration clause and class-action waiver. This draft deliberately includes neither. For a free, non-commercial service with a USD 100 liability cap, arbitration adds cost and consumer-law risk without adding protection, but that is a judgement to confirm rather than assume. Note also that SeatGeek clause 4.3 requires terms "at least as protective" as theirs, so if SeatGeek's own terms compel arbitration, this section may need to match. Illinois-specific point now that the governing law is settled: the Biometric Information Privacy Act carries a private right of action, and whether an arbitration clause would or should reach a BIPA claim is exactly the kind of question this decision turns on.]`
+**Decided 2026-07-29 by the controller: no arbitration clause and no
+class-action waiver.** This section stays as drafted. The reasoning is recorded
+here because the decision should be re-examined on its premises rather than
+re-argued from scratch:
+
+- **The forum costs more than the liability it would protect.** The cap in
+  section 13 is USD 100. Business-side arbitration fees exceed that by roughly
+  12x to 35x at every scale, and there is no number of claimants at which
+  arbitrating is cheaper than simply paying each claimant the cap. AAA also
+  charges an annual consumer-clause registry fee in perpetuity whether or not
+  anyone ever files, which for a service with no revenue is a subscription
+  bought to obtain a worse outcome.
+- **The Illinois-specific reason to want one does not apply.** BIPA
+  (740 ILCS 14) carries a private right of action, and a class-action waiver is
+  the standard defence against it. But BIPA's section 10 definition is a closed
+  list of biometric identifiers that expressly excludes photographs, and every
+  section 15 duty is conditioned on collecting or possessing one. This service
+  collects none, verified against the schema and the auth flow, so there is no
+  duty and nothing to waive.
+- **The external pressure was unverifiable.** SeatGeek clause 4.3 requires terms
+  "at least as protective" as theirs, so if their consumer terms compelled
+  arbitration this section might have had to match. Their terms could not be
+  read (see section 9), so that input is absent rather than satisfied.
+
+**RE-OPEN THIS IF EITHER PREMISE CHANGES**, and both are foreseeable. If a
+feature ever touches voice, face or fingerprint data, BIPA attaches and this
+calculation inverts. If the service ever charges money, the cap and the
+cost-benefit both move. Note that adding a clause later binds only users who
+accept the amended terms, so this is cheap now and expensive to reverse.
+
+If one is ever added: name **JAMS** and expressly invoke its Mass Arbitration
+Procedures, which charge a flat filing fee regardless of case count, rather than
+AAA, which charges per case and scales linearly against the defendant. Include an
+express bar on class arbitration and state that the waiver is non-severable,
+because *Kinkel* severed a waiver and enforced the clause without it, sending the
+defendant into class arbitration.
 
 ---
 
