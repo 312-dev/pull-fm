@@ -38,6 +38,18 @@ readonly PULLFM_OP_VAULT="${PULLFM_OP_VAULT:-MCP}"
 # The pull.fm zone. A token that can see anything else is not scoped.
 readonly PULLFM_ZONE="pull.fm"
 
+# The Neon organisation and project. Public identifiers, not credentials: they
+# are the same values committed in infra/neon/terraform.tfvars.example.
+readonly PULLFM_NEON_ORG_ID="${PULLFM_NEON_ORG_ID:-org-tiny-leaf-89756764}"
+readonly PULLFM_NEON_PROJECT="${PULLFM_NEON_PROJECT:-pull-fm}"
+
+# 1Password item holding the Neon API key, addressed BY ITEM ID.
+#
+# The human-readable title contains parentheses, which are not legal in an
+# op:// secret reference, so the id form is the only one that resolves. Item ids
+# are stable across renames, which is a second reason to prefer them.
+readonly PULLFM_NEON_OP_ITEM="${PULLFM_NEON_OP_ITEM:-5ccxlg635x37rybelz53yeaqf4}"
+
 _pullfm_die() { printf '\033[31m%s\033[0m\n' "$*" >&2; return 1; }
 
 # `op read` addresses items with op://vault/item/field, so an item whose TITLE
@@ -90,6 +102,69 @@ ${unexpected}"
   fi
 }
 
+# Prove the Neon API key cannot reach a project other than pull-fm.
+#
+# Same principle as the Cloudflare check above, and it matters more here: a Neon
+# PERSONAL api key inherits everything its owner can do across every
+# organisation they belong to, and there is nothing in the key itself that says
+# so. An organisation-scoped key is the correct credential; this function is the
+# backstop that notices when a wider one was used by mistake.
+#
+# Neon's API now REQUIRES org_id as a query parameter for an organisation's
+# projects. A bare GET /projects returns the caller's personal projects only, so
+# both are checked: the org listing must contain exactly pull-fm, and the
+# personal listing must be empty. A key that can see a personal project is a key
+# whose blast radius is not this repository.
+pullfm_assert_neon_scope() {
+  local org="${PULLFM_NEON_ORG_ID}" body names
+
+  body="$(curl -sS -H "Authorization: Bearer ${NEON_API_KEY}" \
+    "https://console.neon.tech/api/v2/projects?org_id=${org}")" ||
+    _pullfm_die "Neon API unreachable" || return 1
+
+  names="$(printf '%s' "${body}" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if "projects" not in d:
+    print("!ERROR " + json.dumps(d)[:200])
+else:
+    print("\n".join(p["name"] for p in d["projects"]))
+')"
+
+  if [[ "${names}" == "!ERROR"* ]]; then
+    _pullfm_die "Neon rejected the API key or the org id: ${names#!ERROR }"
+    return 1
+  fi
+
+  local unexpected
+  unexpected="$(grep -vx "${PULLFM_NEON_PROJECT}" <<<"${names}" | grep -v '^$' || true)"
+  if [[ -n "${unexpected}" ]]; then
+    _pullfm_die "REFUSING TO RUN: this Neon key can see projects other than ${PULLFM_NEON_PROJECT}:
+${unexpected}"
+    return 1
+  fi
+
+  # A key with no personal projects still proves nothing about scoping, but a
+  # key WITH them proves the absence of it, which is the case worth catching.
+  local personal
+  personal="$(curl -sS -H "Authorization: Bearer ${NEON_API_KEY}" \
+    "https://console.neon.tech/api/v2/projects" |
+    python3 -c '
+import json, sys
+try:
+    print("\n".join(p["name"] for p in json.load(sys.stdin).get("projects") or []))
+except Exception:
+    print("")
+')"
+  if [[ -n "${personal}" ]]; then
+    _pullfm_die "REFUSING TO RUN: this Neon key also reaches personal projects:
+${personal}
+
+Mint an organisation-scoped key for ${PULLFM_NEON_ORG_ID} instead."
+    return 1
+  fi
+}
+
 # Guard against pointing Hetzner work at the wrong project. The pull-fm token
 # must only ever see pull-fm resources; if it enumerates the personal fleet,
 # stop before anything is created or destroyed.
@@ -110,7 +185,7 @@ pullfm_assert_hetzner_project() {
 # per-environment tokens carry Zone Settings Write on pull.fm. Giving it a
 # fourth credential would add a rotation obligation without narrowing anything.
 pullfm_load_credentials() {
-  local env="${1:?usage: pullfm_load_credentials <staging|prod|shared>}"
+  local env="${1:?usage: pullfm_load_credentials <staging|prod|shared|neon>}"
 
   command -v op >/dev/null || _pullfm_die "1Password CLI (op) not found" || return 1
   pullfm_reject_global_key || return 1
@@ -118,8 +193,25 @@ pullfm_load_credentials() {
   case "${env}" in
     shared) env=staging ;;
     staging | prod) ;;
+    neon)
+      # infra/neon is a fourth root and needs a DIFFERENT credential set: the
+      # Neon API key plus the R2 state pair, and neither a Hetzner nor a
+      # Cloudflare token. Loading credentials a root cannot use is not
+      # harmless; it widens what a mistake in that root can reach.
+      NEON_API_KEY="$(op read "op://${PULLFM_OP_VAULT}/${PULLFM_NEON_OP_ITEM}/password")" ||
+        _pullfm_die "1Password: could not read the Neon API key" || return 1
+      [[ -n "${NEON_API_KEY}" ]] ||
+        _pullfm_die "1Password: the Neon API key is empty" || return 1
+
+      AWS_ACCESS_KEY_ID="$(_pullfm_op_field 'pull-fm/infra/R2_TFSTATE' 'access key id')" || return 1
+      AWS_SECRET_ACCESS_KEY="$(_pullfm_op_field 'pull-fm/infra/R2_TFSTATE' 'secret access key')" || return 1
+
+      export NEON_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+      pullfm_assert_neon_scope || return 1
+      return 0
+      ;;
     *)
-      _pullfm_die "unknown environment '${env}' (expected staging, prod or shared)"
+      _pullfm_die "unknown environment '${env}' (expected staging, prod, shared or neon)"
       return 1
       ;;
   esac

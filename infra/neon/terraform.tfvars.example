@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - Neon variables (EXAMPLE)
+#
+# Copy to terraform.tfvars, which is gitignored, if you need to override
+# anything. YOU NORMALLY DO NOT: every default in variables.tf was read back
+# from the live project, so a plan with no tfvars at all is the correct plan.
+#
+# THERE IS NO SECRET IN THIS FILE AND THERE MUST NEVER BE ONE. This repository
+# is public and gitleaks blocks CI. The Neon API key is supplied as an
+# environment variable read directly by the provider:
+#
+#   source infra/lib/credentials.sh && pullfm_load_credentials neon
+#
+# The identifiers below are not credentials. A Neon project ID grants nothing on
+# its own, exactly like a Cloudflare zone ID.
+# ---------------------------------------------------------------------------
+
+# --- adoption --------------------------------------------------------------
+# The project already exists and is imported, not created. Changing either of
+# these points the configuration at a DIFFERENT project, which is never what
+# you want; it is not how you rename anything.
+org_id     = "org-tiny-leaf-89756764"
+project_id = "steep-frost-83698289"
+
+# --- placement -------------------------------------------------------------
+# EU only, and immutable for an existing project: Neon cannot move a project
+# between regions.
+region_id  = "aws-eu-central-1"
+pg_version = 18
+
+# --- point-in-time restore -------------------------------------------------
+# 21600 seconds is 6 hours, the ceiling on the Free plan and the live value.
+# MUST be set: the provider's own default is 86400 and would plan a change the
+# plan cannot grant.
+history_retention_seconds = 21600
+
+# --- branches --------------------------------------------------------------
+staging_branch_name = "staging"
+
+# Paid-plan feature, and in tension with resetting a branch. See variables.tf.
+default_branch_protected = false
+
+# --- staging compute -------------------------------------------------------
+# The Free plan gives 100 CU-hours per project per month, shared by every
+# branch, and suspends any compute after 5 minutes of inactivity.
+staging_min_cu                  = 0.25
+staging_max_cu                  = 1
+staging_suspend_timeout_seconds = 0
+
+# --- roles -----------------------------------------------------------------
+# Console-created names. Not cosmetic preferences: every field of the project's
+# default-branch block is ForceNew, so these cannot be renamed in place.
+owner_role_name = "neondb_owner"
+database_name   = "neondb"
+
+# Leave false until packages/db/migrations contains the matching GRANTs. A role
+# that can authenticate and read nothing is an outage, not a hardening step.
+create_app_role = false
+
+# --- network posture -------------------------------------------------------
+# Requires a Scale plan. Populate with the app_egress_ipv4 output of the
+# environment roots when the plan allows it; until then the credential is the
+# only control on a publicly reachable endpoint.
+allowed_ips = []
