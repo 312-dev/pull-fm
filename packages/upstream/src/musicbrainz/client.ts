@@ -58,6 +58,17 @@ export interface MusicBrainzRecording {
   readonly artistName: string;
 }
 
+export interface MusicBrainzRelease {
+  readonly mbid: string;
+  readonly title: string;
+  /** As MusicBrainz reports it: "1997", "1997-06", or "1997-06-16". */
+  readonly date: string | undefined;
+  readonly country: string | undefined;
+  readonly trackCount: number | undefined;
+  readonly artistMbid: string | undefined;
+  readonly artistName: string;
+}
+
 export interface MusicBrainzSearchHit<T> {
   readonly entity: T;
   /** MusicBrainz's own 0-100 relevance score. */
@@ -127,6 +138,38 @@ function parseRecording(v: unknown): MusicBrainzRecording {
   };
 }
 
+function parseRelease(v: unknown): MusicBrainzRelease {
+  const mbid = optMbid(v, "id");
+  if (mbid === undefined) {
+    throw new UpstreamError({
+      provider: "musicbrainz",
+      kind: "malformed",
+      message: "release is missing a valid id",
+    });
+  }
+  const credits = arrayOrSingle(v, "artist-credit");
+  const first = credits[0];
+  const nested = isRecord(first) ? first["artist"] : undefined;
+  // `media` is a list of discs; the track count of a release is their sum, and
+  // taking the first medium's count silently under-reports every box set.
+  let trackCount: number | undefined;
+  for (const medium of arrayOrSingle(v, "media")) {
+    const count = optNumber(medium, "track-count");
+    if (count === undefined) continue;
+    trackCount = (trackCount ?? 0) + count;
+  }
+  return {
+    mbid,
+    title: reqString(v, "title", "release.title"),
+    date: optString(v, "date"),
+    country: optString(v, "country"),
+    trackCount,
+    artistMbid: optMbid(nested, "id"),
+    artistName:
+      optString(first, "name") ?? optString(nested, "name") ?? "Unknown Artist",
+  };
+}
+
 function parseSearch<T>(
   payload: unknown,
   key: string,
@@ -191,6 +234,20 @@ export class MusicBrainzClient implements Provider {
       emptyStatuses: [404],
     });
     return payload === null ? null : parseRecording(payload);
+  }
+
+  /**
+   * One release. `inc=media` is asked for because a release with no track
+   * count renders as an album with no tracks, which reads as a data bug rather
+   * than as the missing `inc` parameter it actually is.
+   */
+  async lookupRelease(mbid: string): Promise<MusicBrainzRelease | null> {
+    const payload = await this.#http.requestJson({
+      path: `/release/${encodeURIComponent(mbid)}`,
+      query: { fmt: "json", inc: "artist-credits+media" },
+      emptyStatuses: [404],
+    });
+    return payload === null ? null : parseRelease(payload);
   }
 
   /** Lucene search. Used by the crosswalk resolver, never on a hot path. */

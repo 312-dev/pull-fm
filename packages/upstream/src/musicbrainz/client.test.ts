@@ -138,6 +138,40 @@ describe("MusicBrainzClient parsing", () => {
   });
 });
 
+describe("release lookup", () => {
+  it("sums the track count across every medium", async () => {
+    // A box set reports one `media` entry per disc. Reading the first medium's
+    // count is the mistake that makes a 3xCD release render as 12 tracks.
+    const http = new FakeHttp().enqueue({
+      body: {
+        id: mbid(9),
+        title: "The Collection",
+        date: "1997-06-16",
+        country: "GB",
+        media: [{ "track-count": 12 }, { "track-count": 11 }],
+        "artist-credit": [
+          { name: "Blur", artist: { id: mbid(8), name: "Blur" } },
+        ],
+      },
+    });
+    const { client } = make(http);
+    const release = await client.lookupRelease(mbid(9));
+
+    expect(release?.trackCount).toBe(23);
+    expect(release?.artistMbid).toBe(mbid(8));
+    expect(release?.date).toBe("1997-06-16");
+    // Without inc=media there is no track count at all, so the parameter is
+    // asserted rather than assumed.
+    expect(http.lastRequest?.url).toContain("media");
+  });
+
+  it("treats 404 as an empty answer about the catalogue, not a failure", async () => {
+    const http = new FakeHttp().enqueue({ status: 404, body: {} });
+    const { client } = make(http);
+    await expect(client.lookupRelease(mbid(1))).resolves.toBeNull();
+  });
+});
+
 describe("escapeLucene", () => {
   it("escapes syntax that would silently change the query", () => {
     // An unescaped quote does not error; it returns plausible wrong results,

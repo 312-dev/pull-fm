@@ -201,3 +201,48 @@ describe("CrosswalkResolver learning from providers", () => {
     expect((await resolver.resolveArtist("Aphex Twin"))?.mbid).toBe(mbid(10));
   });
 });
+
+describe("crosswalk search", () => {
+  async function seeded(): Promise<MemoryCrosswalkStore> {
+    const store = new MemoryCrosswalkStore();
+    const rows: [string, number, number][] = [
+      ["radiohead", 1, 1],
+      ["radio dept", 2, 0.9],
+      ["portishead", 3, 0.9],
+    ];
+    for (const [key, n, confidence] of rows) {
+      await store.record({
+        entityType: "artist",
+        normalizedKey: key,
+        mbid: mbid(n),
+        confidence,
+        source: "seed",
+      });
+    }
+    return store;
+  }
+
+  it("returns several matches, best first", async () => {
+    const hits = await (await seeded()).search("artist", "radiohed", 0.3, 10);
+    expect(hits.length).toBeGreaterThan(1);
+    expect(hits[0]?.mbid).toBe(mbid(1));
+    // Descending similarity is the contract the search route renders in order.
+    for (let i = 1; i < hits.length; i++) {
+      expect(hits[i - 1]?.similarity).toBeGreaterThanOrEqual(
+        hits[i]?.similarity ?? 0,
+      );
+    }
+  });
+
+  it("honours the limit, so a query string cannot ask for the whole table", () => {
+    return seeded().then(async (store) => {
+      expect(await store.search("artist", "radio", 0.1, 1)).toHaveLength(1);
+      expect(await store.search("artist", "radio", 0.1, 0)).toHaveLength(0);
+    });
+  });
+
+  it("never crosses entity types", async () => {
+    const store = await seeded();
+    expect(await store.search("recording", "radiohead", 0.1, 10)).toEqual([]);
+  });
+});

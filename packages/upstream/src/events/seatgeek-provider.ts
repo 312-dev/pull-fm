@@ -62,7 +62,7 @@ export const EVENTS_TTL_SECONDS = 6 * 60 * 60;
 /**
  * Minimum trigram similarity between the requested artist name and the matched
  * performer name. `q` search is fuzzy enough to return "Radiohead Tribute" for
- * "Radiohead", and a wrong performer id gets cached for 30 days.
+ * "Radiohead", and a wrong performer id is then cached for a week.
  */
 export const PERFORMER_MATCH_THRESHOLD = 0.6;
 
@@ -138,10 +138,10 @@ export class SeatGeekEventsProvider implements EventsProvider {
    * MBID -> SeatGeek performer id, cached for a week.
    *
    * Negative results are cached too (as 0). Without that, every artist not in
-   * SeatGeek's catalogue costs a name search on every single feed render, which
-   * is most of the artists in a discovery feed. A cached zero also stores none
-   * of their material, which is the cheapest kind of cache to justify under
-   * terms 7.13.
+   * SeatGeek's catalogue costs a name search on every single request, which is
+   * most of the artists in a discovery catalogue. A cached zero also stores
+   * none of their material, which is the cheapest kind of cache to justify
+   * under terms 7.13.
    */
   async performerIdFor(
     artistMbid: string,

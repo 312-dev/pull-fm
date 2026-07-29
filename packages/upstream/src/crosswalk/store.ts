@@ -41,6 +41,21 @@ export interface CrosswalkStore {
     normalizedKey: string,
     minSimilarity: number,
   ): Promise<CrosswalkHit | null>;
+  /**
+   * Several fuzzy matches, best first.
+   *
+   * `GET /v1/search` is served entirely from here, which is why the capability
+   * belongs on the store rather than being a query written in the BFF. The
+   * crosswalk is the only thing a search may touch: MusicBrainz permits one
+   * request per second across the entire service, so a search box wired to it
+   * would be a remote kill switch operated by whoever types fastest.
+   */
+  search(
+    entityType: CrosswalkEntity,
+    normalizedKey: string,
+    minSimilarity: number,
+    limit: number,
+  ): Promise<CrosswalkHit[]>;
   record(entry: CrosswalkRecord): Promise<void>;
 }
 
@@ -76,6 +91,25 @@ export class MemoryCrosswalkStore implements CrosswalkStore {
       }
     }
     return Promise.resolve(best);
+  }
+
+  search(
+    entityType: CrosswalkEntity,
+    normalizedKey: string,
+    minSimilarity: number,
+    limit: number,
+  ): Promise<CrosswalkHit[]> {
+    const hits: CrosswalkHit[] = [];
+    for (const [id, row] of this.#rows) {
+      if (!id.startsWith(`${entityType}${KEY_SEPARATOR}`)) continue;
+      const similarity = trigramSimilarity(normalizedKey, row.normalizedKey);
+      if (similarity < minSimilarity) continue;
+      hits.push({ ...row, matchedBy: "fuzzy", similarity });
+    }
+    hits.sort(
+      (a, b) => b.similarity - a.similarity || b.confidence - a.confidence,
+    );
+    return Promise.resolve(hits.slice(0, Math.max(0, limit)));
   }
 
   record(entry: CrosswalkRecord): Promise<void> {

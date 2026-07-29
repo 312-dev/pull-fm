@@ -93,6 +93,43 @@ export class PgCrosswalkStore implements CrosswalkStore {
     return row === undefined ? null : toHit(entityType, row, "fuzzy");
   }
 
+  /**
+   * The search path. Same index-first shape as lookupFuzzy: `%` narrows using
+   * the GIN index, `similarity()` re-checks against our own threshold. A bare
+   * `similarity() >= $x` predicate cannot use the index and degrades into a
+   * sequential scan of the table that grows forever.
+   *
+   * `limit` is clamped here rather than trusted from the caller, because this
+   * is reachable from a query string and an unbounded LIMIT is an API4 finding
+   * even when the route also validates it.
+   */
+  async search(
+    entityType: CrosswalkEntity,
+    normalizedKey: string,
+    minSimilarity: number,
+    limit: number,
+  ): Promise<CrosswalkHit[]> {
+    const { rows } = await this.db.query<Row>(
+      `SELECT normalized_key, mbid::text AS mbid, confidence, source,
+              similarity(normalized_key, $2) AS similarity
+         FROM mbid_crosswalk
+        WHERE entity_type = $1
+          AND normalized_key % $2
+          AND similarity(normalized_key, $2) >= $3
+        ORDER BY similarity DESC, confidence DESC
+        LIMIT $4`,
+      [
+        entityType,
+        normalizedKey,
+        minSimilarity,
+        Math.min(Math.max(1, Math.trunc(limit)), 50),
+      ],
+    );
+    return rows
+      .map((row) => toHit(entityType, row, "fuzzy"))
+      .filter((hit): hit is CrosswalkHit => hit !== null);
+  }
+
   async record(entry: CrosswalkRecord): Promise<void> {
     // A more confident resolution supersedes a less confident one; equal or
     // worse leaves the existing row alone, so a fuzzy match can never overwrite

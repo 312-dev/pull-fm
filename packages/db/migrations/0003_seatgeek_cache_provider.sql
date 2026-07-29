@@ -7,9 +7,11 @@
 -- the Last.fm 100 MB licence cap - so adding a provider is a migration, not a
 -- code change.
 --
--- Event data is cached aggressively (performer ids for 30 days, event lists for
--- 6 hours) because it changes daily at most, and because SeatGeek's /events
--- endpoint has capped result sets at 10,000 since 2026-01-01.
+-- Event data is cached (performer ids for 7 days, event lists for 6 hours)
+-- because it changes daily at most, and because SeatGeek's /events endpoint has
+-- capped result sets at 10,000 since 2026-01-01. Both TTLs are set by their
+-- terms 7.13 (no systematic downloading or storage) rather than by volatility;
+-- the constants live in packages/upstream/src/events/seatgeek-provider.ts.
 --
 -- No cap is set for SeatGeek: unlike Last.fm, their terms impose no cache size
 -- limit, and the cached volume is bounded by the number of artists we surface.

@@ -13,7 +13,8 @@
  *
  * NOTE: the schema's `upstream_cache_provider_chk` must list every value here
  * or a cache write fails at runtime. `seatgeek` was added after 0001_initial
- * and requires migration 0002_seatgeek_cache_provider.sql.
+ * and requires migration 0003_seatgeek_cache_provider.sql, which was renumbered
+ * from 0002 when it collided with 0002_api_tokens.sql.
  */
 export type ProviderName =
   | "listenbrainz"
