@@ -42,9 +42,17 @@ Ordering matters and is chosen so that a failure at any point leaves a recoverab
 
 ## The backup position
 
-pgBackRest retains WAL and full backups in Cloudflare R2 for the point-in-time-recovery window. A
-deleted user's rows therefore continue to exist inside encrypted backup artifacts until the last
-backup containing them ages out.
+> **Status, 2026-07-29: this section describes the intended position, and the backup system it
+> describes is not deployed.** pgBackRest is a Phase 1 / Gate 4 task. `wal_level` and
+> `archive_mode` are set so enabling it is a config reload rather than a restart, but
+> `archive_command` is currently a no-op and **no retention values are configured anywhere**, so
+> there is no point-in-time-recovery window to state. Nothing user-facing may quote a number until
+> `repo1-retention-full` and `repo1-retention-archive` have one. `legal/privacy-policy.md` records
+> this as a publication blocker rather than guessing.
+
+pgBackRest will retain WAL and full backups in Cloudflare R2 for the point-in-time-recovery
+window. A deleted user's rows therefore continue to exist inside encrypted backup artifacts until
+the last backup containing them ages out.
 
 **We do not attempt to erase from backups.** The reason is the one the ICO, the EDPB, and every
 serious analysis of Article 17 give: selectively rewriting a backup destroys its integrity, which

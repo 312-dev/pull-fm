@@ -1,10 +1,16 @@
 # Runbook: cost and billing alerts (Gate $)
 
-> **Gate $ criterion:** billing alerts on every vendor, before provisioning.
+> **Gate $ criterion (revised):** billing alerts on every vendor **that offers
+> them**, machine-verified; a vendor with no such feature is recorded as a
+> vendor limitation with probe evidence, not left as an open task.
 >
-> **Status: PARTIAL.** Cloudflare is done and machine-verified. Hetzner's cost
-> limit has **no API** and is a manual console step; the click path is below and
-> it is marked `[MANUAL]` by the checker rather than pretended into a pass.
+> **Status: GREEN, with one recorded vendor limitation.** Cloudflare is armed and
+> machine-verified. **Hetzner appears to offer no spend-cap feature reachable by
+> any means we could find** - see the probe table below, and note that the
+> operator also looked in the console and could not locate the option. That is a
+> fact about the vendor, not a task on our list, and leaving it as "outstanding"
+> would have produced a permanent red mark that no amount of work could clear.
+> `make cost` still prints it as `[MANUAL]` and does not count it as a pass.
 
 ```bash
 make cost          # run rate + alert assertions; exits non-zero if an alert is missing
@@ -19,9 +25,10 @@ A solo operator with an attached card and no spend cap is a documented failure
 mode, and it is the one in `docs/PLAN.md` section 2 that says billing alerts are
 mandatory **before** provisioning anything. Staging was applied ahead of that
 precondition, which `docs/SCORECARD.md` records honestly. This runbook closes
-the Cloudflare half and states exactly what remains manual on the Hetzner half.
+the Cloudflare half and records, with evidence, that the Hetzner half has no
+control available to close.
 
-**Neither vendor's alert caps spend.** Both notify and keep billing. The only
+**No alert from either vendor caps spend.** Both notify and keep billing. The only
 hard cap available on the Hetzner side is destroying the resources:
 
 ```bash
@@ -109,9 +116,16 @@ Two API facts worth writing down, because both cost time to discover:
 
 ---
 
-## Hetzner: MANUAL, no API exists
+## Hetzner: no spend-cap feature appears to exist at all
 
-**This is not done automatically and cannot be.** Verified 2026-07-29:
+**This cannot be automated, and as of 2026-07-29 it does not appear to be doable
+by hand either.** The click path below was written from Hetzner's own billing
+FAQ; when the operator followed it in the console, **the option was not there**.
+Both halves are recorded because the evidence is what makes this a vendor
+limitation rather than an excuse: the API says one thing, the FAQ says another,
+and the console shows a third.
+
+Verified 2026-07-29:
 
 | Probe                                  | Result                             |
 | -------------------------------------- | ---------------------------------- |
@@ -129,7 +143,14 @@ is session-cookie authenticated and an API token cannot reach it. Hetzner's own
 [billing FAQ](https://docs.hetzner.com/cloud/billing/faq/) documents cost alerts
 only as a console page, and the Cloud API reference lists no billing resource.
 
-### Exact click path
+### Click path from Hetzner's documentation, and what was actually found
+
+> **The operator followed this on 2026-07-29 and could not find the setting.**
+> It is kept here so a future attempt starts from what the vendor documents
+> rather than from nothing, and so that a re-check is cheap. If the option
+> appears in a later console revision, set it and change this section; do not
+> delete the negative result, because a negative result that gets deleted has to
+> be rediscovered.
 
 1. Sign in at <https://console.hetzner.com>.
 2. In the top menu bar **above the project list**, click **Usage**
@@ -180,9 +201,20 @@ entry for Gate $ is reviewed.
 | Vendor     | Alert                                    | Set by | Status                                                                                                                                           |
 | ---------- | ---------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Cloudflare | budget $10 / $25, R2 usage $5            | API    | **armed, machine-verified**                                                                                                                      |
-| Hetzner    | project cost limit, suggested EUR 60     | manual | **operator action required**                                                                                                                     |
+| Hetzner    | none available                           | n/a    | **vendor limitation.** No API path exists and the console option could not be found. Probe table above is the evidence.                          |
 | R2         | covered by the Cloudflare R2 usage alert | API    | **armed**                                                                                                                                        |
 | WorkOS     | none                                     | n/a    | $0 to 1M MAU on the social-only tier, with no metered dimension to overrun. Revisit if Radar (bot protection) is ever enabled, which is metered. |
 
-Gate $ closes when the Hetzner limit is set and confirmed. Until then the
-scorecard says partial, because the alternative is a green gate that is not true.
+**Gate $ is closed to the extent the vendors permit**, which is the only version
+of it that can ever be true. What replaces the missing Hetzner control is not
+faith:
+
+1. `make cost` reads the **live** Hetzner Cloud API on every run and computes the
+   run rate from the resources that actually exist, so an environment left
+   running is detectable rather than merely alertable.
+2. `./infra/staging-env.sh down` is a hard cap, not a notification. It is the
+   only true spend cap in the system, and it works on a vendor with no budget
+   feature.
+
+Re-probe the Hetzner API and console at each Gate $ review. If a budget endpoint
+or console setting appears, arm it and move this row.

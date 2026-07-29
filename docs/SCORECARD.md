@@ -3,27 +3,48 @@
 The plan is measured against this, not against intent. A gate is green only when
 a machine checks it and the command to re-run it is written down.
 
-**Last updated:** 2026-07-28 (Gate 0 closed)
+**Last updated:** 2026-07-29 (Gate 4 measured and failing; Gate $ reclassified; Gate R opened)
+
+**Staging is currently torn down** (EUR 0.00/mo). Any gate whose command needs a
+live host is marked `needs staging up` rather than counted as a pass.
 
 ---
 
 ## Status
 
-| Gate  | Criterion                                                           | Status          | Evidence                                                                                         |
-| ----- | ------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------ |
-| **0** | TLS hello-world reachable, IaC applies with zero drift              | **GREEN**       | All four criteria met and re-runnable. See "Gate 0" below                                        |
-| **1** | Migrations reversible, cascade transactional, constraints fire      | **GREEN**       | `node packages/db/scripts/verify-migrations.mjs` (12 checks)                                     |
-| **2** | All endpoints correct vs upstreams, contract tests, cache hit >=90% | **not started** | Contract locked; handlers stubbed at 501                                                         |
-| **3** | Auth flow, BOLA isolation, tokens encrypted, no plaintext in logs   | **partial**     | Crypto and redaction proven; authz suite pending                                                 |
-| **4** | Restore from scratch <30 min, RPO <=5 min                           | **not started** | R2 bucket defined in Terraform                                                                   |
-| **5** | Synthetic failure alerts <60s, runbook links resolve                | **not started** |                                                                                                  |
-| **6** | Maintenance window, zero non-2xx rolling deploy, replica promotion  | **partial**     | Maintenance mode verified; deploy pipeline pending                                               |
-| **7** | Capacity model + SLOs under mocked upstreams                        | **partial**     | Harness proven in both directions against the mock; needs a real BFF                             |
-| **8** | Zero high/critical, pinned tools, accepted risks unexpired          | **partial**     | Scanners clean, tools pinned, register enforced; ZAP DAST needs a live host                      |
-| **L** | Privacy policy, ToS, DPAs, deletion + export end to end             | **not started** | Endpoints exist; policies and cascade pending                                                    |
-| **S** | ~~Store accounts, privacy labels, web deletion URL~~                | **RETIRED**     | Distribution is GitHub Releases, not app stores. See PLAN.md section 11.6                        |
-| **$** | Billing alerts on every vendor                                      | **not started** | Must precede provisioning                                                                        |
-| **D** | Commit to main reaches prod with a verified rollback                | **partial**     | main -> staging is automatic and externally verified; prod and the executed rollback are Phase 6 |     |
+Every row carries the command that re-checks it. A row with no command is not
+green, by construction.
+
+| Gate      | Criterion                                                           | Status                                       | Re-run with                                                                             |
+| --------- | ------------------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------- |
+| **0**     | TLS hello-world reachable, IaC applies with zero drift              | **GREEN** (see note)                         | `terraform plan -detailed-exitcode`; `curl -sf https://api-staging.pull.fm/healthz`     |
+| **1**     | Migrations reversible, cascade transactional, constraints fire      | **GREEN**                                    | `node packages/db/scripts/verify-migrations.mjs`                                        |
+| **2**     | All endpoints correct vs upstreams, contract tests, cache hit >=90% | **not started**                              | -                                                                                       |
+| **3**     | Auth flow, BOLA isolation, tokens encrypted, no plaintext in logs   | **partial**                                  | `pnpm --filter @pull-fm/bff test`; `pnpm --filter @pull-fm/crypto test`                 |
+| **4**     | Restore from scratch <30 min, RPO <=5 min                           | **FAILING (measured)**                       | `./infra/staging-env.sh down && up && curl -sf .../healthz` - see "Gate 4" below        |
+| **5**     | Synthetic failure alerts <60s, runbook links resolve                | **spec only**                                | no command exists yet; alert list specified in `RUNBOOK-INCIDENT.md`                    |
+| **6**     | Maintenance window, zero non-2xx rolling deploy, replica promotion  | **partial**                                  | `pnpm --filter @pull-fm/bff test` covers the maintenance flag only                      |
+| **7**     | Capacity model + SLOs under mocked upstreams                        | **partial**                                  | `node load/mock-upstreams/server.js --bff-stub` + `k6 run load/scenarios/steady-10k.js` |
+| **8**     | Zero high/critical, pinned tools, accepted risks unexpired          | **partial**                                  | `pnpm scan:all`; `make risks`; `node security/scripts/check-action-pinning.mjs`         |
+| **L**     | Privacy policy + EULA at stable URLs, DPAs, deletion + export       | **drafted, blocked**                         | no command; drafts in `legal/`, `[OPEN]` list in `legal/privacy-policy.md`              |
+| ~~**S**~~ | ~~Store accounts, privacy labels, web deletion URL~~                | **RETIRED**                                  | Distribution is GitHub Releases. PLAN.md section 11.6                                   |
+| **R**     | Releases signed + reproducible, signing key escrowed                | **not started**                              | no release pipeline exists yet                                                          |
+| **$**     | Billing alerts on every vendor **that offers them**                 | **GREEN, with a recorded vendor limitation** | `make cost`                                                                             |
+| **D**     | Commit to main reaches prod with a verified rollback                | **partial**                                  | `.github/workflows/deploy-staging.yml`; prod and rollback are Phase 6                   |
+
+**What changed since the last revision, and why:**
+
+- **Gate 4 moved from "not started" to "FAILING".** It was measured. That is a
+  worse-sounding status and a more useful one: "not started" implies the work is
+  ahead of us, while "failing" records that we tried and know exactly what broke.
+- **Gate $ moved from "not started" to green with a limitation.** Cloudflare's
+  alerts are armed and machine-verified. Hetzner appears to offer no spend-cap
+  feature at all, which is a fact about the vendor and not a task on our list.
+  See "Gate $" below.
+- **Gate S retired, Gate R opened.** Leaving GitHub Releases unmeasured because
+  the store gate went away would have quietly dropped a real obligation.
+- **Gate L moved from "not started" to "drafted, blocked"**, because drafts now
+  exist and the blockers are enumerated rather than vague.
 
 ---
 
@@ -101,15 +122,24 @@ seconds, container start about 15 seconds.
 
 ### What Gate 0 does NOT cover, stated plainly
 
-- **Gate $ is still open.** Billing alerts are configured on no vendor, so
-  staging was applied ahead of its own stated precondition.
-- **Terraform state is local**, not in R2. Losing the laptop orphans the
-  environment.
+- **Gate 0 describes a _running_ environment, not a rebuildable one.** Every
+  assertion above was true of an environment that had already been bootstrapped
+  by hand. It says nothing about recreating one, and when that was tried the
+  result was five minutes of HTTP 525. See "Gate 4" below. This is a limitation
+  of how Gate 0 was written, and it is worth saying rather than defending.
+- **`envs/staging` state is in R2** (`pull-fm-tfstate`) since 2026-07-29, but
+  **`envs/shared` and `envs/prod` state is still local.** That matters most for
+  `shared`, which is the root that is actually applied: losing the laptop
+  orphans the zone TLS posture.
 - **Tailscale is not installed on the nodes.** The break-glass firewall rule
   was used once to bootstrap and removed; it is currently the only interactive
-  path in. Routine operation needs none, because the deploy loop pulls.
+  path in. Routine operation needs none, because the deploy loop pulls - but a
+  rebuild does need one, which is half of why Gate 4 fails.
 - **A deploy is a container recreate**, so there is a brief connection refusal.
   Zero-non-2xx rolling deploys are Gate 6 and need the second application node.
+- **Staging was applied ahead of Gate $**, which was its stated precondition.
+  Gate $ has since closed to the extent the vendors allow; the ordering was
+  still wrong at the time.
 
 ### Gate 1: migrations
 
@@ -130,6 +160,110 @@ node packages/db/scripts/verify-migrations.mjs
 - Unknown cache providers and duplicate wishlist entries are rejected.
 - Per-provider cache size is measurable, so the Last.fm 100 MB licence cap
   can be enforced rather than estimated.
+
+### Gate $: billing alerts, and one vendor that has no such feature
+
+```bash
+make cost          # exits non-zero if a required alert is missing or disabled
+make cost-json     # the same, machine-readable
+```
+
+**Green, with one honestly labelled vendor limitation.** The distinction this
+gate now draws is between _a task we have not done_ and _a control the vendor
+does not sell_, because conflating them leaves a permanent red mark that no
+amount of work can clear.
+
+| Vendor         | Alert                                       | Status                                                  |
+| -------------- | ------------------------------------------- | ------------------------------------------------------- |
+| **Cloudflare** | budget $10, budget $25, R2 storage usage $5 | **armed via API, machine-verified by `make cost`**      |
+| **R2**         | covered by the Cloudflare R2 usage alert    | **armed**                                               |
+| **WorkOS**     | none                                        | **not applicable** - $0 to 1M MAU, no metered dimension |
+| **Hetzner**    | none available                              | **vendor limitation, evidenced below**                  |
+
+**Hetzner appears to offer no spend-cap or budget feature that any client can
+reach.** Probed 2026-07-29:
+
+| Probe                                  | Result                             |
+| -------------------------------------- | ---------------------------------- |
+| `GET api.hetzner.cloud/v1/billing`     | 404 `api route not found`          |
+| `GET api.hetzner.cloud/v1/costs`       | 404                                |
+| `GET api.hetzner.cloud/v1/cost_alerts` | 404                                |
+| `GET api.hetzner.cloud/v1/usage`       | 404                                |
+| `GET api.hetzner.cloud/v1/cost_limits` | 404                                |
+| `GET api.hetzner.cloud/v1/budgets`     | 404                                |
+| `GET console.hetzner.com/api/v1/usage` | **200, `content-type: text/html`** |
+
+The last row is the trap: it answers 200 to an API token and looks like a
+working endpoint. It is the console's SPA shell, not an API. **The operator also
+looked for the setting in the console and could not find it.** So this is
+recorded as a **vendor limitation with the probe evidence attached**, not as an
+outstanding task, and `make cost` prints it as `[MANUAL]` and does not count it
+as a pass either way.
+
+**Drift is still detectable, which is why this is green rather than amber.**
+`make cost` calls the live Hetzner Cloud API on every run and enumerates servers,
+load balancers, volumes, primary IPs and floating IPs, computing the run rate
+from their actual price data. An environment left running shows up as a non-zero
+run rate the next time anyone runs it. The hard cost control is not an alert at
+all, it is `./infra/staging-env.sh down`.
+
+Full detail, including the API facts that cost time to discover:
+[`RUNBOOK-COST.md`](RUNBOOK-COST.md).
+
+---
+
+## Measured and failing
+
+A gate that has been tried and failed is a different thing from one that has not
+been tried, and it is worth its own heading.
+
+### Gate 4: restore from scratch - FAILING
+
+```bash
+./infra/staging-env.sh down
+./infra/staging-env.sh up
+curl -sf https://api-staging.pull.fm/healthz     # this is the step that fails
+```
+
+Measured 2026-07-29, by actually doing it:
+
+| Step                                | Result                                                                      |
+| ----------------------------------- | --------------------------------------------------------------------------- |
+| `down`                              | 19 resources destroyed, run rate to EUR 0.00/mo, R2 backup bucket survived  |
+| `up`                                | **45 seconds**, 19 resources created, load balancer reclaimed the same IPv4 |
+| `curl .../healthz`                  | **HTTP 525 for five straight minutes**                                      |
+| Hetzner load balancer target health | **unhealthy on both 80 and 443**                                            |
+
+**Why.** nginx, the origin certificate, the BFF container, the deploy timer, and
+the Redis and Postgres services are applied by **a human over SSH**. cloud-init
+deliberately installs none of it, because that would put the KEK and the WorkOS
+key into `user_data`, which lives in Terraform state and is readable from the
+Hetzner API for the life of the server. That decision is correct; the missing
+piece is the automated, secret-free path that should have replaced it. Worse,
+the rebuilt node has **no way in**: no port 22 rule, and Tailscale is not
+installed because `tailscale_auth_key` is empty in every committed
+configuration.
+
+**Status as of what can be verified:** the infrastructure half of Gate 4 works
+and is fast. The half that makes a node serve traffic is a manual runbook of
+**unmeasured length that has never been timed**, and until it is automated the
+30-minute assertion cannot be evaluated at all, let alone met. A restore from
+the pgBackRest repository has additionally never been attempted, because
+**pgBackRest is not deployed**: `wal_level` and `archive_mode` are set so
+enabling it is a config reload, but `archive_command` is currently a no-op and
+no retention values are configured anywhere.
+
+**Not owned by this document.** Another work stream is automating node
+convergence. This entry records the finding and the reason; it will go green
+when the same three commands above end in a 200.
+
+### What this failure invalidates elsewhere
+
+- `docs/api/deletion-and-backups.md` describes a pgBackRest PITR window as
+  though it exists. It describes the **intended** position; no window is
+  configured. That document now says so.
+- `legal/privacy-policy.md` cannot state a retention period for backups until
+  one is configured, and its appendix lists that as a publication blocker.
 
 ---
 
@@ -246,11 +380,90 @@ been reviewed by anyone other than its author.
 
 ---
 
+## Not started, with the reason stated
+
+### Gate L: legal documents - DRAFTED, BLOCKED
+
+Drafts exist at [`../legal/privacy-policy.md`](../legal/privacy-policy.md) and
+[`../legal/terms-of-service.md`](../legal/terms-of-service.md), plus a frontend
+attribution checklist at [`../legal/attribution.md`](../legal/attribution.md).
+None is published, none has been reviewed by a lawyer, and there is no command
+that checks this gate.
+
+**Gate L stopped being paperwork and became a shipping blocker.** SeatGeek's API
+terms make both documents contractual preconditions:
+
+| Clause  | Requires                                                                                                                                                                                                            |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **4.4** | A Privacy Policy that accurately discloses what we collect, store, use and disclose                                                                                                                                 |
+| **4.3** | An Application EULA with terms **at least as protective of SeatGeek as their own API terms**, **expressly designating the SeatGeek Entities as third-party beneficiaries entitled to enforce it against end users** |
+
+Until both exist, `GET /v1/artists/:mbid/events` cannot be enabled at all.
+
+**What blocks publication is code, not drafting.** The privacy policy carries an
+appendix of `[OPEN]` items where the system does not do what a policy would have
+to claim:
+
+| #   | Blocker                                                                                                     |
+| --- | ----------------------------------------------------------------------------------------------------------- |
+| 1   | `audit_log` retains an IP address linked to a deleted account **indefinitely**; no purge exists             |
+| 2   | **No log retention period is configured anywhere** in the system                                            |
+| 3   | pgBackRest is **not deployed**, so there is no PITR window to state                                         |
+| 4   | **No DPAs on file** with Hetzner, Cloudflare, or WorkOS (GDPR Art. 28 requires written processor contracts) |
+| 5   | **No EU Article 27 representative** appointed                                                               |
+| 6   | Controller's state of organisation, postal address, and supervisory authority unfilled                      |
+| 7   | The US-access transfer mechanism is undecided                                                               |
+| 8   | No legal review                                                                                             |
+
+Items 1 through 3 are engineering tasks. **Item 1 is the sharpest**: the register
+currently keeps an IP address tied to an internal account id forever, after the
+account is gone, and no honest sentence can be written about that until it has a
+bound.
+
+### Gate R: signed and reproducible releases - NOT STARTED
+
+Gate S retired when distribution moved to GitHub Releases, and this replaces it
+rather than reducing the obligation. Nothing exists yet: there is no release
+workflow, no signing key, and no reproducibility check.
+
+What it will assert: artifacts are signed, the signature verifies against a
+published key, a rebuild from the tagged commit reproduces byte-identical
+artifacts in CI, the signing key is escrowed in two places the way the KEK is
+(`PULLFM-RISK-003`), a key-loss procedure is written, and `GET /v1/config`
+min-supported-build enforcement is tested.
+
+**Why this is not softer than the store gate.** A store rejects a bad build;
+GitHub Releases does not. Signing and reproducibility are the only things between
+a user and a substituted artifact, and the signing key is a credential whose
+disclosure lets an attacker publish an update that our own users' clients accept.
+
+### Gate 5: alerting - SPEC ONLY
+
+The alert list Gate 5 requires is specified in
+[`RUNBOOK-INCIDENT.md`](RUNBOOK-INCIDENT.md), with each condition, how to fire it
+synthetically, and the runbook section it links to. **Nothing in that list is
+configured.** It is a specification, and it is labelled as one in the document
+itself. Gate 5 stays open until each row can be demonstrated firing to ntfy
+inside 60 seconds with a timestamped log, and every runbook URL returns 200.
+
+---
+
 ## Honest notes
 
-- **Staging is provisioned and running; prod is not.** Both console-only
+- **Staging is torn down and prod has never been applied.** Both console-only
   prerequisites were cleared: the `pull-fm` Hetzner project exists and R2 is
-  enabled. `envs/prod` has never been applied.
+  enabled. Staging is ephemeral by design (PLAN.md section 10c) and is currently
+  left **DOWN**, which is also the correct end state for an environment that
+  cannot rebuild itself. `envs/shared` stays applied because a zone setting has
+  no hourly cost.
+- **An intention written in a plan is not a control.** PLAN.md section 10c said
+  "production sets `delete_protection` true; staging false" for a full day before
+  anything passed those variables, so the module default (`true`) applied to
+  staging and the first teardown stopped halfway with EUR 21.98/mo still
+  billing. The document was not wrong about what should happen; it was wrong to
+  read as a description of what did. This is the same failure class as the
+  `.semgrep/` note below, and both argue for the same rule: a claim is worth what
+  its verification command is worth.
 - **A control can be correct and still be in the wrong place.** The "only
   Cloudflare may reach the origin" firewall rule does not cover load-balanced
   traffic at all: it arrives on the private interface and Hetzner Cloud

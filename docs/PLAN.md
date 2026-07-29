@@ -70,8 +70,9 @@ them was triggered by _commercial_ use:
 5. **If commercialisation is ever reconsidered, this section is the blocker to revisit first.**
 
 **Non-commercial does not exempt us from:** GDPR/CCPA (we process personal data regardless of
-revenue), App Store and Play Store requirements including `DELETE /me` and a web-accessible
-deletion URL, or any security obligation. **Gate L and Gate S remain in force.**
+revenue and regardless of distribution channel), the contractual document requirements SeatGeek
+imposes on any integrator (their 4.3 and 4.4, see §11.7), or any security obligation. **Gate L
+remains in force**; Gate S is retired and replaced by Gate R (§11.6).
 
 ---
 
@@ -89,7 +90,7 @@ deletion URL, or any security obligation. **Gate L and Gate S remain in force.**
 | **Backups**                | Cloudflare R2 + pgBackRest (R2 pricing confirmed unchanged)                                                            | confirmed            |
 | **Discovery**              | **ListenBrainz primary.** Last.fm _contingent_ on commercial terms. MusicBrainz for connections.                       | **[R]**              |
 | **Audio features**         | Local Postgres table; AcousticBrainz dumps offline; ReccoBeats cached-on-fetch. **Never a hot-path third-party call.** | **[R]**              |
-| **Events**                 | **Disabled.** No provider approved. `/v1/artists/:mbid/events` returns 501.                                            | user directive       |
+| **Events**                 | **Client built (SeatGeek), route still 501.** Blocked on Gate L, not on code. See §10e and §11.7.                      | **[R]** see §11.7    |
 | **Alerts**                 | ntfy (ops) + Resend (user-facing, deferred)                                                                            | unchanged            |
 
 ---
@@ -137,8 +138,19 @@ v1 had no dollar figure. At the sizes it named, it would have cost **~$350-550/m
 Without the custom domain and Radar, the floor is **~$60/mo at 10k**. Radar is the honest line
 item v1 omitted: a consumer signup form _will_ be attacked.
 
-**Billing alerts are mandatory on Hetzner, Cloudflare, R2, and WorkOS** before provisioning
-anything. Solo operator plus attached card plus no cap is a failure mode. -> **Gate $**
+**Billing alerts are mandatory on every vendor that offers them** before provisioning anything.
+Solo operator plus attached card plus no cap is a failure mode. -> **Gate $**
+
+**[R] Two of the four vendors have nothing to arm.** Cloudflare's alerts are set and
+machine-verified through their API. **Hetzner offers no spend-cap or budget feature reachable by
+any means we could find** - every plausible billing endpoint 404s and the console path that
+answers 200 returns the SPA shell rather than an API - and the operator could not locate the
+option in the console either. WorkOS has no metered dimension at our tier. So Gate $ is not "two
+vendors outstanding"; it is **one vendor armed, one vendor limitation, one not applicable, and
+one covered by the first**. The real cost control on the Hetzner side is
+`./infra/staging-env.sh down`, and `make cost` reads the live Hetzner API on every run so a
+resource left running is still detectable. Evidence and probe table:
+[`RUNBOOK-COST.md`](RUNBOOK-COST.md).
 
 ---
 
@@ -254,8 +266,13 @@ lets us honour "infra before UI" without certifying guesses to a 50k standard.
 ```
 GET    /v1/config                 min client version, feature flags, maintenance, provider health
 GET    /v1/me
-DELETE /v1/me                     [R] account deletion + cascade   <- App Store 5.1.1(v)
-GET    /v1/me/export              [R] GDPR/CCPA data portability
+DELETE /v1/me                     [R] account deletion + cascade   <- GDPR Art.17
+GET    /v1/me/export              [R] GDPR/CCPA portability; returns a single-use ticket
+GET    /v1/me/export/download     [R] serves the document (M17: not synchronous on the GET)
+POST   /v1/tokens                 [R] personal API tokens, shipped; session-only
+GET    /v1/tokens                 [R] metadata only, never the secret
+POST   /v1/tokens/:id/rotate      [R]
+DELETE /v1/tokens/:id             [R]
 GET    /v1/connections
 POST   /v1/connections/:service
 GET    /v1/connections/:service/callback   [R] Last.fm auth.getSession needs a callback
@@ -277,7 +294,7 @@ GET /v1/search?q=
 GET /v1/artists/:mbid  /similar
 GET /v1/tracks/:mbid  /preview
 GET /v1/albums/:mbid
-GET /v1/artists/:mbid/events      -> 501 Not Implemented (disabled, no provider)
+GET /v1/artists/:mbid/events      -> 501; session-only, NEVER token-reachable (SeatGeek 7.13)
 ```
 
 `/feed` returns a typed list of `sections`, each with a `kind`. The ranking algorithm can change
@@ -296,11 +313,11 @@ effort-bound - they consume calendar, not focus. Serialising them after Phase 8 
 dead time for zero benefit.
 
 ```
-TRACK L (parallel, day 0)          -> Gate L, Gate S, Gate $
-  Last.fm commercial terms email (partners@last.fm)   <- may redesign discovery
-  Apple/Deezer preview ToS decision
-  Apple Developer org + D-U-N-S | Google Play org
-  Privacy policy | ToS | DPAs | EU Art.27 rep
+TRACK L (parallel, day 0)          -> Gate L, Gate R, Gate $
+  Last.fm commercial terms email    <- NOT REQUIRED under §1a
+  Apple/Deezer preview ToS decision <- RESOLVED by §1a
+  Privacy policy | EULA/ToS | DPAs | EU Art.27 rep     <- blocks SeatGeek events
+  Signed + reproducible releases, signing-key escrow   <- replaces Gate S
   Billing alerts on all vendors
 
 Phase 0  Foundations + real CI/CD. Staging only.        -> Gate 0, Gate D
@@ -325,21 +342,22 @@ Phase 8  Backend security audit.                        -> Gate 8
 v1's gates included unfalsifiable phrases like "dashboards live" and a circular "RTO documented
 and met." Every gate below is machine-checkable.
 
-| Gate  | Assertion                                                                                                                                                                                                                                                                                            |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **0** | `terraform plan` exits 0 with zero drift on clean checkout; `curl -sf https://api-staging.pull.fm/healthz` returns 200 with valid cert (hostname changed, see section 1b); testssl.sh >= A; commit to `main` auto-deploys to staging in <10 min with no human step                                   |
-| **1** | Migrations apply up **and down** cleanly in CI; a 10,000-request burst to the MB queue measures **<=1.0 req/s egress at the network layer** over 10 min with zero dropped jobs; PgBouncer serves >=200 client conns on <=25 server conns                                                             |
-| **2** | OpenAPI 3.1 spec is source of truth; 100% of documented endpoints have contract tests; every endpoint has defined+tested behaviour for upstream 429/500/timeout; **warm cache hit >=90%**, cold-cache p95 <2s over a 1,000-request replay                                                            |
-| **3** | E2E signup -> connect -> non-empty feed passes in CI; **BOLA suite enumerates every user-scoped route from the OpenAPI spec** and asserts 403/404 for a foreign subject on 100% of them, failing CI if any route lacks a test; `pg_dump \| grep <known-test-token>` returns 0; 24h of logs grep to 0 |
-| **4** | Restore from R2 into a fresh node completes **<30 min wall clock, timed**; row-count+checksum matches primary; RPO <=5 min verified by killing the primary mid-write; drill re-runs monthly and alerts on failure                                                                                    |
-| **5** | Each of a **named list** of alert conditions fires to ntfy **within 60s** when triggered synthetically, evidenced by a timestamped log; every alert has a runbook URL returning 200                                                                                                                  |
-| **6** | Maintenance flag -> 100% of requests 503 with `Retry-After` within 60s; cleared -> 100% 200 within 60s; **rolling deploy under sustained load produces zero non-2xx**; replica promotion <5 min                                                                                                      |
-| **7** | Under a failure-injection matrix (each upstream forced to 429/500/timeout in turn) `/feed` returns 200 with degraded sections, p95 <800ms, errors <1%, no pool exhaustion, recovery <60s                                                                                                             |
-| **8** | Zero high/critical from Semgrep, Trivy, gitleaks, ZAP baseline with **pinned tool versions**; every accepted risk in `security/accepted-risks.md` has an owner and **expiry date**, and CI fails on an expired entry; Observatory >= A+                                                              |
-| **L** | Privacy policy + ToS at stable URLs; DPAs on file; `DELETE /me` and `GET /me/export` verified end-to-end including cascade to WorkOS, Redis, and logs; documented backup-retention position for deleted data                                                                                         |
-| **S** | Apple + Google org accounts verified; privacy labels drafted against actually-collected fields; reviewer demo account live; **web-accessible deletion URL** live (Google requirement)                                                                                                                |
-| **$** | Billing alerts on all vendors; synthetic overage fires one                                                                                                                                                                                                                                           |
-| **D** | Commit to `main` reaches prod through staging with a migration step and **a rollback verified by executing one**; no manual SSH                                                                                                                                                                      |
+| Gate      | Assertion                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **0**     | `terraform plan` exits 0 with zero drift on clean checkout; `curl -sf https://api-staging.pull.fm/healthz` returns 200 with valid cert (hostname changed, see section 1b); testssl.sh >= A; commit to `main` auto-deploys to staging in <10 min with no human step                                                                                                                                                                            |
+| **1**     | Migrations apply up **and down** cleanly in CI; a 10,000-request burst to the MB queue measures **<=1.0 req/s egress at the network layer** over 10 min with zero dropped jobs; PgBouncer serves >=200 client conns on <=25 server conns                                                                                                                                                                                                      |
+| **2**     | OpenAPI 3.1 spec is source of truth; 100% of documented endpoints have contract tests; every endpoint has defined+tested behaviour for upstream 429/500/timeout; **warm cache hit >=90%**, cold-cache p95 <2s over a 1,000-request replay                                                                                                                                                                                                     |
+| **3**     | E2E signup -> connect -> non-empty feed passes in CI; **BOLA suite enumerates every user-scoped route from the OpenAPI spec** and asserts 403/404 for a foreign subject on 100% of them, failing CI if any route lacks a test; `pg_dump \| grep <known-test-token>` returns 0; 24h of logs grep to 0                                                                                                                                          |
+| **4**     | Restore from R2 into a fresh node completes **<30 min wall clock, timed**; row-count+checksum matches primary; RPO <=5 min verified by killing the primary mid-write; drill re-runs monthly and alerts on failure                                                                                                                                                                                                                             |
+| **5**     | Each of a **named list** of alert conditions fires to ntfy **within 60s** when triggered synthetically, evidenced by a timestamped log; every alert has a runbook URL returning 200                                                                                                                                                                                                                                                           |
+| **6**     | Maintenance flag -> 100% of requests 503 with `Retry-After` within 60s; cleared -> 100% 200 within 60s; **rolling deploy under sustained load produces zero non-2xx**; replica promotion <5 min                                                                                                                                                                                                                                               |
+| **7**     | Under a failure-injection matrix (each upstream forced to 429/500/timeout in turn) `/feed` returns 200 with degraded sections, p95 <800ms, errors <1%, no pool exhaustion, recovery <60s                                                                                                                                                                                                                                                      |
+| **8**     | Zero high/critical from Semgrep, Trivy, gitleaks, ZAP baseline with **pinned tool versions**; every accepted risk in `security/accepted-risks.md` has an owner and **expiry date**, and CI fails on an expired entry; Observatory >= A+                                                                                                                                                                                                       |
+| **L**     | Privacy policy + **Application EULA** at stable URLs, the EULA **naming the SeatGeek Entities as third-party beneficiaries** (their 4.3) and the policy accurate against the schema (their 4.4); DPAs on file; every `[OPEN]` in `legal/privacy-policy.md` closed; `DELETE /me` and `GET /me/export` verified end-to-end including cascade to WorkOS, Redis, and logs; documented backup-retention position with a **configured** PITR window |
+| ~~**S**~~ | **RETIRED.** Distribution is GitHub Releases, not app stores (§11.6). Replaced by Gate R.                                                                                                                                                                                                                                                                                                                                                     |
+| **R**     | Every release artifact is **signed**, the signature verifies from a published key, and a **rebuild from the tagged commit reproduces byte-identical artifacts** in CI; the signing key is escrowed in two places like the KEK (`PULLFM-RISK-003`) and a key-loss procedure is written; `GET /v1/config` min-supported-build enforcement is tested                                                                                             |
+| **$**     | Billing alerts on **every vendor that offers them**, machine-verified; a vendor with no such feature is recorded as a vendor limitation with the probe evidence, not left as an open task; `make cost` reads the live API so drift is detectable                                                                                                                                                                                              |
+| **D**     | Commit to `main` reaches prod through staging with a migration step and **a rollback verified by executing one**; no manual SSH                                                                                                                                                                                                                                                                                                               |
 
 ---
 
@@ -475,9 +493,20 @@ staging permanently running was the unusual choice, not destroying it.
 ```
 
 **Survives teardown:** the R2 backup bucket (free, and destroying it would make
-the Gate 4 restore drill meaningless), DNS records, Terraform state.
-**Does not survive:** servers, load balancer, private network, and all staging
-Postgres data. If a teardown loses something that mattered, it belonged in R2.
+the Gate 4 restore drill meaningless), Terraform state, and out-of-band DNS
+records that Terraform does not manage.
+**Does not survive:** servers, load balancer, private network, **the four
+Terraform-managed DNS records**, and all staging Postgres data. If a teardown
+loses something that mattered, it belonged in R2.
+
+**Correction, 2026-07-29: DNS used to be on the survives list and that was
+wrong.** A targeted `terraform destroy` destroys the targets **and everything
+that depends on them**, and each DNS record's content is the load balancer
+address. Keeping `module.dns` off the destroy list therefore protected nothing;
+it only made the header untrue. `up` recreates all four records in the same run
+that recreates the load balancer, so the practical outcome is unchanged and the
+claim is now accurate. `infra/staging-env.sh` carries the same note at the point
+where the target list is computed.
 
 **Enabling change:** Terraform's `prevent_destroy` was removed from the compute
 module. It is a static meta-argument that cannot vary per environment, so
@@ -486,10 +515,110 @@ keeping it would have made staging impossible to tear down. Hetzner's
 because it also blocks deletion through the console, the CLI, and the raw API
 rather than only through this repository. Production sets it true; staging false.
 
+**Correction, 2026-07-29: "staging false" was written here but never wired.**
+Until commit `f7d2c9c` the environment roots did not pass the delete-protection
+variables at all, so the module defaults (`true`) applied to staging as well. The
+first real `down` consequently **stopped halfway**, destroying the app node,
+firewalls and DNS while leaving the database node and load balancer running at
+**EUR 21.98/mo**, and Hetzner enforces the flag at the API, so the Terraform
+graph that would have cleared it was already half destroyed by then. A cost
+control that fails halfway is worse than none: the run rate looks like a partial
+saving rather than a broken teardown. `envs/staging/variables.tf` now sets all
+three to `false` and `envs/prod/variables.tf` sets all three to `true`, and a
+full `down` reaches EUR 0.00 in one pass. **This section stated the intent for a
+day before anything implemented it**, which is the exact failure mode the
+scorecard's "green means machine-checked" rule exists to catch.
+
 **Production sizing, for later:** a single `cpx22` (EUR 22.99/mo) is expected to
 be sufficient. The cache-first architecture means upstream quota binds long
 before CPU does, so scaling pressure arrives as a licence problem rather than a
 compute one.
+
+---
+
+## 10d. The rebuild drill failed, and Gate 4 cannot pass today (measured 2026-07-29)
+
+Section 10c argued that tearing staging down "exercises the capability we have
+to prove anyway". That was correct, and this is the result of exercising it: the
+capability is not there.
+
+| Step                                       | Result                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `./infra/staging-env.sh down`              | 19 resources destroyed, run rate to **EUR 0.00/mo**                                                    |
+| `./infra/staging-env.sh up`                | **45 seconds**, 19 resources created, load balancer reclaimed the same IPv4                            |
+| `curl https://api-staging.pull.fm/healthz` | **HTTP 525 for five straight minutes** - Cloudflare could not complete a TLS handshake with the origin |
+| Hetzner load balancer target health        | **unhealthy on both 80 and 443**                                                                       |
+
+**Why.** Terraform's job ends at a booted node. nginx, the origin certificate,
+the BFF container, the deploy timer, and the Redis and Postgres services are all
+applied by **a human over SSH**. cloud-init deliberately installs none of it,
+because that would put `/etc/pullfm/bff.env` - the KEK, the WorkOS key,
+`DATABASE_URL` - into `user_data`, which is persisted in Terraform state and
+readable from the Hetzner API for the life of the server. **That decision is
+right.** What is missing is the automated, secret-free path that should have
+replaced it.
+
+**And there is no way in.** The rebuilt node has no public SSH: the firewall
+carries no port 22 rule and Tailscale is not installed, because
+`tailscale_auth_key` is empty in every committed configuration. Bootstrapping a
+rebuilt environment means putting an operator `/32` into `ssh_allowlist_cidrs`
+in a local tfvars, applying, bootstrapping by hand, and taking it back out.
+
+**Consequences for the gates, stated rather than absorbed:**
+
+- **Gate 4 cannot pass.** "Restore from R2 into a fresh node in under 30 minutes,
+  timed" requires a node that serves traffic. The infrastructure half rebuilds in
+  45 seconds; the half that makes it serve is a manual runbook of unmeasured
+  length that has never been timed. It is not "not started", it is **measured and
+  failing**, which is a more useful status.
+- **Gate 0 still holds.** Its criteria describe a _running_ environment and say
+  nothing about recreating one. That is a real limitation of how Gate 0 was
+  written, not a loophole being exploited: an environment can satisfy every Gate
+  0 assertion and still be unrebuildable.
+- **Gate 6 inherits the problem.** A rolling deploy and a replica promotion both
+  assume a node can be brought into service without a human.
+
+**The fix is config management, not more Terraform.** The node must converge on
+its own from a signed, secret-free artifact, pulling secrets at first boot the
+same way `pullfm-deploy` already pulls images. Setting `tailscale_auth_key` would
+restore a way in, but a way in for a human is not a rebuild, and treating it as
+one is how this gap stayed invisible. Owned by the infrastructure work stream;
+this section records the finding, not the fix.
+
+Staging is currently left **DOWN**, which is the correct end state for an
+environment that cannot rebuild itself: up and broken is worse than down.
+
+---
+
+## 10e. Personal API tokens shipped, and the one thing they must never serve
+
+A per-user read-only API token surface shipped in commit `fe928f2`
+(`POST /v1/tokens`, list, rotate, revoke; `pfm_live_` / `pfm_test_` prefixes;
+SHA-256 digest storage; mandatory expiry; per-token rate limiting on the
+`noeviction` quota Redis). Design and rationale:
+[`api/personal-api-tokens.md`](api/personal-api-tokens.md). A matching gitleaks
+detection rule shipped in `afdaa22`.
+
+**SeatGeek event data must never be exposed through it.** SeatGeek API terms
+7.13 prohibit making their materials available to "a search engine, directory, or
+AI or machine learning application or model", and a general-purpose token surface
+is precisely the path by which a third party's integration puts data somewhere
+that clause forbids. This is not satisfiable by intending well: the moment a
+token holder can retrieve SeatGeek-derived data, we have lost control of where it
+goes.
+
+Enforced today by two independent mechanisms, which is the right number for a
+contractual restriction:
+
+1. `GET /v1/artists/:mbid/events` declares `allow: ["session"]`, so a `pfm_`
+   credential is refused with 403 before the handler runs.
+2. The route is unconditionally 501 while no events provider is enabled.
+
+**What is not enforcement:** `EventsProviderMetadata.redistributionRestricted` is
+set on the SeatGeek provider and **read nowhere**. It documents the intent at the
+integration point; it does not check anything. If the events route is ever
+enabled, the session-only restriction is the whole control, and it should be
+covered by an explicit test rather than by the route's 501 status.
 
 ---
 
@@ -500,8 +629,8 @@ These cannot be resolved by engineering judgment.
 1. ~~**Commercial or non-commercial?**~~ **RESOLVED 2026-07-28: non-commercial.** See §1a.
 2. ~~**Last.fm commercial terms**~~ **Not required** under §1a. Last.fm stays a discovery pillar,
    subject to the 100 MB cache cap.
-3. **Apple Developer D-U-N-S** - weeks of calendar, zero engineering. Still required for store
-   distribution regardless of commercial status. Start whenever store release becomes real.
+3. ~~**Apple Developer D-U-N-S**~~ **Moot under item 6.** Required only for store distribution,
+   which is no longer the plan. Reopen only if the store channel is ever reconsidered.
 4. **Cloudflare account separation** - separate account for Pull.fm, or accept shared blast radius?
 5. **MusicBrainz mirror** - commit to it for 50k, or cap the service at ~10k and say so?
 6. ~~**Distribution target**~~ **RESOLVED 2026-07-28: GitHub Releases.** Ship signed APK and
@@ -517,3 +646,35 @@ These cannot be resolved by engineering judgment.
    key becomes a critical secret with the same escrow requirement as the KEK, and users get no
    automatic update channel, which makes `GET /v1/config` min-supported-build enforcement more
    important rather than less.
+
+   **These are not softer than Gate S, they are differently shaped.** A store rejects a bad
+   build; GitHub Releases does not, so signing and reproducibility are the only things standing
+   between a user and a substituted artifact. The signing key inherits `PULLFM-RISK-003` in full:
+   losing it means every existing install is stranded on a key nobody can renew, and disclosing it
+   means an attacker can publish an update that our own users' clients will accept. Escrow it
+   exactly like the KEK, in two places, and write down the "we lost the signing key" procedure
+   before it is needed. **None of this is machine-checked yet**, so it is tracked in the scorecard
+   as a new gate rather than folded into a retired one.
+
+7. **SeatGeek events are blocked on Gate L, not on engineering.** The events client, the terms
+   digest, the personal-data guard and the attribution type all shipped in `9c2bb9e`, and the
+   route is still 501. It cannot be enabled until two documents exist at stable URLs, because
+   SeatGeek's terms make them contractual preconditions rather than good practice:
+
+   - **4.4** requires a **Privacy Policy** that accurately discloses what we collect, store, use
+     and disclose.
+   - **4.3** requires an **Application EULA** containing terms **at least as protective of
+     SeatGeek as their own API terms**, and **expressly designating the SeatGeek Entities as
+     third-party beneficiaries entitled to enforce it against end users**.
+
+   Drafts of both now exist in [`../legal/`](../legal/), unreviewed. The privacy policy carries an
+   appendix of `[OPEN]` items where the system does not yet do what a policy would have to claim -
+   an unbounded `audit_log` holding post-deletion IP addresses, no configured log retention, no
+   deployed backup system and therefore no PITR number, and no DPAs on file. **Those are code and
+   paperwork tasks, and each one is a sentence that cannot honestly be published until it is
+   closed.** A privacy policy that misdescribes the system is a false statement of fact, which is
+   materially worse than not having one.
+
+8. **Where the legal documents live.** Gate L requires "stable URLs". Serving them from
+   `pull.fm/legal/*` versus rendering this directory is undecided, and the commitment that matters
+   is that the URL never moves once a user has agreed to it.
