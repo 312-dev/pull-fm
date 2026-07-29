@@ -43,6 +43,43 @@ CREATE TEMP TABLE _pullfm_privcheck (
 -- REPLICATION along with pg_read_all_data and pg_write_all_data.
 -- ---------------------------------------------------------------------------
 
+-- THE neon_superuser ASSERTION IS SEPARATE, UNCONDITIONAL AND FAIL-CLOSED.
+--
+-- It is the single guarantee this whole file exists to hold, so it does not
+-- share the guarded loop below. The guard on that loop (`WHERE EXISTS ... FROM
+-- pg_roles`) is there because pg_has_role() raises when asked about a role that
+-- does not exist, and it has a failure mode of its own: if the role is missing,
+-- the guard removes the row and the check silently does not happen. A check that
+-- can vanish is not a guarantee.
+--
+-- So there are two distinct failures here and they are reported differently:
+--
+--   membership held      -> the role is an administrator. This is the
+--                           regression the file is watching for, and it can
+--                           come back: recreating the role through Terraform,
+--                           the Neon console or the CLI re-grants it, and the
+--                           grant is unrevocable afterwards (see
+--                           create-app-role.sql). Anything that recreates the
+--                           role must be followed by running this file.
+--   role does not exist  -> the check could not be performed. Reported as a
+--                           FAILURE rather than skipped, because on Neon this
+--                           role always exists and its absence means this is
+--                           not the database anybody thinks it is.
+INSERT INTO _pullfm_privcheck (category, check_, expected, actual, ok)
+SELECT
+  'GUARANTEE',
+  'pullfm_app is NOT a member of neon_superuser',
+  'false',
+  CASE
+    WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'neon_superuser')
+      THEN 'UNVERIFIABLE: role neon_superuser does not exist on this database'
+    WHEN pg_has_role('pullfm_app', 'neon_superuser', 'MEMBER')
+      THEN 'true: THE APPLICATION ROLE IS AN ADMINISTRATOR'
+    ELSE 'false'
+  END,
+  EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'neon_superuser')
+    AND NOT pg_has_role('pullfm_app', 'neon_superuser', 'MEMBER');
+
 INSERT INTO _pullfm_privcheck (category, check_, expected, actual, ok)
 SELECT
   'not an admin',
@@ -51,7 +88,7 @@ SELECT
   pg_has_role('pullfm_app', r, 'MEMBER')::text,
   NOT pg_has_role('pullfm_app', r, 'MEMBER')
 FROM unnest(ARRAY[
-  'neon_superuser', 'pg_read_all_data', 'pg_write_all_data',
+  'pg_read_all_data', 'pg_write_all_data',
   'pg_monitor', 'pg_signal_backend', 'pg_create_subscription',
   'pg_read_all_settings', 'neondb_owner'
 ]) AS t(r)
@@ -270,13 +307,30 @@ ORDER BY ok, seq;
 
 DO $$
 DECLARE
-  n int;
+  n         int;
+  guarantee int;
 BEGIN
   SELECT count(*) INTO n FROM _pullfm_privcheck WHERE NOT ok;
+  SELECT count(*) INTO guarantee
+  FROM _pullfm_privcheck WHERE NOT ok AND category = 'GUARANTEE';
+
+  IF guarantee > 0 THEN
+    RAISE EXCEPTION
+      'THE neon_superuser GUARANTEE HAS FAILED, along with % other assertion(s). '
+      'pullfm_app is an administrator, or it could not be proved not to be. This '
+      'cannot be repaired by re-running grant-app-role.sql: the membership is '
+      'unrevocable once Neon has granted it. The role must be dropped and '
+      'recreated with infra/neon/sql/create-app-role.sql. Stop the application '
+      'from using this credential first.', n - guarantee;
+  END IF;
+
   IF n > 0 THEN
     RAISE EXCEPTION
       '% privilege assertion(s) failed. pullfm_app is not in the intended state; '
       'see the FAIL rows above. Do not point DATABASE_URL at it until they pass.', n;
   END IF;
-  RAISE NOTICE 'all privilege assertions passed for pullfm_app on database %', current_database();
+
+  RAISE NOTICE
+    'all % privilege assertions passed for pullfm_app on database %',
+    (SELECT count(*) FROM _pullfm_privcheck), current_database();
 END $$;
