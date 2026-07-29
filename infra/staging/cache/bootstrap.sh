@@ -7,16 +7,24 @@
 # changed; the Postgres half was deleted rather than rewritten.
 #
 # IT NO LONGER ASSUMES A DEDICATED NODE. Pre-launch there is one application
-# node and no cache node, and Redis runs on the application node bound to the
-# loopback. PRIVATE_IP is what makes the difference and it is not cosmetic: it
-# is the address the containers publish on, so on the application node it MUST
-# be 127.0.0.1. That node has a public interface, and Redis must not answer on
-# it.
+# node and no cache node, and Redis runs on the application node. PRIVATE_IP is
+# what makes the difference and it is not cosmetic: it is the address the
+# containers publish on, and it must be an address that is reachable from
+# another container on the node and unreachable from the internet.
 #
-#   PRIVATE_IP=127.0.0.1   co-located on the application node (default shape)
+#   PRIVATE_IP=10.20.1.11  co-located on the application node (default shape):
+#                          that node's OWN private address
 #   PRIVATE_IP=10.20.1.21  the separate cache node, which is required before
 #                          app_node_count can go above one; see
 #                          infra/terraform/modules/compute/variables.tf
+#
+# NOT 127.0.0.1, AND THIS IS THE ONE THAT LOOKS RIGHT AND IS NOT. The loopback
+# is the obvious answer for a service that must not leave the node, and it works
+# for anything running on the host - but the BFF runs under Compose on a bridge
+# network, where 127.0.0.1 is its own namespace and not the host's. Redis
+# published there is invisible to it. The private address keeps the property the
+# loopback was chosen for (the public interface never carries Redis) while being
+# an address a sibling container can actually dial.
 #
 # infra/staging-env.sh passes it from the terraform output rather than letting
 # it default, so the two cannot disagree.
@@ -26,7 +34,7 @@
 # /etc/pullfm/cache.env already placed (it holds the secrets and is never in
 # git).
 #
-#   sudo PRIVATE_IP=127.0.0.1 bash bootstrap.sh        # on the app node
+#   sudo PRIVATE_IP=10.20.1.11 bash bootstrap.sh       # on the app node
 #   ssh -J pullfm@<app-public-ip> pullfm@10.20.1.21    # on a cache node
 #   sudo PRIVATE_IP=10.20.1.21 bash bootstrap.sh
 #
@@ -38,10 +46,14 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-# Defaults to the loopback, which is the pre-launch shape. A default of the
-# cache node's address would mean that forgetting to pass this on the
-# application node publishes Redis on an interface it must never answer on.
-PRIVATE_IP=${PRIVATE_IP:-127.0.0.1}
+# NO DEFAULT. Every candidate default is wrong somewhere: the loopback is
+# unreachable from the BFF's bridge network, the cache node's address does not
+# exist in the co-located shape, and the application node's address does not
+# exist on a cache node. infra/staging-env.sh passes the value from the
+# `redis_host` terraform output, which is the only place it is decided, so a
+# missing one is a caller bug and should stop here rather than bind somewhere
+# plausible and wrong.
+PRIVATE_IP=${PRIVATE_IP:?PRIVATE_IP is required: pass the redis_host terraform output}
 ENV_FILE=/etc/pullfm/cache.env
 
 if [ "$(id -u)" -ne 0 ]; then

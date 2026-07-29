@@ -31,11 +31,25 @@ locals {
 
   # Where the BFF and the scheduled jobs find Redis. With a separate cache node
   # it is that node's private address; without one, Redis runs on the
-  # application node itself and the answer is the loopback. This is an output
-  # rather than something the config-management layer infers, because a wrong
-  # answer here is not a connection error: it is a SECOND token bucket, and the
-  # MusicBrainz budget is global. See the guard on app_node_count.
-  redis_host = var.enable_cache_node ? local.cache_private_ip : "127.0.0.1"
+  # application node itself and the answer is THAT NODE'S OWN PRIVATE ADDRESS,
+  # not the loopback. This is an output rather than something the
+  # config-management layer infers, because a wrong answer here is not a
+  # connection error: it is a SECOND token bucket, and the MusicBrainz budget is
+  # global. See the guard on app_node_count.
+  #
+  # IT SAID 127.0.0.1 UNTIL THE FIRST TIME ANYTHING WAS DEPLOYED AGAINST IT, and
+  # the loopback cannot work here for a reason that is invisible on the host and
+  # fatal in the container. The BFF runs under Compose on a bridge network, so
+  # its 127.0.0.1 is its own namespace: a Redis published on the host loopback is
+  # not merely firewalled off from it, it is a different interface entirely. The
+  # symptom is the confusing one - /healthz answers 200 and /readyz reports redis
+  # down, because the process started fine and only the dependency is missing.
+  #
+  # The node's private address fixes it without widening exposure. Redis
+  # publishes on an interface that exists only inside the Hetzner private
+  # network, which carries our own nodes and nothing else, and still never on
+  # the public interface, which is the property the binding is there to keep.
+  redis_host = var.enable_cache_node ? local.cache_private_ip : local.app_private_ips[0]
 
   ssh_key_ids        = [for k in hcloud_ssh_key.operators : k.id]
   tailscale_auth_key = var.tailscale_auth_key == null ? "" : var.tailscale_auth_key

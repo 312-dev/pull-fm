@@ -48,7 +48,7 @@ output "ingress_mode" {
 }
 
 output "redis_host" {
-  description = "Host the BFF and the scheduled jobs must use for Redis: the cache node's private address when one exists, otherwise the loopback on the application node. A wrong value here is a second rate-limit bucket, not a connection error."
+  description = "Host the BFF and the scheduled jobs must use for Redis: the cache node's private address when one exists, otherwise the application node's own private address. Never the loopback - the BFF runs on a bridge network and its loopback is its own namespace. A wrong value here is a second rate-limit bucket, not a connection error."
   value       = local.redis_host
 }
 

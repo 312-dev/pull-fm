@@ -7,7 +7,7 @@
 #   source "${ROOT}/infra/lib/secrets.sh"
 #   dir="$(pullfm_secret_workdir)"       # 0700; the CALLER owns the cleanup trap
 #   trap 'rm -rf "${dir}"' EXIT INT TERM
-#   pullfm_render_staging_secrets "${dir}"
+#   pullfm_render_staging_secrets "${dir}" "${redis_host}"
 #
 # ---------------------------------------------------------------------------
 # The rules this file exists to keep
@@ -36,7 +36,16 @@ readonly PULLFM_SECRETS_VAULT="${PULLFM_OP_VAULT:-MCP}"
 
 # Public, non-secret facts. Here rather than in the env file template so that a
 # reader can see at a glance that they are NOT credentials.
-readonly PULLFM_CACHE_PRIVATE_IP="${PULLFM_CACHE_PRIVATE_IP:-10.20.1.21}"
+#
+# THE REDIS ADDRESS IS A PARAMETER, NOT A CONSTANT, and this is the correction
+# that made the co-located shape work at all. Pre-launch there is one node with
+# Redis bound to its loopback, and `cache/bootstrap.sh` already took PRIVATE_IP
+# for exactly that reason - but this file hardcoded the cache node's address, so
+# every rendered bff.env pointed REDIS_URL at 10.20.1.21, a host that is not
+# created. The BFF then started, answered /healthz, and failed /readyz on a
+# Redis it could never reach. Both halves now come from the same terraform
+# output (`redis_host`), passed in by the caller.
+readonly PULLFM_CACHE_PRIVATE_IP_DEFAULT="${PULLFM_CACHE_PRIVATE_IP:-10.20.1.21}"
 readonly PULLFM_WORKOS_CLIENT_ID="${PULLFM_WORKOS_CLIENT_ID:-client_01KYMZ05X60BJKZKY5RTA5YP8B}"
 readonly PULLFM_PUBLIC_BASE_URL="${PULLFM_PUBLIC_BASE_URL:-https://api-staging.pull.fm}"
 readonly PULLFM_MB_USER_AGENT="${PULLFM_MB_USER_AGENT:-PullFM/0.1.0 (ope@312.dev)}"
@@ -91,10 +100,17 @@ pullfm_secret_workdir() {
 #   origin.key          its private key
 #   origin-pull-ca.pem  Cloudflare's origin-pull CA, a PUBLIC certificate
 #
+# The second argument is the Redis host, and it comes from the `redis_host`
+# terraform output rather than from a default here. Both shapes are legal and
+# they differ only in that address, so hardcoding it meant one of the two was
+# always wrong: the co-located shape rendered REDIS_URL pointing at a cache node
+# that is not created.
+#
 # Every file is 0600 before anything is written into it, so there is no window
 # in which a partially written credential is world readable.
 pullfm_render_staging_secrets() {
-  local dir="${1:?usage: pullfm_render_staging_secrets <dir>}"
+  local dir="${1:?usage: pullfm_render_staging_secrets <dir> [redis_host]}"
+  local redis_host="${2:-${PULLFM_CACHE_PRIVATE_IP_DEFAULT}}"
 
   command -v op >/dev/null ||
     _pullfm_secret_die "1Password CLI (op) not found" || return 1
@@ -148,7 +164,7 @@ pullfm_render_staging_secrets() {
 # Rendered by infra/lib/secrets.sh from 1Password. NEVER COMMIT THIS FILE.
 REDIS_CACHE_PASSWORD=${redis_cache_pw}
 REDIS_QUOTA_PASSWORD=${redis_quota_pw}
-PRIVATE_IP=${PULLFM_CACHE_PRIVATE_IP}
+PRIVATE_IP=${redis_host}
 EOF
 
   # --- application node ------------------------------------------------------
@@ -167,8 +183,8 @@ PORT=3000
 
 DATABASE_URL=${database_url}
 DATABASE_URL_DIRECT=${database_url_direct}
-REDIS_URL=redis://:${redis_cache_pw}@${PULLFM_CACHE_PRIVATE_IP}:6379
-REDIS_QUOTA_URL=redis://:${redis_quota_pw}@${PULLFM_CACHE_PRIVATE_IP}:6380
+REDIS_URL=redis://:${redis_cache_pw}@${redis_host}:6379
+REDIS_QUOTA_URL=redis://:${redis_quota_pw}@${redis_host}:6380
 
 CREDENTIAL_KEKS=${kek_id}=${kek}
 CREDENTIAL_ACTIVE_KEK_ID=${kek_id}

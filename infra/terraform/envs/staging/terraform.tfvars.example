@@ -47,8 +47,21 @@ app_node_count       = 1
 enable_cache_node    = false
 enable_load_balancer = false
 
-app_server_type   = "cax11" # 2 vCPU ARM / 4 GB, and it now also runs Redis
-cache_server_type = "cax11" # only created when enable_cache_node = true
+# CHECK STOCK BEFORE COPYING THESE. Hetzner marks a type unavailable per
+# LOCATION and only says so when the server is created, so an out-of-stock type
+# passes `terraform plan` and fails `terraform apply`. Measured 2026-07-29 in
+# hel1: cax11 and cx23 were orderable in no location at all, and cpx21 only in
+# ash and hil, which are in the United States and therefore not an option while
+# the database is a Neon branch in eu-central-1. cpx22 was the only 4 GB type in
+# stock in the EU, at roughly twice the price. Whatever is in stock, 4 GB is a
+# floor: 768 MB of BFF, 512 MB of Redis and a 384 MB job container do not fit in
+# 2 GB.
+#
+#   curl -H "Authorization: Bearer $HCLOUD_TOKEN" \
+#     https://api.hetzner.cloud/v1/datacenters | jq '.datacenters[]
+#     | {loc: .location.name, available: .server_types.available}'
+app_server_type   = "cpx22" # 2 vCPU x86 / 4 GB, and it now also runs Redis
+cache_server_type = "cpx11" # only created when enable_cache_node = true
 
 # --- durability ------------------------------------------------------------
 # There is nothing durable on a Hetzner node any more. Postgres moved to Neon

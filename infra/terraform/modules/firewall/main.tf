@@ -17,9 +17,26 @@ locals {
 
   # Outbound allowlist shared by both firewalls. TCP/UDP only: ICMP takes no
   # port and is declared as its own static rule below.
+  #
+  # A Hetzner Cloud Firewall with ANY outbound rule drops everything else, so
+  # this list is exhaustive rather than illustrative and an omission is a
+  # dependency the node cannot reach at all.
   egress_ports = var.restrict_egress ? [
     { protocol = "tcp", port = "80", description = "HTTP to package mirrors and upstreams that still 301 from :80" },
     { protocol = "tcp", port = "443", description = "HTTPS to music upstreams, WorkOS, R2 backups, Tailscale DERP" },
+    # POSTGRES, AND IT WAS MISSING UNTIL THE FIRST NODE WAS ACTUALLY DEPLOYED.
+    #
+    # This list was written when the database was a node inside the private
+    # network, where Hetzner Cloud Firewalls do not filter and no rule was
+    # needed. The Neon migration moved the database to the public internet and
+    # to a hostname the node dials on 5432, and nothing about that migration
+    # touched this file - so the firewall said "443 is enough" while the
+    # application's most important dependency had moved to a port the firewall
+    # dropped. It is invisible in review because both halves are individually
+    # correct, and invisible in `terraform plan` because a plan cannot know what
+    # the node will dial. It surfaces as the migration step of the first deploy
+    # hanging until its connect timeout.
+    { protocol = "tcp", port = "5432", description = "Postgres to the Neon pooled and direct endpoints. Not a private-network hop any more: see docs/runbooks/neon-migration.md" },
     { protocol = "tcp", port = "53", description = "DNS over TCP for truncated or DNSSEC-signed answers" },
     { protocol = "udp", port = "53", description = "DNS" },
     { protocol = "udp", port = "123", description = "NTP. Token expiry and JWT validation both fail closed on clock skew" },

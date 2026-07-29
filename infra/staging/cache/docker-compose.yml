@@ -15,9 +15,12 @@
 # limit is 1 req/s for the entire service.
 #
 # Nothing here is reachable from the internet, and PRIVATE_IP is what guarantees
-# it. Every published port is bound explicitly to that address: 127.0.0.1 when
-# co-located on the application node, which HAS a public interface, and the
-# private address on a dedicated cache node, which has no public IPv4 at all.
+# it. Every published port is bound explicitly to that address, and in both
+# shapes that address lives only inside the Hetzner private network: the
+# application node's own private address when Redis is co-located there, and the
+# cache node's when there is a cache node. Never the public interface, and never
+# the loopback either - a port published on the host's loopback is unreachable
+# from the BFF, which runs on a bridge network where 127.0.0.1 means itself.
 # A missing or wrong PRIVATE_IP is the one edit here that could expose Redis, so
 # the compose file refuses to interpolate an empty value.
 #

@@ -311,7 +311,7 @@ tf_output() {
 }
 
 cmd_converge() {
-  local app_ip cache_ip secrets ingress_mode redis_host
+  local app_ip cache_ip secrets ingress_mode redis_host cache_private_ip colocated
 
   # THE SHAPE COMES FROM TERRAFORM, NOT FROM THIS SCRIPT. Pre-launch the
   # environment is one application node with Redis co-located on it and no load
@@ -320,14 +320,25 @@ cmd_converge() {
   # configured is read from the state rather than assumed, because the two sides
   # of the PROXY-protocol decision disagreeing answers 400 to every connection.
   ingress_mode="$(tf_output ingress_mode direct)"
-  redis_host="$(tf_output redis_host 127.0.0.1)"
+  cache_private_ip="$(tf_output cache_private_ip 10.20.1.21)"
+  redis_host="$(tf_output redis_host 10.20.1.11)"
+
+  # CO-LOCATION IS DECIDED BY WHETHER REDIS LIVES AT THE CACHE NODE'S ADDRESS,
+  # not by whether it lives at the loopback. It used to be the latter, and that
+  # stopped being a valid test the moment the co-located shape moved off the
+  # loopback onto the application node's own private address - which it had to,
+  # because the BFF runs on a bridge network and cannot reach a service
+  # published on the host's loopback. The cache node's address is reserved
+  # whether or not the node exists, so this comparison is stable either way.
+  colocated=true
+  [[ "${redis_host}" == "${cache_private_ip}" ]] && colocated=false
 
   app_ip="${1:-$(tailnet_ip "${APP_NODE}")}"
   [[ -n "${app_ip}" ]] ||
     die "the staging application node must be on the tailnet before converging (run 'up')"
 
   cache_ip="${2:-}"
-  if [[ "${redis_host}" != "127.0.0.1" ]]; then
+  if [[ "${colocated}" == false ]]; then
     cache_ip="${cache_ip:-$(tailnet_ip "${CACHE_NODE}")}"
     [[ -n "${cache_ip}" ]] ||
       die "enable_cache_node is set, so ${CACHE_NODE} must be on the tailnet before converging"
@@ -339,7 +350,10 @@ cmd_converge() {
   # the command substitution above exits, which is before anything is written.
   # shellcheck disable=SC2064
   trap "rm -rf '${secrets}'" EXIT INT TERM
-  pullfm_render_staging_secrets "${secrets}" || die "could not render secrets"
+  # The Redis address is passed, never defaulted: the rendered REDIS_URL and the
+  # address the Redis containers publish on have to be the same value, and the
+  # only place that value is decided is the terraform output above.
+  pullfm_render_staging_secrets "${secrets}" "${redis_host}" || die "could not render secrets"
 
   # Redis first, wherever it lives. Ordering matters less than it did when this
   # node held Postgres and the app node ran migrations against it on first
@@ -349,14 +363,14 @@ cmd_converge() {
   #
   # PRIVATE_IP is what the Redis instances bind to, and it is the whole
   # difference between the two shapes: the cache node's private address when
-  # there is a cache node, the loopback when Redis rides on the application node.
-  # Binding to the loopback there is not a detail either: the application node
-  # HAS a public interface, and Redis must not answer on it.
-  if [[ "${redis_host}" == "127.0.0.1" ]]; then
+  # there is a cache node, the application node's own private address when Redis
+  # rides on the application node. Never the public interface and never 0.0.0.0
+  # on a node that has one.
+  if [[ "${colocated}" == true ]]; then
     log "converging Redis onto ${APP_NODE} (${app_ip}), co-located"
     converge_node "${app_ip}" "${ROOT}/infra/staging/cache" "${secrets}" "cache.env" \
       "${secrets}/cache.env"
-    ssh_node "${app_ip}" "cd /tmp/pullfm-config && sudo PRIVATE_IP=127.0.0.1 bash bootstrap.sh"
+    ssh_node "${app_ip}" "cd /tmp/pullfm-config && sudo PRIVATE_IP=${redis_host} bash bootstrap.sh"
   else
     log "converging ${CACHE_NODE} (${cache_ip})"
     converge_node "${cache_ip}" "${ROOT}/infra/staging/cache" "${secrets}" "cache.env" \
@@ -451,8 +465,13 @@ cmd_up() {
   log "waiting for cloud-init"
   local app_ip cache_ip=""
   # Only when one was provisioned. Waiting ten minutes for a node the
-  # configuration no longer creates is how a rebuild becomes a support call.
-  if [[ "$(tf_output redis_host 127.0.0.1)" != "127.0.0.1" ]]; then
+  # configuration no longer creates is how a rebuild becomes a support call -
+  # and it is exactly what happened when the co-located Redis address stopped
+  # being the loopback and this test still asked whether it was. The question
+  # "is Redis somewhere other than the loopback" was never the question; "is
+  # Redis at the CACHE NODE'S address" is, and that address is reserved whether
+  # or not the node exists, so the comparison holds in both shapes.
+  if [[ "$(tf_output redis_host 10.20.1.11)" == "$(tf_output cache_private_ip 10.20.1.21)" ]]; then
     cache_ip="$(wait_for_node "${CACHE_NODE}")"
   fi
   app_ip="$(wait_for_node "${APP_NODE}")"
