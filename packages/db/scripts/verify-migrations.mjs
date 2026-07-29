@@ -12,6 +12,24 @@
  * Usage:
  *   node scripts/verify-migrations.mjs
  *   ADMIN_URL=postgres://user:pw@host:5432/postgres node scripts/verify-migrations.mjs
+ *
+ * THREE THINGS HERE EXIST BECAUSE THIS WAS RUN AGAINST NEON ON 2026-07-29 AND
+ * NOT BECAUSE THEY WERE REASONED ABOUT. Every assertion below passed on the
+ * first attempt; all three failures were in the harness, and all three are
+ * invisible against a local docker Postgres:
+ *
+ *   1. `scrub()`. execFileSync puts the ENTIRE command line into err.message,
+ *      and the command line is a connection string. Locally that leaks
+ *      `pullfm_local_dev_not_a_secret`, which is why nobody noticed. Against
+ *      Neon it prints the production database owner's password to stdout, into
+ *      CI logs and into whatever scrollback the operator is using. A harness
+ *      that discloses the credential on failure is worse than no harness.
+ *   2. `WITH (FORCE)` on DROP DATABASE. See dropScratch().
+ *   3. `scratchUrl()` rewrites only the PATH. The previous expression
+ *      (`ADMIN_URL.replace(/\/[^/]*$/, "/" + db)`) also ate the query string,
+ *      so `?sslmode=require` was silently discarded. Locally there is no query
+ *      string, so this was invisible; against Neon it downgraded every one of
+ *      these connections from `require` to libpq's default `prefer`.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -28,16 +46,47 @@ const ADMIN_URL =
 const SCRATCH_DB = process.env["SCRATCH_DB"] ?? "pullfm_migration_verify";
 
 let failures = 0;
-const pass = (m) => console.log(`  PASS  ${m}`);
+
+/**
+ * Removes the password from anything on its way to a log. The userinfo half of
+ * a postgres URI is `user:password@`, so this replaces the password of every
+ * connection string in the text regardless of which one it came from.
+ *
+ * Applied to every message this script emits, not just the ones known to carry
+ * a URL: the point is that a future edit cannot reintroduce the disclosure by
+ * logging a field nobody thought about.
+ */
+const scrub = (s) =>
+  String(s).replace(
+    /(postgres(?:ql)?:\/\/[^:@/\s]+:)[^@\s]*@/gi,
+    "$1<REDACTED>@",
+  );
+
+const pass = (m) => console.log(`  PASS  ${scrub(m)}`);
 const fail = (m, detail) => {
   failures++;
-  console.error(`  FAIL  ${m}`);
-  if (detail) console.error(`        ${String(detail).split("\n")[0]}`);
+  console.error(`  FAIL  ${scrub(m)}`);
+  if (detail) console.error(`        ${scrub(detail).split("\n")[0]}`);
 };
+
+/**
+ * ADMIN_URL with its database swapped, preserving the query string.
+ *
+ * Splitting on `?` first is the whole point: `?sslmode=require` is not part of
+ * the path and must survive. Neon rejects nothing when it is dropped, it just
+ * negotiates under libpq's weaker default, which is the kind of downgrade that
+ * never announces itself.
+ */
+function scratchUrl(db) {
+  const q = ADMIN_URL.indexOf("?");
+  const base = q === -1 ? ADMIN_URL : ADMIN_URL.slice(0, q);
+  const query = q === -1 ? "" : ADMIN_URL.slice(q);
+  return `${base.replace(/\/[^/]*$/, `/${db}`)}${query}`;
+}
 
 /** Runs SQL via psql. Returns stdout, or throws with stderr attached. */
 function psql(db, sql, { expectFailure = false } = {}) {
-  const url = ADMIN_URL.replace(/\/[^/]*$/, `/${db}`);
+  const url = scratchUrl(db);
   try {
     const out = execFileSync(
       "psql",
@@ -48,18 +97,52 @@ function psql(db, sql, { expectFailure = false } = {}) {
       throw new Error(`expected failure but statement succeeded`);
     return out.trim();
   } catch (err) {
-    if (expectFailure) return String(err.stderr ?? err.message);
-    throw new Error(`${err.message}\n${String(err.stderr ?? "")}`);
+    if (expectFailure) return scrub(err.stderr ?? err.message);
+    throw new Error(scrub(`${err.message}\n${String(err.stderr ?? "")}`));
   }
 }
 
 function psqlFile(db, sql) {
-  const url = ADMIN_URL.replace(/\/[^/]*$/, `/${db}`);
-  return execFileSync("psql", [url, "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"], {
-    encoding: "utf8",
-    input: sql,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const url = scratchUrl(db);
+  try {
+    return execFileSync(
+      "psql",
+      [url, "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
+      {
+        encoding: "utf8",
+        input: sql,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+  } catch (err) {
+    throw new Error(scrub(`${err.message}\n${String(err.stderr ?? "")}`));
+  }
+}
+
+/**
+ * Drops the scratch database, terminating anything still attached to it.
+ *
+ * `WITH (FORCE)` is not defensive programming, it is required against Neon and
+ * it took a failed run to learn that. A plain DROP DATABASE succeeds locally
+ * because a docker Postgres reaps a backend the instant the client
+ * disconnects. Neon does not: its proxy holds the server-side backend open
+ * after psql has exited, and the backend was still there, `state=idle`,
+ * `application_name=psql`, THREE MINUTES later. So the drop in the `finally`
+ * block failed with
+ *
+ *   ERROR:  database "pullfm_migration_verify" is being accessed by other users
+ *   DETAIL:  There is 1 other session using the database.
+ *
+ * and the scratch database survived the run, which is exactly the residue this
+ * harness is supposed to guarantee it never leaves. Waiting does not fix it;
+ * the session had to be terminated by hand. FORCE does that as part of the drop
+ * and is a no-op locally, where there is nothing left to terminate.
+ *
+ * Requires Postgres 13 or newer, which both the local stack (18) and Neon (18)
+ * satisfy.
+ */
+function dropScratch() {
+  psql("postgres", `DROP DATABASE IF EXISTS ${SCRATCH_DB} WITH (FORCE)`);
 }
 
 /** Splits a dbmate-style migration into its up and down halves. */
@@ -95,7 +178,7 @@ console.log(
 );
 
 // --- Setup -----------------------------------------------------------------
-psql("postgres", `DROP DATABASE IF EXISTS ${SCRATCH_DB}`);
+dropScratch();
 psql("postgres", `CREATE DATABASE ${SCRATCH_DB}`);
 
 try {
@@ -361,7 +444,7 @@ try {
     fail("cache_size_by_provider view is missing");
   }
 } finally {
-  psql("postgres", `DROP DATABASE IF EXISTS ${SCRATCH_DB}`);
+  dropScratch();
 }
 
 console.log(

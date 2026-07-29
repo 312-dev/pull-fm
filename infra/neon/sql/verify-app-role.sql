@@ -25,6 +25,36 @@
 
 \set ON_ERROR_STOP on
 
+-- DROP FIRST, AND THIS IS NOT DEFENSIVE HABIT. IT IS REQUIRED ON NEON.
+--
+-- A temp table normally cannot outlive the session that made it, so a bare
+-- CREATE TEMP TABLE here would be safe by construction. That guarantee does not
+-- hold on Neon. Measured against the live staging branch on 2026-07-29, on the
+-- DIRECT endpoint:
+--
+--   * three separate psql invocations, run one after another, were served by
+--     the same server backend;
+--   * a temp table created by the first was visible to the second and the
+--     third;
+--   * `pg_my_temp_schema()` returned the same schema (`pg_temp_9`) each time.
+--
+-- Neon parks an idle backend after the client disconnects rather than tearing
+-- it down, and hands it, with its session state intact, to a later connection.
+-- So the SECOND run of this file failed at exactly this statement:
+--
+--   ERROR:  relation "_pullfm_privcheck" already exists
+--
+-- which made the file non-idempotent against Neon while remaining perfectly
+-- idempotent against a local Postgres, where the backend really does die with
+-- the client. Since re-running this file is the documented response to "I am
+-- not sure whether the role is in the intended state", a version that fails on
+-- its second run is a version nobody can use to answer that question.
+--
+-- Dropping first also cleans up after a previous run that aborted partway
+-- through, which is the case where re-running matters most. It is a no-op on a
+-- genuinely fresh session.
+DROP TABLE IF EXISTS _pullfm_privcheck;
+
 CREATE TEMP TABLE _pullfm_privcheck (
   seq      int GENERATED ALWAYS AS IDENTITY,
   category text NOT NULL,

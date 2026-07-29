@@ -1,17 +1,39 @@
 # Runbook: migrating the database to Neon
 
-> **Status: APPLIED 2026-07-29.** The Terraform in section 5.1 has been applied
-> against the live Neon control plane: 4 imported, 2 added, 1 changed, 0
-> destroyed, matching [Appendix A](#appendix-a-the-verified-plan). The staging
-> branch is `br-calm-morning-asjr2h1v` and its endpoint is
-> `ep-super-wind-asbuczm7`.
+> **Status: APPLIED 2026-07-29. SCHEMA AND ROLES MIGRATED 2026-07-29.** The
+> Terraform in section 5.1 has been applied against the live Neon control
+> plane: 4 imported, 2 added, 1 changed, 0 destroyed, matching
+> [Appendix A](#appendix-a-the-verified-plan). The staging branch is
+> `br-calm-morning-asjr2h1v` and its endpoint is `ep-super-wind-asbuczm7`.
 >
-> **The rest of the cutover has not happened.** No data has moved, the
-> application still has to be pointed at Neon, the least-privilege role in
-> section 5.5 has not been created, and the Hetzner Postgres node has not been
-> retired. Two apply-time defects were found and are written up in
+> Since then, and recorded in full in
+> [section 11](#11-what-actually-happened-on-the-schema-and-role-cutover):
+> all six migrations are applied to **both** branches, `pullfm_app` exists on
+> both with 34 of 34 privilege assertions passing, its least privilege has been
+> proved by connecting as it rather than by reading grants back, Gate 1 passes
+> against Neon, and all four connection strings are in 1Password. A re-plan
+> still reports no changes, and both endpoints report
+> `pooler_enabled=True, mode=transaction` from the API.
+>
+> **The rest of the cutover has not happened.** No data has moved (there is
+> none), the application has not been pointed at Neon and not converged, and
+> the Hetzner Postgres node has not been retired. Two apply-time defects were
+> found and are written up in
 > [section 10d](#10d-two-defects-that-only-appeared-against-real-infrastructure);
-> both are fixed, and `terraform plan` is clean again.
+> both are fixed. Four further defects, all in this repository's own scripts
+> rather than in Neon, were found by running them against Neon: three in the
+> Gate 1 harness
+> ([section 11c](#11c-three-harness-defects-that-only-a-real-credential-exposes))
+> and one in `verify-app-role.sql`, which was not idempotent on Neon because
+> **Neon parks an idle backend and hands its session state to the next client**
+> ([section 11f](#11f-neon-parks-idle-backends-and-session-state-survives-the-client)).
+> All four are fixed. 11f also describes an unfixed hazard for the migration
+> runner's advisory lock.
+>
+> **One action is outstanding and it is a credential one:** the STAGING owner
+> password was printed to a terminal by the Gate 1 harness before that defect
+> was fixed, so it should be rotated per [section 6](#6-connection-string-rotation).
+> The production owner password was not exposed.
 >
 > The other runbooks in this repository live at `docs/RUNBOOK-*.md`. This one is
 > under `docs/runbooks/` because it is a one-off migration with a finite life,
@@ -198,7 +220,7 @@ trust boundary for the production database credential.
 
 ## 4. Schema migration (`packages/db/migrations`)
 
-There are four migrations (`0001_initial` through `0004_preview_store_url`) and
+There are six migrations (`0001_initial` through `0006_audit_log_retention`) and
 they are dbmate-style files with `-- migrate:up` and `-- migrate:down` markers.
 Nothing about them changes for Neon. Two things about the environment do.
 
@@ -220,9 +242,59 @@ before cutover:
 psql "$DATABASE_URL_DIRECT" -c '\dx'
 ```
 
-`gen_random_uuid()` (used by `user_oauth_connections` in `docs/PLAN.md` section 5) is built into `pgcrypto`, which Neon ships enabled. Confirm rather than
-assume; an extension missing on `main` is also missing on every branch cut from
-it.
+**Two claims that used to be in this section were wrong, and the pre-cutover
+check is what found them.** Measured against both live branches on 2026-07-29:
+
+> `gen_random_uuid()` is built into `pgcrypto`, which Neon ships enabled.
+
+Both halves are false, and they are false in opposite directions, which is why
+the net effect looked fine.
+
+- **Neon ships none of them enabled.** `pg_extension` on a fresh branch contains
+  `plpgsql` and nothing else. `pgcrypto`, `pg_trgm`, `unaccent` and `citext` were
+  all `installed_version = NULL` on `main` and on `staging`.
+- **`gen_random_uuid()` does not come from `pgcrypto` any more.** It has been a
+  core function since Postgres 13, and this project runs 18. Confirmed by asking
+  the catalog which extension owns it rather than by reading release notes:
+
+  ```sql
+  SELECT e.extname FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
+   WHERE d.objid = 'gen_random_uuid'::regproc AND d.deptype = 'e';
+  -- 0 rows: the function is core, owned by no extension
+  ```
+
+So the thing the old text said was guaranteed was in fact absent, and the
+function it was worried about would have worked regardless. **Neither is a
+reason to relax.** `citext` is load-bearing for `users.email`, `pg_trgm` for the
+`gin_trgm_ops` index in 0001, and `unaccent` for the crosswalk, and all three
+were genuinely missing.
+
+**Nothing had to be created by hand, because migration 0001 creates all four
+itself** (`CREATE EXTENSION IF NOT EXISTS`), and that turns out to be the load
+bearing design decision in this whole section: the local init script is a
+convenience, and the migration is the source of truth. What had to be verified
+was that the OWNER is permitted to run those statements on Neon, since
+`neondb_owner` is not a superuser:
+
+```
+citext | trusted=true | superuser_required=true
+pg_trgm | trusted=true | superuser_required=true
+pgcrypto | trusted=true | superuser_required=true
+unaccent | trusted=true | superuser_required=true
+```
+
+`trusted = true` is the column that decides it: a trusted extension may be
+installed by any role holding `CREATE` on the database, which `neondb_owner`
+has. Rehearsed inside a transaction and rolled back before anything was
+committed, on both branches, and all four created cleanly. An extension outside
+that set (`hstore`, say) is refused even to the owner, which the app-role probe
+in [section 11b](#11b-least-privilege-proved-by-connecting-as-the-role) shows
+incidentally.
+
+The general rule this leaves behind: **check every extension the migrations
+reference, and check whether the owner may create it, rather than checking the
+one extension somebody remembered.** An extension missing on `main` is also
+missing on every branch cut from it.
 
 **Run migrations against the DIRECT endpoint.** See section 0. The deploy path
 already does the right thing because `pullfm-deploy` passes the whole
@@ -399,11 +471,18 @@ The database is not built by this script any more and is not torn down by it.
 
 ### 5.5 Create the least-privilege application role
 
-**This has to come after 5.4, not before it.** `grant-app-role.sql` grants on the
-tables that exist, and the tables are created by the migration step that 5.4
-runs. Running it against an empty database grants nothing on the schema and only
-the `ALTER DEFAULT PRIVILEGES` half takes effect; the result looks successful and
-leaves the existing tables unreadable to the application.
+**This has to come after the MIGRATIONS, not after 5.4 specifically.**
+`grant-app-role.sql` grants on the tables that exist, and the tables are created
+by the migration step. Running it against an empty database grants nothing on
+the schema and only the `ALTER DEFAULT PRIVILEGES` half takes effect; the result
+looks successful and leaves the existing tables unreadable to the application.
+
+Earlier revisions of this section said "after 5.4", because 5.4 is what happened
+to run the migrations. That is the wrong dependency to write down: on 2026-07-29
+the migrations were run directly with `migrate.mjs` against
+`DATABASE_URL_DIRECT` and 5.4 was not run at all, which satisfies the real
+constraint perfectly well. See
+[section 11](#11-what-actually-happened-on-the-schema-and-role-cutover).
 
 **Run all three scripts against every branch that serves traffic.** A Neon
 branch is a copy-on-write clone taken at a moment in time: it inherits the roles
@@ -934,6 +1013,294 @@ it: **the relative assertion alone does not catch this bug.** Both hostnames wer
 shifted by one `-pooler`, so their relationship to each other still held while
 both values were wrong. Only the absolute assertions (the direct host contains no
 `-pooler`, the pooled host contains no `-pooler-pooler`) detect it.
+
+## 11. What actually happened on the schema and role cutover
+
+Run 2026-07-29, against both live branches, in the order below. Everything in
+sections 11a and 11b succeeded. Everything that differed from what the rest of
+this runbook predicted is called out rather than quietly corrected.
+
+**One deviation from the written order, stated up front.** Section 5.5 says the
+role work must come after 5.4, and 5.4 is `./infra/staging-env.sh up`. That was
+not run: the application nodes are not part of this step, and the only reason
+5.5 depends on 5.4 is that `grant-app-role.sql` needs the tables to exist.
+`migrate.mjs` was run directly against `DATABASE_URL_DIRECT` instead, which
+satisfies the real dependency. **The constraint is "tables before grants", not
+"staging-env.sh before grants",** and 5.5 should say so.
+
+`staging` was done first in every step, as a rehearsal for `main`. That is worth
+keeping as the rule: the two branches are the same engine and the same schema,
+so a mistake on staging is the same mistake, discovered for free.
+
+### 11a. Migrations
+
+Six migrations, both branches, through the direct endpoint as `neondb_owner`.
+Applied cleanly on the first attempt with no manual pre-step of any kind, which
+is the payoff for 0001 creating its own extensions (see section 4).
+
+```
+applying 0001_initial.sql ... 0006_audit_log_retention.sql
+6 migration(s) applied
+```
+
+Re-running immediately reports `schema is up to date (6 migrations applied)`, so
+the checksum and `schema_migrations` paths both work against Neon.
+
+The two branches finished byte-for-byte comparable:
+
+|                      | `main`                                         | `staging`      |
+| -------------------- | ---------------------------------------------- | -------------- |
+| tables in `public`   | 13                                             | 13             |
+| views                | 1 (`cache_size_by_provider`)                   | 1              |
+| sequences            | 1 (`audit_log_id_seq`)                         | 1              |
+| extensions           | `citext, pg_trgm, pgcrypto, plpgsql, unaccent` | same           |
+| owner of every table | `neondb_owner`                                 | `neondb_owner` |
+
+### 11b. Least privilege proved by connecting as the role
+
+`create-app-role.sql`, `grant-app-role.sql` and `verify-app-role.sql` were run
+per branch, as the owner, through the direct endpoint. **34 of 34 assertions
+passed on both branches, including the unconditional `GUARANTEE` row.** The role
+was created with SQL, so it was never a member of `neon_superuser` and the
+drop-and-recreate path in section 10b was not needed. Worth stating plainly
+because it is the claim the whole design rests on:
+
+```
+PASS | GUARANTEE | pullfm_app is NOT a member of neon_superuser | false | false
+NOTICE:  all 34 privilege assertions passed for pullfm_app on database neondb
+```
+
+Then, separately, the thing that actually settles it: **a psql session opened as
+`pullfm_app`**, on the direct endpoint, on both branches. 34 probes per branch,
+zero failures. The session reports what the role scripts intended:
+
+```
+identity: pullfm_app @ neondb | statement_timeout=30s
+        | idle_in_transaction=1min | is_superuser=off
+```
+
+| Allowed, and verified by doing it              | Refused, with the error Postgres actually gave                                          |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `SELECT`/`INSERT`/`UPDATE`/`DELETE` on `users` | `DROP TABLE users` (`must be owner of table users`)                                     |
+| `citext` case-insensitive match on `email`     | `ALTER TABLE users` (`must be owner of table users`)                                    |
+| `SELECT` on the `cache_size_by_provider` view  | `TRUNCATE users` (`permission denied for table users`)                                  |
+| `nextval('audit_log_id_seq')`                  | `CREATE TABLE` (`permission denied for schema public`)                                  |
+| `INSERT` into `audit_log` (identity column)    | `CREATE TEMP TABLE` (`permission denied to create temporary tables`)                    |
+| `unaccent('Björk')` and `similarity()`         | `CREATE INDEX` (`must be owner of table users`)                                         |
+| `gen_random_uuid()`                            | `SET ROLE neon_superuser` (`permission denied to set role`)                             |
+| `pg_try_advisory_lock()`                       | `SET ROLE neondb_owner` (`permission denied to set role`)                               |
+|                                                | `CREATE ROLE` / `CREATE DATABASE` / `CREATE EXTENSION`                                  |
+|                                                | `SELECT` on `pg_authid` (`permission denied for table pg_authid`)                       |
+|                                                | `setval()` **and** `SELECT last_value` on a sequence (`permission denied for sequence`) |
+
+The last row is the one section 10c did not list and is worth keeping: `USAGE`
+on a sequence really is only `nextval`, so neither rewinding a sequence nor
+reading its current value is available. That was an intended property of the
+grant script and it had never been checked.
+
+**The `ALTER DEFAULT PRIVILEGES` mechanism was proved live, not inferred.** This
+is the half that silently breaks production if it is wrong, so it was exercised
+the way a future migration will exercise it: as the owner, **after** all the
+grants had already been made, a brand new table and its `bigserial` sequence
+were created, and **no grant of any kind was issued for them**. The app role
+could immediately `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `nextval()` on
+them, and was still refused `TRUNCATE` (`permission denied for table`) and
+`DROP` (`must be owner of table`). The owner then dropped the probe table. Both
+branches, same result, and a residue check afterwards confirmed zero probe rows,
+zero probe tables and zero probe roles left behind.
+
+That is the mechanism that stops every future migration silently breaking the
+app, and it now has evidence behind it rather than a `pg_default_acl` row.
+
+One small thing the grant script expected to be harder than it was: section 6 of
+`grant-app-role.sql` treats `ALTER ROLE pullfm_app SET ...` as best-effort,
+because it is not documented whether the owner holds admin rights over the role.
+It does, and the script took the first branch on both databases
+(`NOTICE: set session guards on pullfm_app as the owner`). The
+`SET ROLE neon_superuser` fallback was never needed and was not exercised.
+
+### 11c. Three harness defects that only a real credential exposes
+
+Gate 1 (`packages/db/scripts/verify-migrations.mjs`) was run against the Neon
+staging branch. **Every assertion passed on the first attempt**: both up/down
+cycles, the deletion cascade, all twelve defensive constraints, both retention
+assertions and the licence-compliance view. Nothing about the SCHEMA behaves
+differently on Neon than on local Postgres 18.
+
+The harness around it, however, failed three separate ways, and all three are
+invisible locally. They are recorded here because the shape recurs: **a test
+harness that has only ever run against a local throwaway database has never had
+its failure paths tested with anything that matters.**
+
+1. **It printed the production-grade credential to stdout.** `execFileSync` puts
+   the entire command line into `err.message`, and the command line is a
+   connection string. Locally that discloses
+   `pullfm_local_dev_not_a_secret`, which is why it survived review; against Neon
+   it printed the staging owner's password in full, at the top of a stack trace.
+   Fixed with a `scrub()` applied to every message the script emits.
+   **This is why the staging owner credential is flagged for rotation at the top
+   of this file.** Section 6 already says a rotation is the correct response to
+   "I think I pasted the connection string somewhere", and this is that.
+
+2. **`DROP DATABASE` cannot drop the scratch database on Neon.** The teardown in
+   the `finally` block failed with
+
+   ```
+   ERROR:  database "pullfm_migration_verify" is being accessed by other users
+   DETAIL:  There is 1 other session using the database.
+   ```
+
+   **Neon does not reap a server backend when the client disconnects.** The
+   lingering session was `state=idle`, `application_name=psql`,
+   `backend_type=client backend`, owned by `neondb_owner`, and it was still
+   there three minutes later; polling did not clear it and it had to be
+   `pg_terminate_backend`ed by hand. A local docker Postgres closes the backend
+   the instant psql exits, so the drop has always succeeded there. The
+   consequence is worse than a failed exit code: **the harness left the scratch
+   database behind**, which is precisely the residue it exists to promise it
+   never leaves. Fixed with `DROP DATABASE ... WITH (FORCE)`, which is Postgres
+   13 or newer and a no-op locally.
+
+3. **The database-swap silently dropped `?sslmode=require`.** The old expression
+   was `ADMIN_URL.replace(/\/[^/]*$/, "/" + db)`, and the query string is not
+   part of the path, so it was eaten along with the database name. Locally the
+   URL has no query string and nothing changed; against Neon every one of these
+   connections was downgraded from `require` to libpq's default `prefer`. Nothing
+   errors, because `prefer` still negotiates TLS. Fixed by splitting on `?` and
+   rewriting only the path.
+
+After all three fixes, Gate 1 passes end to end against Neon, exits zero, and
+leaves the branch with exactly `neondb`, `postgres`, `template0` and
+`template1`. It still passes locally.
+
+**One difference that is not a defect but is worth budgeting for:** Gate 1 takes
+**1.3 seconds locally and about 70 seconds against Neon**, roughly fifty times
+longer. The work is identical; the harness shells out to `psql` per statement
+and each invocation is a fresh TLS connection through Neon's proxy from another
+continent. If Gate 1 ever moves into a per-commit CI job pointed at Neon, that
+is the number to plan around, and batching statements per connection is the
+lever.
+
+### 11d. Where the connection strings live now
+
+All four items are in the **MCP** vault, as `Login` items with the secret in a
+concealed field labelled `credential`, which is what `infra/lib/secrets.sh`
+reads. They also carry `role` and `endpoint` fields, so which privilege level an
+item holds is visible without opening it.
+
+| Item                                  | Role           | Endpoint |
+| ------------------------------------- | -------------- | -------- |
+| `pull-fm/prod/DATABASE_URL`           | `pullfm_app`   | pooled   |
+| `pull-fm/prod/DATABASE_URL_DIRECT`    | `neondb_owner` | direct   |
+| `pull-fm/staging/DATABASE_URL`        | `pullfm_app`   | pooled   |
+| `pull-fm/staging/DATABASE_URL_DIRECT` | `neondb_owner` | direct   |
+
+The two app roles have **different passwords**, both from `openssl rand -base64 24`,
+and each was used exactly once and never written to disk. Both pooled strings
+were confirmed to connect as `pullfm_app`.
+
+**Percent-encoding is not optional and is not always needed, which is the trap.**
+`openssl rand -base64 24` draws from an alphabet containing `+` and `/`. Of the
+two passwords generated here, **one needed percent-encoding in the URL and the
+other did not.** A procedure that skips the encoding step therefore works most
+of the time and fails intermittently, on a fresh password, at deploy time. Encode
+unconditionally; it is a no-op when there is nothing to encode.
+
+### 11e. Two smaller facts that contradicted an assumption
+
+- **`neondb_owner` has `rolcreatedb = true`.** Section 10b is about `CREATEROLE`,
+  which the owner genuinely lacks, and it is easy to read across from that to
+  "the owner can do nothing administrative". It can create databases, and that
+  is load-bearing: it is the only reason Gate 1 can create its scratch database
+  on Neon at all, with no `SET ROLE` and no elevation.
+- **Every branch has a `postgres` database**, owned by `cloud_admin`, and
+  `neondb_owner` may connect to it. Gate 1 hardcodes `postgres` as the database
+  it issues `CREATE DATABASE` from, so this was a real prerequisite and not an
+  obvious one.
+
+### 11f. Neon parks idle backends, and session state survives the client
+
+This is the most surprising thing found on the whole cutover, it is not
+documented anywhere in this repository, and it invalidates an assumption that
+every Postgres user is entitled to make everywhere else.
+
+**A server backend on Neon is not torn down when its client disconnects. It is
+parked, with its session state intact, and handed to a later client.** Measured
+on the staging branch, on the **DIRECT** endpoint, so this is not the pooler:
+
+```
+session A  CREATE TEMP TABLE _reuse_probe (x int);   -- then disconnect
+session B  (new psql process)  sees _reuse_probe: true
+session C  (new psql process)  sees _reuse_probe: true
+```
+
+and later, from a completely fresh connection after everything had disconnected:
+
+```
+temp relations inherited: pg_temp_9._pullfm_privcheck,
+                          pg_temp_9._pullfm_privcheck_seq_seq,
+                          pg_temp_9._reuse_probe
+advisory locks inherited: 2
+```
+
+Two things it is important NOT to conclude from that, because both were checked:
+
+- **It is not multiplexing, and concurrency is not broken.** Three
+  simultaneously live clients occupied three distinct backends (`pid` 634, 4179
+  and 4180 all present in `pg_stat_activity` at once). The reuse is of an IDLE
+  backend, forward in time, not of a busy one.
+- **Advisory locks still serialise correctly between concurrent runners.** With
+  one client holding `pg_advisory_lock(987654)` and a second client live at the
+  same moment, the second was refused: `pg_try_advisory_lock -> false`. That is
+  the property `migrate.mjs` depends on and it holds.
+
+**What it broke immediately.** `verify-app-role.sql` opens with
+`CREATE TEMP TABLE _pullfm_privcheck`, and its SECOND run against a branch failed
+with `ERROR: relation "_pullfm_privcheck" already exists`, because the temp table
+from the first run was still parked in the backend the second run was given. The
+file was therefore **not idempotent on Neon** while being perfectly idempotent
+locally, and re-running it is the documented answer to "I am not sure what state
+this role is in". Fixed by dropping the table before creating it; the reasoning
+is written into the file. Now verified by running it three times in a row against
+each branch: 34 of 34 assertions, exit 0, every time.
+
+**The hazard this leaves open, stated because it is not fixed.** A session-scoped
+advisory lock was observed surviving its client's disconnect. `migrate.mjs` takes
+exactly such a lock and relies on `client.end()` releasing it. Nothing went wrong
+during this cutover, every migration run completed, and no hang was observed. But
+the two ingredients were both observed directly: the lock outlives the client,
+and a concurrent client on a different backend is genuinely blocked by it. So
+**a deploy that dies uncleanly could leave a lock parked on an idle backend, and
+the next deploy would block on `pg_advisory_lock` rather than fail**, which
+presents as a migration step that hangs instead of erroring.
+
+Three things reduce it and none of them removes it: Neon eventually reaps parked
+backends, the compute suspends after five minutes of inactivity (which
+necessarily drops them), and deploys are not concurrent today. If a migration
+step ever hangs, this is the first thing to check, and the remedy is the one used
+during this cutover:
+
+```sql
+SELECT pid, state, now() - backend_start AS age
+  FROM pg_stat_activity
+ WHERE datname = 'neondb' AND backend_type = 'client backend';
+
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+ WHERE datname = 'neondb' AND backend_type = 'client backend'
+   AND pid <> pg_backend_pid();
+```
+
+The durable fix, if this ever bites, is `pg_try_advisory_lock` with a timeout and
+a loud failure instead of `pg_advisory_lock`'s unbounded wait. That is a change
+to the deploy path and was deliberately not made as part of a database
+migration.
+
+**The general lesson, which is the same one as
+[section 11c](#11c-three-harness-defects-that-only-a-real-credential-exposes):**
+"a temp table dies with the session" is a Postgres guarantee, and Neon is
+Postgres, so nobody thinks to test it. Anything in this repository that relies on
+a session ending when a client disconnects should be assumed suspect until it has
+been run twice in a row against Neon.
 
 ## Appendix A: the verified plan
 
