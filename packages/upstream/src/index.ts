@@ -32,6 +32,9 @@ export * from "./cache/governor.js";
 export * from "./cache/cache-first.js";
 
 export * from "./musicbrainz/client.js";
+export * from "./musicbrainz/canonical-key.js";
+export * from "./musicbrainz/canonical-store.js";
+export * from "./musicbrainz/local-first.js";
 export * from "./listenbrainz/client.js";
 export * from "./lastfm/client.js";
 export * from "./itunes/client.js";

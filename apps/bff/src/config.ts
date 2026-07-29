@@ -301,6 +301,40 @@ const schema = z.object({
       'must look like "PullFM/0.1.0 (contact@example.com)"',
     ),
 
+  /**
+   * Answer MusicBrainz searches from the local canonical dump in `mb.canonical`
+   * before reaching the network.
+   *
+   * IT DEFAULTS TO FALSE, AND THE DEFAULT IS THE POINT. `SEATGEEK_ENABLED` was
+   * documented as a kill switch, declared here with `.default("true")`, AND
+   * force-written `true` by infra/lib/secrets.sh, so the documented lever had
+   * already been bypassed by every deployment that had credentials before
+   * anybody thought to pull it. A flag is only a kill switch if the failure mode
+   * of forgetting it is OFF at every layer that can decide.
+   *
+   * The layers that fail closed here:
+   *   - this schema, with `.default("false")`
+   *   - `LocalFirstMusicBrainzClient`, whose `enabled` option needs the boolean
+   *     `true` and treats the string "true", a 1, and a null as off
+   *   - the same class again, which stays off when no store was wired
+   *   - `PgCanonicalStore`, which answers "miss" rather than throwing when the
+   *     table is absent, so even an enabled resolver degrades to the old path
+   *
+   * The layer that is NOT under this file's control, named so nobody assumes
+   * otherwise: whatever infra/lib/secrets.sh writes into the deployed
+   * environment. If it ever starts asserting a value for this variable, the
+   * default above stops being a defence, exactly as it stopped being one for
+   * SeatGeek.
+   *
+   * Turning it on is safe to reverse: `false` restores the previous behaviour
+   * byte for byte, because the local path is a lookup in front of an unchanged
+   * client rather than a replacement for it.
+   */
+  MB_LOCAL_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+
   LASTFM_API_KEY: z.string().min(1).optional(),
   LASTFM_SHARED_SECRET: z.string().min(1).optional(),
 
