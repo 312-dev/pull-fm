@@ -284,8 +284,52 @@ parse_conn() {
 }
 parse_conn "${DB_URL}"
 
-psql_q() { psql -v ON_ERROR_STOP=1 -qtAX -c "$1"; }
-psql_f() { psql -v ON_ERROR_STOP=1 -qX -f -; }
+# ---------------------------------------------------------------------------
+# THE ONE SANCTIONED OPT-OUT FROM THE OWNER'S STATEMENT CEILING.
+#
+# infra/neon/sql/set-role-timeouts.sql gives neondb_owner a 15-minute
+# statement_timeout as a role default, so a wedged maintenance session cannot
+# hold locks against the application indefinitely. THIS SCRIPT IS THE ONE THING
+# THAT LEGITIMATELY EXCEEDS IT, and it exceeds it in a single statement: step 5
+# is one `COPY ... FROM STDIN` that runs for as long as it takes to download
+# 2.3 GB and stream 7.5 GB of CSV through it. Under the role default that COPY
+# is cancelled partway and the load fails every time, with a message about a
+# statement timeout that says nothing about why.
+#
+# So it is lifted HERE, visibly, for this process only, rather than by weakening
+# the role default for everything that connects as the owner. Set
+# MB_CANONICAL_STATEMENT_TIMEOUT to put a ceiling back if a particular
+# environment wants one; the loader's own bounds are unaffected either way, and
+# there are three of them: PGCONNECT_TIMEOUT above, --max-time on every curl,
+# and the refresh job's MB_CANONICAL_TIMEOUT_MS around the whole process.
+#
+# IT IS A `SET` AND NOT `PGOPTIONS`, AND THAT IS NEON-SPECIFIC RATHER THAN
+# STYLE. The obvious form, `export PGOPTIONS="-c statement_timeout=0"`, puts the
+# value in the `options` field of the libpq StartupMessage, and Neon's proxy
+# rejects it OUTRIGHT - on the DIRECT endpoint, not just the pooled one.
+# Measured against the staging branch on 2026-07-29:
+#
+#   psql: error: connection to server ... failed: ERROR:  unsupported startup
+#   parameter in options: statement_timeout. Please use unpooled connection or
+#   remove this parameter from the startup package.
+#
+# Note what that error advises, and that following the advice does not help:
+# this WAS the unpooled connection. So on Neon the only way to change this
+# setting for a session is a SQL `SET` after the connection is established,
+# which is what the prelude below is. It is prepended to every psql invocation
+# in this file rather than issued once, because each `psql` is its own session.
+#
+# lock_timeout is deliberately NOT cleared. The swap sets its own (step 9) and
+# that one is what stops this job from turning into an outage.
+PSQL_PRELUDE="SET statement_timeout = ${MB_CANONICAL_STATEMENT_TIMEOUT:-0};"
+
+# `-q` suppresses the `SET` command tag, so the prelude adds no line to the
+# output psql_q parses as a single value. Verified rather than assumed.
+psql_q() { psql -v ON_ERROR_STOP=1 -qtAX -c "${PSQL_PRELUDE}" -c "$1"; }
+psql_f() {
+  { printf '%s\n' "${PSQL_PRELUDE}"; cat; } |
+    psql -v ON_ERROR_STOP=1 -qX -f -
+}
 
 # ---------------------------------------------------------------------------
 # 1. Which dump.
@@ -509,7 +553,7 @@ if [ -n "${MAX_ROWS}" ]; then
     zstd -dc |
     tar -xOf - "${CSV_PATH}" |
     awk -v LIMIT="$((MAX_ROWS + 1))" "${SPLITTER}" |
-    psql -v ON_ERROR_STOP=1 -qX -c "${COPY_SQL}"
+    psql -v ON_ERROR_STOP=1 -qX -c "${PSQL_PRELUDE}" -c "${COPY_SQL}"
   STATUSES=("${PIPESTATUS[@]}")
   # Only the COPY's status is decisive. Everything upstream of the splitter is
   # expected to die of SIGPIPE the moment the cap is reached, and treating that
@@ -520,7 +564,7 @@ else
     tee >("${SHA_CMD[@]}" | cut -d' ' -f1 >"${SHA_FILE}") |
     zstd -dc |
     tar -xOf - "${CSV_PATH}" |
-    psql -v ON_ERROR_STOP=1 -qX -c "${COPY_SQL}"
+    psql -v ON_ERROR_STOP=1 -qX -c "${PSQL_PRELUDE}" -c "${COPY_SQL}"
   STATUSES=("${PIPESTATUS[@]}")
   # Each failure mode lands in a different slot, so all of them are checked:
   # a truncated download is curl or zstd ("unexpected end of stream"), a
