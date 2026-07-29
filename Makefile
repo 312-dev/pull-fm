@@ -4,7 +4,7 @@
 # The Makefile is a discovery surface, not a build system: `pnpm` owns the
 # application build and `terraform` owns the infrastructure.
 
-.PHONY: help cost cost-json staging-up staging-down staging-status risks jobs infra-guards alerts alerts-armed
+.PHONY: help cost cost-json staging-up staging-down staging-status risks jobs identifiers infra-guards alerts alerts-armed
 
 help:
 	@echo "make cost           run rate + billing-alert check (Gate \$$)"
@@ -14,6 +14,7 @@ help:
 	@echo "make staging-status what is running right now"
 	@echo "make risks          validate the accepted-risk register"
 	@echo "make jobs           assert the background-job schedule matches the runbook"
+	@echo "make identifiers    fail if a live infrastructure identifier is in a tracked file"
 	@echo "make infra-guards   prove the scale guard and the origin config (terraform, docker)"
 	@echo "make alerts         PROVE the alert channel delivers, end to end (Gate 5)"
 	@echo "make alerts-armed   is this machine able to notify anyone at all?"
@@ -42,6 +43,13 @@ risks:
 # not run is treated differently from one that ran. See docs/RUNBOOK-JOBS.md.
 jobs:
 	@node infra/scripts/check-job-schedule.mjs
+
+# This repository is public, and it has already published an origin IP, a
+# tailnet address, a database endpoint hostname and a cloud account id in
+# tracked files. This fails on a new one. It self-tests every detector against
+# its own samples first, so it cannot go green by matching nothing.
+identifiers:
+	@node tools/check-public-identifiers.mjs
 
 # Two proofs that need tooling rather than a checkout: that raising the node
 # count without externalizing Redis fails a terraform plan, and that the origin

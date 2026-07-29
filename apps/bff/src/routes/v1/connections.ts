@@ -55,7 +55,7 @@ export function registerConnectionRoutes(
         operationId: "listConnections",
         summary: "List connected music services",
         description:
-          "Metadata only. There is no property in this response that could hold a credential, which is enforced structurally: Fastify serialises with fast-json-stringify and emits only declared properties, so a handler that accidentally selected a ciphertext column could not put it on the wire.",
+          "Metadata only: which services are linked, and when. The response schema has no property that could carry a credential, so no credential can appear here.",
         tags: ["connections"],
         response: {
           200: {
@@ -102,7 +102,7 @@ export function registerConnectionRoutes(
         operationId: "startConnection",
         summary: "Begin connecting a music service",
         description:
-          "For providers with a redirect flow, returns an authorize URL and mints a single-use state bound to this subject and this provider for ten minutes. For ListenBrainz, accepts the user-generated token directly, verifies it upstream, and seals it into the vault.",
+          "For a service with a redirect flow, returns an authorize URL to send the user to, plus a single-use `state` that is short-lived and tied to the caller. For ListenBrainz, send the user token in the body instead; it is verified with ListenBrainz before it is stored.",
         tags: ["connections"],
         params: serviceParam,
         body: {
@@ -224,7 +224,7 @@ export function registerConnectionRoutes(
         operationId: "connectionCallback",
         summary: "Complete a connect flow",
         description:
-          "Consumes the single-use state atomically, requiring that it belongs to the authenticated subject. An unknown, expired, replayed, or foreign state all produce the same 400, so the response cannot be used to probe which states exist.",
+          "Completes the flow started by POST /v1/connections/{service}/start. The `state` is single-use and must belong to the caller. Every rejected `state` returns the same 400 with the same body.",
         tags: ["connections"],
         params: serviceParam,
         querystring: {
@@ -300,7 +300,7 @@ export function registerConnectionRoutes(
         operationId: "deleteConnection",
         summary: "Disconnect a music service",
         description:
-          "Removes the stored credential. The ownership predicate is in the DELETE itself, so a service the caller has not connected simply matches no rows and returns 404.",
+          "Removes the stored credential for that service. A service the caller has not connected returns 404.",
         tags: ["connections"],
         params: serviceParam,
         response: {

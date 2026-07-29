@@ -124,6 +124,22 @@ jobs:
       - name: "background job schedule"
         run: node infra/scripts/check-job-schedule.mjs
 
+      # This repository is public. It has already published, in tracked files,
+      # the staging origin IP, a tailnet address, a Neon project id and
+      # endpoint hostname, a Cloudflare account id and password-manager item
+      # ids. History cannot be unpublished; this stops them being re-added and
+      # catches the next class before its first commit. gitleaks owns
+      # credentials and runs in security.yml; this owns the things that are not
+      # secret and are still a gift to an attacker.
+      #
+      # It refuses to report success without first proving it still detects
+      # anything: every detector is run against its own positive and negative
+      # samples before the tree is read, and the scan fails if it reads
+      # implausibly few files. That is deliberate, because this project has
+      # four times shipped a check that was green while measuring nothing.
+      - name: "no live infrastructure identifiers in tracked files"
+        run: node tools/check-public-identifiers.mjs
+
       # Gate 8: a tag can be repointed at different code by whoever controls
       # the upstream namespace, and that code runs against our checked-out
       # source. A commit SHA cannot be moved.

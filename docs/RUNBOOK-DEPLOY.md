@@ -193,44 +193,42 @@ variable on it.
 ## 7. Administering the node: Tailscale, never the public IP
 
 **There is no public SSH, and adding one is not the answer when you cannot get
-in.** The Hetzner firewall carries no inbound rule for port 22 at all. The public
-address (see `terraform output`, deliberately not written down here) therefore
-**drops** a connection to 22, so the symptom
-of trying it is a timeout rather than "connection refused", and no key on earth
-will help. The only inbound ports are 80 and 443 from Cloudflare's ranges, plus
-UDP 41641 for Tailscale and ICMP. Verify with
-`curl -H "Authorization: Bearer $HCLOUD_TOKEN" https://api.hetzner.cloud/v1/firewalls`
-before and after anything that touches infrastructure.
+in.** The cloud firewall carries no inbound rule for the SSH port at all, so a
+connection to it is **dropped**: the symptom of trying is a timeout rather than
+"connection refused", and no key will help. The authoritative inbound rule set
+is the firewall resource itself, not this page; read it from the provider API
+before and after anything that touches infrastructure rather than trusting a
+port list written down months ago.
 
 The standing path is Tailscale. `staging-env.sh up` mints an auth key and
 cloud-init joins the node to the tailnet, so this works from any tailnet member:
 
 ```bash
 install -m 0600 /dev/null /tmp/pullfm-staging.key
-op read 'op://MCP/krqfwafozazi7xq6ftq4s35rba/private_key' > /tmp/pullfm-staging.key
-[ -s /tmp/pullfm-staging.key ] || { echo 'EMPTY - op read failed'; exit 1; }
+# Read the staging SSH private key out of the operator vault into that file.
+# The item, the vault and the field are named in the internal secrets index,
+# not here: this repository is public.
+[ -s /tmp/pullfm-staging.key ] || { echo 'EMPTY - the read failed'; exit 1; }
 
-ssh -i /tmp/pullfm-staging.key -o IdentitiesOnly=yes pullfm@100.121.161.79
+ssh -i /tmp/pullfm-staging.key -o IdentitiesOnly=yes "$PULLFM_STAGING_SSH_TARGET"
 ```
 
-`op read` on a missing field **returns empty at exit 0**, which is why the
-emptiness check is on the line after the read and not left to the ssh failure to
-report.
+A password-manager read of a missing field **returns empty at exit 0**, which is
+why the emptiness check is on the line after the read and not left to the ssh
+failure to report.
 
-Addressed **by item id** (`krqfwafozazi7xq6ftq4s35rba`, title
-`pull-fm/infra/STAGING_SSH_KEY`) because `op read` cannot resolve an `op://`
-reference whose item title contains a slash, and every item in this project has
-one. The public half is committed as `ssh_public_keys.operator` in
-`infra/terraform/envs/staging/terraform.tfvars`; only the private half is a
-secret, and 1Password holds the only recorded copy. **Never write it into this
-repository** - it is public.
+The public half of the key pair is committed in the staging Terraform variables;
+only the private half is a secret, and the operator vault holds the only
+recorded copy. **Never write it into this repository** - it is public. The same
+applies to the node's address and account name, which is why they are read from
+`terraform output` and the vault rather than recorded here.
 
 Three failures that all present as "the key is refused":
 
-- `ssh root@` - root login over SSH is disabled by cloud-init. The account is
-  `pullfm`, and it has passwordless sudo.
-- `ssh pullfm@pullfm-staging-app-1` - MagicDNS does not resolve from every
-  client. Use the tailnet **address**.
+- connecting as `root` - root login over SSH is disabled by cloud-init. There is
+  a dedicated unprivileged operator account; `terraform output` names it.
+- connecting by node name - MagicDNS does not resolve from every client. Use the
+  tailnet **address**.
 - several keys in the agent - the server closes the connection before it reaches
   the right one. Always pass `-o IdentitiesOnly=yes`.
 

@@ -61,7 +61,7 @@ export async function registerHealthRoutes(
       logLevel: "silent",
       schema: {
         operationId: "healthz",
-        summary: "Liveness. Never touches a dependency.",
+        summary: "Liveness. Does not touch a dependency.",
         tags: ["platform"],
         response: {
           200: {
@@ -163,7 +163,7 @@ export async function registerHealthRoutes(
       logLevel: "silent",
       schema: {
         operationId: "metrics",
-        summary: "Prometheus scrape target (must be unreachable from the edge)",
+        summary: "INTERNAL. Metrics scrape target",
         tags: ["platform"],
         ...annotate({ authz: "system", dast: "include" }),
       },

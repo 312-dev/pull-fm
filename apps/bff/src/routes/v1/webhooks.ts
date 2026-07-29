@@ -154,10 +154,10 @@ export function registerWebhookRoutes(
       config: { rawBody: true },
       schema: {
         operationId: "workosWebhook",
-        summary: "Receive a signed WorkOS event",
+        summary: "INTERNAL. Receive a signed identity event",
         description:
-          "Verifies WorkOS-Signature as HMAC-SHA256 over `<timestamp>.<raw body>` in constant time, rejecting deliveries outside a five minute window. Handles user.deleted, without which an identity deleted upstream would orphan our data forever, which is a GDPR problem as much as a correctness one.",
-        tags: ["webhooks"],
+          "Internal integration surface, not part of the public client contract. Accepts signed identity-lifecycle events from the configured identity provider and rejects anything it cannot verify. It exists so that an identity deleted upstream does not leave data orphaned here, which is a GDPR obligation as much as a correctness one.",
+        tags: ["internal"],
         headers: {
           type: "object",
           properties: {

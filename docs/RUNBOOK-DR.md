@@ -317,7 +317,7 @@ After `from-branch staging --source rp-x`, `staging` is a _child_ of `rp-x`, and
 Neon refuses to delete a branch that has children:
 
 ```
-HTTP 422  cannot delete branch that has children: br-calm-morning-asjr2h1v
+HTTP 422  cannot delete branch that has children: <neon-staging-branch-id>
 HTTP 422  Branch has children, preserve_under_name is required
 ```
 
@@ -609,7 +609,7 @@ record should not live solely in the same account as DNS and the edge. The ledge
 makes this more urgent than it was, because it is small, it is legally load
 bearing, and a second copy of it costs almost nothing.
 
-Recovery: the registrar (Porkbun) holds the delegation, so DNS can be re-pointed
+Recovery: the domain registrar holds the delegation, so DNS can be re-pointed
 elsewhere. Everything else waits on the account.
 
 ---
@@ -703,7 +703,7 @@ RPO exact, `pg_restore` errors zero, all four extensions present in the restored
 database, all five drill branches confirmed deleted afterwards, staging returned
 to its original parent with zero rows. One finding: section 5.3.
 
-The report is written to `s3://pull-fm-backups-staging/drills/<run>-report.json`,
+The report is written to `s3://<backups-bucket>/drills/<run>-report.json`,
 which has a 14-day expiry, because evidence that only exists on the laptop of
 whoever ran the drill is not evidence.
 

@@ -47,8 +47,10 @@
   Contractual Clauses. We do not have the option of keeping that data in the EU,
   and section 9 says exactly what it covers and how the transfer is legitimized
   rather than implying the whole system is EU-only.
-- You can **export** everything (`GET /v1/me/export`) and **delete** everything
-  (`DELETE /v1/me`) yourself, from the API or the app, at any time.
+- You can **export** your data (`GET /v1/me/export`) and **delete** your account
+  (`DELETE /v1/me`) yourself, from the API or the app, without asking us. Both
+  are self-service; section 6 sets out what the export contains, what it
+  deliberately leaves out, and the conditions each route applies.
 
 The rest of this document is the detail behind those points.
 
@@ -347,10 +349,10 @@ identifiers in them are removed after a bounded window:
   random UUID minted inside the database statement that applies it, once per
   account per batch, and written **nowhere else**. There is no key, no pepper,
   and no mapping table, so nobody, including us, can reverse it. A keyed hash
-  was considered and deliberately rejected: `deletion_log` permanently retains
-  the UUID of every deleted account, so anyone holding both a pepper and that
-  table could re-identify every anonymized row by brute force over a candidate
-  set of a few thousand. A random value has no such property.
+  was considered and deliberately rejected: because `deletion_log` permanently
+  retains the id of every deleted account, a keyed scheme would be reversible by
+  anyone who held both the key and that table. A random value has no such
+  property, which is why it was chosen.
 - The IP address is **truncated to its network prefix**: a `/24` for IPv4, a
   `/48` for IPv6. The host part is overwritten in place and is not recorded
   anywhere else.
@@ -369,11 +371,12 @@ run by `pnpm --filter @pull-fm/bff purge:audit`, and it is covered by
 integration tests against a real database that assert both what it must
 anonymize and what it must refuse to.
 
-`[OPEN]` **Nothing runs it on a schedule yet.** See the note at the end of
-section 8, which applies to every window stated in this section. Until a
-schedule exists, these are the windows the system applies **when the job is
-run**, not periods after which data has automatically gone, and this policy must
-not be published stating them without that qualification.
+`[OPEN]` **The schedule exists but has never fired, because no compute is
+deployed to run it.** See the note at the end of section 8, which applies to
+every window stated in this section. Until a run has actually happened, these
+are the windows the system applies **when the job is run**, not periods after
+which data has automatically gone, and this policy must not be published
+stating them without that qualification.
 
 ### Backups
 
@@ -447,10 +450,14 @@ that dumps are retained until manually deleted.
 
 ### `[OPEN]` The scheduling note, which qualifies five rows above
 
-**The retention jobs are written and tested. Nothing schedules them yet.** This
-has to be stated rather than glossed, because the difference between "a job
-exists" and "a job runs" is the whole difference between a retention commitment
-and a retention aspiration.
+**The retention jobs are written, tested and scheduled, and no schedule has ever
+fired, because no compute is deployed to run it.** This has to be stated rather
+than glossed, because the difference between "a job exists" and "a job has run"
+is the whole difference between a retention commitment and a retention
+aspiration. Until the schedule has somewhere to run, the windows in the table
+above are the windows the system applies **on each run**, not periods after
+which data has automatically gone. The three stages are separated below so it
+is clear which one is outstanding.
 
 What exists: `purge:audit` (the audit anonymization, the 400-day delete, and the
 token last-used-IP clearing), `sweep:expired` (the idempotency and connect-state
@@ -649,10 +656,13 @@ and we will apply them.
 
 ### Response times, stated honestly
 
-Pull.fm is operated by one person with no support team. The self-service export
-and deletion endpoints are instant and always available, which is deliberate:
-the two rights that matter most do not depend on our availability. Emailed
-requests are answered within the legal deadline, but not within hours.
+Pull.fm is operated by one person with no support team. The export and deletion
+endpoints are **self-service and do not require us to act**, which is
+deliberate: the two rights that matter most should not sit in a queue behind one
+person. They are part of the service, so they are subject to the same
+availability as the rest of it, and Pull.fm makes no availability commitment
+(see the terms of service). If the service is unreachable, use the email route
+below and we answer within the legal deadline, though not within hours.
 
 ---
 
@@ -718,18 +728,18 @@ Security: see [`../SECURITY.md`](../SECURITY.md)
 
 A checklist, so that nothing above is quietly published while still untrue.
 
-| #   | Item                                                                                                                                                                                                                                                                                   | Section |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| 1   | **The retention jobs are built and tested but nothing schedules them.** The windows in sections 7 and 8 are enforced on each run, and the job is presently run by hand. A schedule must exist, and be verified to have fired, before those windows are stated as unqualified promises. | 7, 8    |
-| 2   | No log retention period is configured anywhere. A number must exist in the system before it is stated here.                                                                                                                                                                            | 8       |
-| 3   | Manually taken logical dumps in object storage have no expiry rule and persist until deleted by hand. State a maximum age and enforce it, or say plainly that they are kept until deleted. The Neon PITR window itself is settled at 6 hours.                                          | 7, 8    |
-| 4   | No data processing agreements are on file with **Neon, Hetzner, or Cloudflare**. WorkOS is covered by an addendum that incorporates automatically; file a dated copy.                                                                                                                  | 9       |
-| 5   | No EU Article 27 representative is appointed.                                                                                                                                                                                                                                          | 2       |
-| 6   | Controller's state of organisation, postal address, and governing supervisory authority are unfilled.                                                                                                                                                                                  | 2, 10   |
-| 7   | The US-access transfer mechanism for controller-side access is undecided. The WorkOS transfer itself is settled: SCCs Modules Two and Three plus the UK Addendum.                                                                                                                      | 9       |
-| 8   | ~~Expired `idempotency_keys` and `connect_states` rows are never deleted.~~ **Resolved:** `sweep:expired` deletes both an hour past expiry. Scheduling it is item 1.                                                                                                                   | 8       |
-| 9   | ~~The sign-in methods sentence disagrees with `docs/PLAN.md` section 4.~~ **Resolved:** `docs/PLAN.md` section 4a records magic link only, and a test and a database constraint enforce it.                                                                                            | 3.1     |
-| 10  | The WorkOS subprocessor list has not been read and summarized.                                                                                                                                                                                                                         | 9       |
-| 11  | WorkOS may use personal data "to build or improve the quality of its services", and their addendum is silent on AI/ML training. Decide whether to seek a commitment.                                                                                                                   | 3.1, 9  |
-| 12  | ~~Terraform still describes the pre-Neon self-hosted database.~~ **Resolved:** the database is `infra/neon`, pinned to `aws-eu-central-1`; the former Postgres node is now cache only.                                                                                                 | 9       |
-| 13  | This document has not been reviewed by a lawyer.                                                                                                                                                                                                                                       | all     |
+| #   | Item                                                                                                                                                                                                                                                                                                                                                                                                                                | Section |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| 1   | **The retention jobs are built, tested and scheduled, and the schedule has never fired** because no compute is deployed to run it. The windows in sections 7 and 8 are enforced on each run, and a run is presently started by hand. A schedule must be verified to have fired before those windows are stated as unqualified promises.                                                                                             | 7, 8    |
+| 2   | No log retention period is configured anywhere. A number must exist in the system before it is stated here.                                                                                                                                                                                                                                                                                                                         | 8       |
+| 3   | Manually taken logical dumps in object storage have no expiry rule and persist until deleted by hand. State a maximum age and enforce it, or say plainly that they are kept until deleted. The Neon PITR window itself is settled at 6 hours.                                                                                                                                                                                       | 7, 8    |
+| 4   | No data processing agreements are on file with **Neon, Hetzner, or Cloudflare**. WorkOS is covered by an addendum that incorporates automatically; file a dated copy.                                                                                                                                                                                                                                                               | 9       |
+| 5   | No EU Article 27 representative is appointed.                                                                                                                                                                                                                                                                                                                                                                                       | 2       |
+| 6   | Controller's state of organisation, postal address, and governing supervisory authority are unfilled.                                                                                                                                                                                                                                                                                                                               | 2, 10   |
+| 7   | The US-access transfer mechanism for controller-side access is undecided. The WorkOS transfer itself is settled: SCCs Modules Two and Three plus the UK Addendum.                                                                                                                                                                                                                                                                   | 9       |
+| 8   | ~~Expired `idempotency_keys` and `connect_states` rows are never deleted.~~ **Resolved:** `sweep:expired` deletes both an hour past expiry. Scheduling it is item 1.                                                                                                                                                                                                                                                                | 8       |
+| 9   | ~~The sign-in methods sentence disagrees with `docs/PLAN.md` section 4.~~ **Resolved:** `docs/PLAN.md` section 4a records magic link only, and a test and a database constraint enforce it. `legal/terms-of-service.md` section 4 still described social sign-in when this row was first marked resolved, and was corrected on 2026-07-29; check the sibling documents, not only the plan, before closing a row of this kind again. | 3.1     |
+| 10  | The WorkOS subprocessor list has not been read and summarized.                                                                                                                                                                                                                                                                                                                                                                      | 9       |
+| 11  | WorkOS may use personal data "to build or improve the quality of its services", and their addendum is silent on AI/ML training. Decide whether to seek a commitment.                                                                                                                                                                                                                                                                | 3.1, 9  |
+| 12  | ~~Terraform still describes the pre-Neon self-hosted database.~~ **Resolved:** the database is `infra/neon`, pinned to `aws-eu-central-1`; the former Postgres node is now cache only.                                                                                                                                                                                                                                              | 9       |
+| 13  | This document has not been reviewed by a lawyer.                                                                                                                                                                                                                                                                                                                                                                                    | all     |

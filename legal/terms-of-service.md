@@ -60,9 +60,11 @@ You must be at least **16 years old** to use Pull.fm. We do not knowingly
 provide the service to anyone younger. If we learn that an account belongs to
 someone under 16, we will delete it.
 
-Accounts are created through **WorkOS AuthKit** using Google sign-in, Apple
-sign-in, or an emailed magic link. **Pull.fm issues no passwords and stores no
-password hashes**, by design.
+Accounts are created through **WorkOS AuthKit**, using an emailed one-time code
+("magic link"). That is the whole sign-in surface: social sign-in, passkeys and
+passwords are not enabled. **Pull.fm issues no passwords and stores no password
+hashes**, by design. `legal/privacy-policy.md` section 3.1 describes the same
+surface and the constraints that keep it that way.
 
 You are responsible for the security of the identity provider account you sign
 in with, and for any personal API token you create. A personal API token is a
@@ -241,9 +243,9 @@ that is a bug and we ask you to report it under our
 
 **No warranty on events.** Event data is provided by SeatGeek "as is". Times,
 venues, line-ups, and availability change. Confirm with the venue or SeatGeek
-before relying on anything. SeatGeek's liability to us is capped by contract at
-fifty dollars, so nothing in Pull.fm is designed to depend on their availability,
-and neither should anything you do.
+before relying on anything. Our own agreement with SeatGeek caps their liability
+to us at a nominal amount, so nothing in Pull.fm is designed to depend on their
+availability, and neither should anything you do.
 
 ---
 

@@ -1,7 +1,7 @@
 # Account deletion, and the position on backups
 
 `docs/PLAN.md` Gate L requires `DELETE /v1/me` and `GET /v1/me/export` "verified end to end
-including cascade to WorkOS, Redis, and logs" plus a **documented backup-retention position for
+including cascade to the identity provider, Redis, and logs" plus a **documented backup-retention position for
 deleted data**. The first three are machine-checked by
 `apps/bff/test/integration/platform.test.ts`. This document is the fourth.
 
@@ -24,13 +24,13 @@ cookie", and the scheme satisfies that by construction.
 
 ## What the cascade does
 
-| Destination | Behaviour                                                                                                                                                                                                                                                                                     |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Postgres    | One `DELETE FROM users`. Every user-owned table declares `ON DELETE CASCADE`, so this is transactional by construction rather than an application sweep that can partially fail. `packages/db/scripts/verify-migrations.mjs` asserts it against a real database on every CI run.              |
-| WorkOS      | A `DELETE` against the identity provider. Best effort and recorded: on failure the local rows are still gone and `deletion_log.workos_deleted` is `false`, so the retry is a query rather than an investigation.                                                                              |
-| Redis       | Cache entries and quota counters keyed by the subject, removed with `SCAN`, never `KEYS`. A blocking scan on the quota instance would time out every rate-limit check in flight, and deletion is exactly the operation most likely to run against a large keyspace at an inconvenient moment. |
-| Logs        | Log records carry the subject id and the request id, never an email or a credential. Retention is bounded by the log-retention policy; there is no per-record deletion because there is no personal data in a record to delete beyond an opaque identifier.                                   |
-| Backups     | **Not rewritten.** See below.                                                                                                                                                                                                                                                                 |
+| Destination       | Behaviour                                                                                                                                                                                                                                                                                     |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Postgres          | One `DELETE FROM users`. Every user-owned table declares `ON DELETE CASCADE`, so this is transactional by construction rather than an application sweep that can partially fail. `packages/db/scripts/verify-migrations.mjs` asserts it against a real database on every CI run.              |
+| Identity provider | A `DELETE` against the identity provider. Best effort and recorded: on failure the local rows are still gone and the deletion log records that the upstream call did not succeed, so the retry is a query rather than an investigation.                                                       |
+| Redis             | Cache entries and quota counters keyed by the subject, removed with `SCAN`, never `KEYS`. A blocking scan on the quota instance would time out every rate-limit check in flight, and deletion is exactly the operation most likely to run against a large keyspace at an inconvenient moment. |
+| Logs              | Log records carry the subject id and the request id, never an email or a credential. Retention is bounded by the log-retention policy; there is no per-record deletion because there is no personal data in a record to delete beyond an opaque identifier.                                   |
+| Backups           | **Not rewritten.** See below.                                                                                                                                                                                                                                                                 |
 
 Ordering matters and is chosen so that a failure at any point leaves a recoverable state:
 
@@ -44,16 +44,16 @@ Ordering matters and is chosen so that a failure at any point leaves a recoverab
 
 > **Status, 2026-07-29: this now describes a system that exists and has been drilled.** The earlier
 > version of this block described pgBackRest against a self-managed Postgres node. That node no
-> longer exists: the database moved to Neon, and pgBackRest was never deployed. The retention
+> longer exists: the database moved to a managed provider, and pgBackRest was never deployed. The retention
 > numbers below are configured and were verified against live storage, not planned.
 
 Backups are three layers, because no single one covers what the others do not:
 
-| Layer                        | Covers                                           | Window                              |
-| ---------------------------- | ------------------------------------------------ | ----------------------------------- |
-| Neon point-in-time recovery  | a wrong delete or bad migration, noticed quickly | **6 hours**                         |
-| A pinned restore branch      | planned destructive operations, any age          | kept until deliberately released    |
-| Encrypted logical dump in R2 | loss of the Neon project itself, or > 6 hours    | **35 days** scheduled, 90 preflight |
+| Layer                                    | Covers                                                                     | Window                              |
+| ---------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------- |
+| Provider point-in-time recovery          | a wrong delete or bad migration, noticed quickly                           | **6 hours**                         |
+| A pinned restore branch                  | planned destructive operations, any age                                    | kept until deliberately released    |
+| Encrypted logical dump in object storage | loss of the database project itself, or a fault older than the PITR window | **35 days** scheduled, 90 preflight |
 
 A deleted user's rows therefore continue to exist inside encrypted artifacts until the last one
 containing them ages out, and that is now a stated number rather than an open question.
@@ -66,8 +66,8 @@ user's data than the residual retention is to the deleted one.
 The position we take instead, which is the one regulators accept:
 
 1. **Backups are put beyond use.** Logical dumps are encrypted before upload under a dedicated
-   passphrase held outside the database (`pull-fm/infra/BACKUP_DUMP_KEY`), access-controlled to a
-   scoped R2 credential, and never queried to serve live traffic. That key inherits the KEK's escrow
+   passphrase held outside the database, access-controlled to a
+   scoped object-storage credential, and never queried to serve live traffic. That key inherits the KEK's escrow
    obligation: losing it makes every dump unreadable.
 2. **Retention is bounded and stated.** Deleted data disappears from the backup set when the last
    backup containing it expires, within the documented PITR window.
@@ -100,7 +100,7 @@ a policy document nobody reads.
 
 ## Deletion triggered upstream
 
-`POST /v1/webhooks/workos` handles `user.deleted`, without which an identity deleted at the provider
+The identity-provider webhook route handles the upstream deletion event, without which an identity deleted at the provider
 would orphan our data forever. That is a GDPR problem as much as a correctness one.
 
 The webhook is the reason signature verification on that route is rated Critical
@@ -109,18 +109,18 @@ and it cascades. Verification is HMAC-SHA256 over the **raw** body, compared in 
 a five minute replay window, and the route fails closed with 503 if no signing secret is configured.
 Production refuses to start at all without one.
 
-When the cascade is triggered by a verified webhook, the WorkOS deletion call is skipped: the
+When the cascade is triggered by a verified webhook, the upstream deletion call is skipped: the
 identity is already gone, the call would 404, and treating that as a failure would fill the deletion
 log with retries that can never succeed.
 
 ## Verified by
 
-| Assertion                                                                | Where                                                   |
-| ------------------------------------------------------------------------ | ------------------------------------------------------- |
-| Cascade empties every user-owned table, both Redis instances, and WorkOS | `test/integration/platform.test.ts`                     |
-| `deletion_log` records the outcome and survives the deletion             | same                                                    |
-| Deletion requires fresh auth and the account email                       | same                                                    |
-| A personal API token cannot reach the route                              | `test/integration/tokens.test.ts`                       |
-| An unsigned or forged webhook deletes nothing                            | `test/integration/platform.test.ts`                     |
-| Signature verification is over raw bytes, constant time, replay-windowed | `src/routes/v1/webhooks.test.ts`                        |
-| The schema cascade holds against a real database                         | `packages/db/scripts/verify-migrations.mjs` (Gate 1 CI) |
+| Assertion                                                                               | Where                                                   |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Cascade empties every user-owned table, both Redis instances, and the upstream identity | `test/integration/platform.test.ts`                     |
+| `deletion_log` records the outcome and survives the deletion                            | same                                                    |
+| Deletion requires fresh auth and the account email                                      | same                                                    |
+| A personal API token cannot reach the route                                             | `test/integration/tokens.test.ts`                       |
+| An unsigned or forged webhook deletes nothing                                           | `test/integration/platform.test.ts`                     |
+| Signature verification is over raw bytes, constant time, replay-windowed                | `src/routes/v1/webhooks.test.ts`                        |
+| The schema cascade holds against a real database                                        | `packages/db/scripts/verify-migrations.mjs` (Gate 1 CI) |

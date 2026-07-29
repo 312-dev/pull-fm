@@ -308,7 +308,7 @@ export function registerProductRoutes(
         operationId: "search",
         summary: "Search the catalogue",
         description:
-          "Served from our own crosswalk. No user request ever triggers a synchronous upstream call: MusicBrainz allows one request per second globally and iTunes about twenty per minute per IP, so a synchronous fan-out here would be a remote kill switch for the whole service. The crosswalk is warmed by every resolution the feed already performs, so results improve with use rather than needing a backfill first.",
+          "Served from Pull.fm's own catalogue crosswalk rather than by calling a provider while you wait, so latency does not depend on a third party. The crosswalk is warmed by the resolutions the feed already performs, so coverage improves with use.",
         tags: ["catalogue"],
         querystring: {
           type: "object",
@@ -370,7 +370,7 @@ export function registerProductRoutes(
         operationId: "getSimilarArtists",
         summary: "Artists similar to one artist",
         description:
-          "Blends ListenBrainz labs with Last.fm; agreement between the two raises an artist's score rather than merely deduplicating it. Both sources are app-credentialed, which is why this route needs no user connection. labs.api is an experimental tier with no SLA and contributes nothing rather than degrading the response when it is down.",
+          "Blends more than one similarity source; agreement between them raises an artist's score rather than merely deduplicating it. No user connection is required. A source that is unavailable contributes nothing rather than degrading the response, so results may be narrower at some moments than at others.",
         tags: ["catalogue"],
         params: MBID_PARAM,
         querystring: {

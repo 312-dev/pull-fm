@@ -1,0 +1,180 @@
+{
+  "_note": [
+    "Live infrastructure identifiers that were already in tracked files when",
+    "tools/check-public-identifiers.mjs was added on 2026-07-29. These are OPEN",
+    "FINDINGS, not exemptions, and most belong to the infra and security work",
+    "streams rather than to documentation.",
+    "",
+    "Entries are HASHED on purpose. An earlier version stored the values in the",
+    "clear, which made this file a tracked list, in a public repository, of every",
+    "identifier the check exists to keep out of tracked files in a public",
+    "repository. The check caught that on itself. The detector and file name stay",
+    "readable so a reviewer can see what is outstanding and where.",
+    "",
+    "The check fails on anything new, and also fails on any entry here that no",
+    "longer matches, so this list can only shrink. Fix one, then run:",
+    "  node tools/check-public-identifiers.mjs --update-baseline"
+  ],
+  "known": [
+    {
+      "fingerprint": "ded8-5d9a-cc5d-47b5",
+      "detector": "cloudflare-resource-id",
+      "file": "docs/PLAN.md"
+    },
+    {
+      "fingerprint": "f8ac-d9a0-dbe9-e2b5",
+      "detector": "cloudflare-resource-id",
+      "file": "infra/cost.sh"
+    },
+    {
+      "fingerprint": "472c-8bfe-8bdc-96e2",
+      "detector": "cloudflare-resource-id",
+      "file": "security/accepted-risks.md"
+    },
+    {
+      "fingerprint": "1912-3648-7b37-fc6a",
+      "detector": "cloudflare-resource-id",
+      "file": "security/accepted-risks.md"
+    },
+    {
+      "fingerprint": "7ab4-4d62-81d1-1052",
+      "detector": "cloudflare-resource-id",
+      "file": "security/accepted-risks.md"
+    },
+    {
+      "fingerprint": "fbfb-330d-46ef-54f6",
+      "detector": "public-ipv4",
+      "file": "docs/SCORECARD.md"
+    },
+    {
+      "fingerprint": "21a4-ed36-d1da-704b",
+      "detector": "public-ipv4",
+      "file": "docs/SCORECARD.md"
+    },
+    {
+      "fingerprint": "8d62-ede1-1188-8bbd",
+      "detector": "public-ipv4",
+      "file": "infra/scripts/check-origin-config.sh"
+    },
+    {
+      "fingerprint": "8305-44c0-c0ee-b1bd",
+      "detector": "neon-branch-id",
+      "file": "infra/backup/pullfm-restore.sh"
+    },
+    {
+      "fingerprint": "8305-44c0-c0ee-b1bd",
+      "detector": "neon-branch-id",
+      "file": "infra/backup/pullfm-restore.sh"
+    },
+    {
+      "fingerprint": "8387-a11a-470a-0911",
+      "detector": "neon-branch-id",
+      "file": "infra/backup/restore-drill.sh"
+    },
+    {
+      "fingerprint": "a981-1b17-b109-cc80",
+      "detector": "neon-branch-id",
+      "file": "infra/neon/README.md"
+    },
+    {
+      "fingerprint": "50a6-f0db-8fef-9c1e",
+      "detector": "neon-branch-id",
+      "file": "infra/neon/imports.tf"
+    },
+    {
+      "fingerprint": "50a6-f0db-8fef-9c1e",
+      "detector": "neon-branch-id",
+      "file": "infra/neon/imports.tf"
+    },
+    {
+      "fingerprint": "50a6-f0db-8fef-9c1e",
+      "detector": "neon-branch-id",
+      "file": "infra/neon/imports.tf"
+    },
+    {
+      "fingerprint": "50a6-f0db-8fef-9c1e",
+      "detector": "neon-branch-id",
+      "file": "infra/neon/imports.tf"
+    },
+    {
+      "fingerprint": "50a6-f0db-8fef-9c1e",
+      "detector": "neon-branch-id",
+      "file": "infra/neon/imports.tf"
+    },
+    {
+      "fingerprint": "848f-6593-5e02-f37a",
+      "detector": "neon-branch-id",
+      "file": "infra/neon/outputs.tf"
+    },
+    {
+      "fingerprint": "0d5a-dfe7-e54d-9a13",
+      "detector": "password-manager-item-id",
+      "file": "infra/lib/backup-common.sh"
+    },
+    {
+      "fingerprint": "d60f-46ec-5999-d63a",
+      "detector": "password-manager-item-id",
+      "file": "infra/lib/backup-common.sh"
+    },
+    {
+      "fingerprint": "e5ae-db2d-3582-6556",
+      "detector": "password-manager-item-id",
+      "file": "infra/lib/backup-common.sh"
+    },
+    {
+      "fingerprint": "56c5-bbac-f1ab-b3ca",
+      "detector": "password-manager-item-id",
+      "file": "infra/lib/backup-common.sh"
+    },
+    {
+      "fingerprint": "25e9-8edf-7a8f-4dad",
+      "detector": "password-manager-item-id",
+      "file": "infra/lib/credentials.sh"
+    },
+    {
+      "fingerprint": "990c-500a-0c4d-3d9b",
+      "detector": "password-manager-item-id",
+      "file": "infra/lib/secrets.sh"
+    },
+    {
+      "fingerprint": "9533-8fb4-fa4a-2eeb",
+      "detector": "neon-endpoint-id",
+      "file": "infra/neon/README.md"
+    },
+    {
+      "fingerprint": "34f6-8557-0898-f7f7",
+      "detector": "neon-endpoint-id",
+      "file": "infra/neon/checks.tf"
+    },
+    {
+      "fingerprint": "34f6-8557-0898-f7f7",
+      "detector": "neon-endpoint-id",
+      "file": "infra/neon/checks.tf"
+    },
+    {
+      "fingerprint": "e315-6ba2-06ab-ddd8",
+      "detector": "neon-endpoint-id",
+      "file": "infra/neon/imports.tf"
+    },
+    {
+      "fingerprint": "e315-6ba2-06ab-ddd8",
+      "detector": "neon-endpoint-id",
+      "file": "infra/neon/imports.tf"
+    },
+    {
+      "fingerprint": "e315-6ba2-06ab-ddd8",
+      "detector": "neon-endpoint-id",
+      "file": "infra/neon/imports.tf"
+    },
+    {
+      "fingerprint": "b7b9-4636-9e8a-89c3",
+      "detector": "neon-endpoint-id",
+      "file": "infra/neon/main.tf"
+    },
+    {
+      "fingerprint": "b7b9-4636-9e8a-89c3",
+      "detector": "neon-endpoint-id",
+      "file": "infra/neon/main.tf"
+    }
+  ]
+}

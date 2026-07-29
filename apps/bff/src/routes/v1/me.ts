@@ -27,7 +27,7 @@ export function registerMeRoutes(
         operationId: "getMe",
         summary: "The authenticated account",
         description:
-          "Readable with a session or with a personal API token holding read:me. The subject is taken from the verified credential; an X-User-Id header or a user_id body field is rejected outright.",
+          "Readable with a session or with a personal API token holding read:me. The account is always the one the presented credential identifies; there is no parameter for asking about a different one.",
         tags: ["me"],
         response: {
           200: {
@@ -41,7 +41,7 @@ export function registerMeRoutes(
               signInMethod: {
                 type: "string",
                 description:
-                  "How this account signs in. Magic link only; see the constraint on users.auth_method in migration 0005 and the reasoning in routes/v1/auth.ts.",
+                  "How this account signs in. Magic link only; there are no passwords and no social sign-in.",
               },
               emailVerifiedAt: { type: ["string", "null"] },
               lastAuthenticatedAt: { type: ["string", "null"] },
@@ -120,7 +120,7 @@ export function registerMeRoutes(
         operationId: "updateMe",
         summary: "Update the account profile",
         description:
-          "Session only; personal API tokens are read-only and cannot rename the account they can read. The name is written to the WorkOS User Management API first and mirrored locally only once that succeeds. An empty body is valid and changes nothing, which makes the route safe to call idempotently.",
+          "Session only; personal API tokens are read-only and cannot rename the account they can read. An empty body is valid and changes nothing, which makes the route safe to call idempotently.",
         tags: ["me"],
         body: {
           type: "object",
@@ -248,7 +248,7 @@ export function registerMeRoutes(
         operationId: "deleteMe",
         summary: "Delete the account and everything derived from it",
         description:
-          "Irreversible. Removes all Postgres rows via ON DELETE CASCADE in one transaction, deletes the WorkOS identity, and clears cache and quota keys for the subject. Backups are not rewritten; see the documented retention position in docs/api/deletion-and-backups.md. Requires a session issued recently and confirmation of the account email.",
+          "Irreversible. Erases the account and the data derived from it, and requests deletion of the identity at the identity provider. Backups are not rewritten; the response carries a short retention notice and docs/api/deletion-and-backups.md states the position in full. Requires a recently issued session and the account email typed back as confirmation. A personal API token cannot reach this route.",
         tags: ["me"],
         body: {
           type: "object",

@@ -385,21 +385,23 @@ was really asking and is far harder to fake than a header the application sets
 about itself. Restoring the real gate needs `x-cache` on the crosswalk-backed
 reads, in `apps/bff`.
 
-### 6.4 The global rate limiter caps any single-host load run at 5 req/s
+### 6.4 The global rate limiter caps any single-host load run
 
-`@fastify/rate-limit` is registered with `global: true`, `max: RATE_LIMIT_MAX`
-(default 300), `timeWindow: "1 minute"`, keyed on `req.ip`, and with **no Redis
-store**, so it is an in-process LRU.
+`@fastify/rate-limit` is registered globally, over a per-minute window, keyed on
+the source address. The configured ceiling is `RATE_LIMIT_MAX`; read the
+deployed value from configuration rather than from this page.
 
-Two consequences:
+Two consequences for the load suite:
 
-- A load generator on one host shares **one bucket**. At the default the entire
-  run is capped at 5 req/s and measures the limiter. Load runs raise
-  `RATE_LIMIT_MAX`, which is recorded in every run record.
-- The limit is **per node** and resets on restart. With more than one BFF node
-  the effective per-IP limit is `RATE_LIMIT_MAX x nodes`. Unlike the per-token
-  limiter, it neither fails open nor closed on Redis, because it never touches
-  Redis.
+- A load generator on one host shares **one bucket**, so at the default ceiling
+  a run measures the limiter rather than the application. Load runs raise
+  `RATE_LIMIT_MAX` deliberately, and the value used is recorded in every run
+  record so a number is never quoted without the ceiling it was taken under.
+- The limit is held **per node** rather than in a shared store, so it does not
+  aggregate across nodes and does not survive a restart. That is a known
+  limitation of this limiter and is why the per-token budget, which is counted
+  in the shared quota store and fails closed, is the one the abuse protections
+  actually rest on.
 
 ---
 

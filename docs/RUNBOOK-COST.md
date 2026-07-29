@@ -83,9 +83,9 @@ job container at a time.
 
 | Line                            | Before                         | After                       |
 | ------------------------------- | ------------------------------ | --------------------------- |
-| `pullfm-staging-app-1`          | cpx12, EUR 13.49 (measured)    | cpx21, EUR 10.99            |
-| `pullfm-staging-cache-1`        | cpx11, EUR 4.35 (measured)     | not created                 |
-| `pullfm-staging-lb`             | lb11, EUR 8.49 (measured)      | not created                 |
+| `<staging-app-node>`            | cpx12, EUR 13.49 (measured)    | cpx21, EUR 10.99            |
+| `<staging-cache-node>`          | cpx11, EUR 4.35 (measured)     | not created                 |
+| `<staging-lb>`                  | lb11, EUR 8.49 (measured)      | not created                 |
 | Primary IPv4                    | included in the measured lines | 1 x EUR 0.60                |
 | **Total while staging is UP**   | **EUR 26.33/mo** (measured)    | **EUR 11.59/mo** (modelled) |
 | **Total while staging is DOWN** | **EUR 0.00/mo**                | **EUR 0.00/mo**             |
@@ -96,12 +96,12 @@ a three hour gate session costs about EUR 0.05.
 
 ### The rest of the bill
 
-| Vendor        | Line                                          | Cost                                                 |
-| ------------- | --------------------------------------------- | ---------------------------------------------------- |
-| Cloudflare    | zone `pull.fm`, Universal SSL, proxied DNS    | $0 (free plan)                                       |
-| Cloudflare R2 | `pull-fm-tfstate` + `pull-fm-backups-staging` | ~$0 (under the 10 GB free tier)                      |
-| Neon          | project `pull-fm`, free plan                  | $0. **Cannot serve production**; see PLAN section 1c |
-| WorkOS        | AuthKit, social + magic-link                  | $0 to 1M MAU                                         |
+| Vendor        | Line                                       | Cost                                                 |
+| ------------- | ------------------------------------------ | ---------------------------------------------------- |
+| Cloudflare    | zone `pull.fm`, Universal SSL, proxied DNS | $0 (free plan)                                       |
+| Cloudflare R2 | `<tfstate-bucket>` + `<backups-bucket>`    | ~$0 (under the 10 GB free tier)                      |
+| Neon          | project `pull-fm`, free plan               | $0. **Cannot serve production**; see PLAN section 1c |
+| WorkOS        | AuthKit, social + magic-link               | $0 to 1M MAU                                         |
 
 ### What the saving costs, stated plainly
 
@@ -147,8 +147,8 @@ Prod is not provisioned. Section 2 of the plan models it at ~$60/mo floor.
 
 ## Cloudflare: DONE, via API
 
-Three alerts are armed on account `d463203cc84c2ef8ebd1b8f656ee66db`, all
-delivering to `gray@grayada.ms`.
+Three alerts are armed on account `<cloudflare-account-id>`, all
+delivering to `operator@example.com`.
 
 | Policy                                          | Type                   | Triggers when                       |
 | ----------------------------------------------- | ---------------------- | ----------------------------------- |

@@ -253,7 +253,7 @@ export function registerAuthRoutes(
         operationId: "authStart",
         summary: "Request a magic-link sign-in code",
         description:
-          "Sends a one-time code to the address. The response is identical whether or not the address has an account, and is padded to a fixed floor so the response time does not disclose it either. Rate limited per source address and per email address independently: the first stops one host enumerating many addresses, the second stops many hosts flooding one mailbox, and neither limit subsumes the other. Note that a first request for an unknown address creates an unverified identity at the identity provider; if it is never verified it is deleted automatically within a bounded window.",
+          "Sends a one-time code to the address. Step one of two; exchange the code at POST /v1/auth/verify. The response is identical whether or not the address has an account, so it cannot be used to find out. Rate limited; a 429 carries Retry-After. An address that is sent a code and never verified leaves no account behind.",
         tags: ["auth"],
         body: {
           type: "object",
@@ -328,7 +328,7 @@ export function registerAuthRoutes(
         operationId: "authVerify",
         summary: "Exchange a magic-link code for a session",
         description:
-          "Wrong, expired, replayed, and foreign codes all return the same 401 with the same body. Attempts are budgeted per address and per source in the noeviction quota Redis, because a short numeric code is guessable at volume and relying on an upstream limit we cannot inspect or test is not a control. Choose `cookie` for a browser client: the tokens are then sealed into an HttpOnly cookie and never appear in the response body at all.",
+          "Step two of two. On success the response carries the session in the transport you asked for. Every rejected code returns the same 401 with the same body, so a failure says nothing about which part was wrong. Attempts are rate limited; a 429 carries Retry-After. Choose `cookie` for a browser client: the tokens are then sealed into an HttpOnly cookie and never appear in the response body at all.",
         tags: ["auth"],
         body: {
           type: "object",
@@ -408,10 +408,10 @@ export function registerAuthRoutes(
     {
       schema: {
         operationId: "authCallback",
-        summary: "Exchange an AuthKit authorization code for a session",
+        summary: "INTERNAL. Hosted-redirect sign-in callback",
         description:
-          "Called by WorkOS AuthKit after an interactive sign-in. Exchanges the single-use code for an access token, a refresh token, and the local user record, creating that record on first sign-in. Not used by the Pull.fm client, which signs in through POST /v1/auth/start and /v1/auth/verify without ever leaving the application.",
-        tags: ["auth"],
+          "Internal integration surface, not part of the public client contract. It exists only for a deployment that runs a hosted redirect sign-in, and the Pull.fm client never uses it: clients sign in with POST /v1/auth/start and POST /v1/auth/verify without leaving the application.",
+        tags: ["internal"],
         querystring: {
           type: "object",
           additionalProperties: false,
@@ -561,7 +561,7 @@ export function registerAuthRoutes(
         operationId: "authLogout",
         summary: "Revoke the current session",
         description:
-          "Revokes the session at WorkOS, adds it to the local deny list for the remaining lifetime of the presented access token, and clears the session cookie. Personal API tokens are not sessions and are unaffected; revoke those with DELETE /v1/tokens/{id}.",
+          "Revokes the session rather than asking the client to forget it, so the access token the caller already holds stops working and the refresh token stops minting new ones. Clears the session cookie. Personal API tokens are not sessions and are unaffected; revoke those with DELETE /v1/tokens/{id}.",
         tags: ["auth"],
         response: {
           200: {

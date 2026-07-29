@@ -182,7 +182,7 @@ export function registerTokenRoutes(
         operationId: "revokeApiToken",
         summary: "Revoke a personal API token",
         description:
-          "Takes effect immediately: the next request presenting the token fails the expiry-and-revocation predicate in the same statement as the digest lookup. A token belonging to another account returns 404, not 403, so token ids cannot be enumerated.",
+          "Takes effect on the next request presenting the token; there is no cache to wait out. A token belonging to another account returns 404, not 403, so token ids cannot be enumerated.",
         tags: ["tokens"],
         params: uuidPathParam("id"),
         response: {
@@ -224,7 +224,7 @@ export function registerTokenRoutes(
         operationId: "rotateApiToken",
         summary: "Rotate a personal API token",
         description:
-          "Revokes the old secret and issues a new one with the same scopes, in a single transaction, so there is never a moment when both work or neither does. The replacement records which token it replaced, so a rotation chain is reconstructable during an incident.",
+          "Revokes the old secret and issues a new one with the same scopes, atomically, so there is no window in which both work or neither does. Like creation, the new secret is returned once.",
         tags: ["tokens"],
         params: uuidPathParam("id"),
         response: {

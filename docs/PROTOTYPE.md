@@ -7,9 +7,8 @@ https://api-staging.pull.fm
 ```
 
 It is a real deployment, not a mock: Cloudflare in front, nginx and an
-origin-pull certificate on a Hetzner node in Helsinki, the BFF in a
-digest-pinned container, Redis beside it, and Postgres in a Neon branch in
-`aws-eu-central-1`. Everything below was executed against that URL on
+origin-pull certificate on a single cloud node, the BFF in a digest-pinned
+container, Redis beside it, and Postgres in a managed branch. Everything below was executed against that URL on
 2026-07-29 and the responses quoted are the ones it gave.
 
 **It costs USD 23.59 a month while it is up** (section 8). Leaving it running
@@ -49,11 +48,13 @@ command.
 
 ### The fast path: your personal API token
 
-A token already exists, it is yours, and it is in 1Password. **It is never
-written into this repository, and neither is anything else.**
+A token already exists, it is yours, and it is in the operator password manager.
+**No credential and no direct reference to one is written into this repository.**
 
 ```bash
-export PULLFM_TOKEN="$(op read 'op://MCP/bsegiuwgdg4w5igbgyoteafgqq/password')"
+# Look the item up by title in the operator vault; see the internal
+# secrets index for which vault and which field.
+export PULLFM_TOKEN="<the staging prototype API token>"
 
 curl -sS https://api-staging.pull.fm/v1/me \
   -H "Authorization: Bearer $PULLFM_TOKEN"
@@ -61,11 +62,11 @@ curl -sS https://api-staging.pull.fm/v1/me \
 
 ```json
 {
-  "id": "0ede7b7f-9c92-4914-8182-4509aae1656b",
+  "id": "<your account uuid>",
   "createdAt": "2026-07-29T08:49:15.304Z",
   "authMethod": "token",
   "signInMethod": "magic_auth",
-  "email": "gray@grayada.ms",
+  "email": "<your account email>",
   "displayName": null,
   "emailVerifiedAt": "2026-07-29T09:06:24.855Z",
   "lastAuthenticatedAt": "2026-07-29T09:06:24.855Z",
@@ -74,20 +75,15 @@ curl -sS https://api-staging.pull.fm/v1/me \
 }
 ```
 
-The 1Password item is titled `pull-fm/staging/PROTOTYPE_API_TOKEN`. It is
-addressed **by item id** above, not by title, because `op read` cannot resolve
-an `op://` reference whose item title contains a slash and every item in this
-project has one. `op item get 'pull-fm/staging/PROTOTYPE_API_TOKEN' --vault MCP
---fields label=password --reveal` is the equivalent by title.
-
 The token is `pfm_test_`-prefixed, scoped `read:me read:wishlist
-read:recommendations read:connections`, expires **2026-10-27**, and is budgeted
-at 60 requests per minute. Every response tells you where you are:
+read:recommendations read:connections`, and carries a per-token request budget.
+Every response tells you where you are, so read the headers rather than
+hard-coding the number:
 
 ```
-ratelimit-limit: 60
-ratelimit-remaining: 59
-ratelimit-reset: 60
+ratelimit-limit: <n>
+ratelimit-remaining: <n-1>
+ratelimit-reset: <seconds>
 ```
 
 **The prefix follows the data, not the environment name.** Staging runs
@@ -124,13 +120,13 @@ passkey. Two calls:
 # 1. Ask for a code. Always 202, whether or not the address is known.
 curl -sS -X POST https://api-staging.pull.fm/v1/auth/start \
   -H 'Content-Type: application/json' \
-  -d '{"email":"gray@grayada.ms"}'
+  -d '{"email":"operator@example.com"}'
 # {"status":"sent","expiresInSeconds":600, ...}
 
 # 2. Read the six-digit code out of your mail, then exchange it.
 SESSION=$(curl -sS -X POST https://api-staging.pull.fm/v1/auth/verify \
   -H 'Content-Type: application/json' \
-  -d '{"email":"gray@grayada.ms","code":"123456","transport":"bearer"}' \
+  -d '{"email":"operator@example.com","code":"123456","transport":"bearer"}' \
   | jq -r .accessToken)
 
 curl -sS https://api-staging.pull.fm/v1/me -H "Authorization: Bearer $SESSION"
@@ -148,21 +144,15 @@ the CSRF control, and without the header you get 403.
 
 #### Getting a session without waiting for mail
 
-Useful for scripting, and it is how every session in this document was made.
-WorkOS will mint the code over its own API instead of emailing it, so the loop
-closes without a mailbox:
+Useful for scripting, and it is how every session in this document was made. The
+identity provider's own admin API can return the code instead of emailing it, so
+the loop closes without a mailbox.
 
-```bash
-WK=$(op item get qr6sfpfzskhpqtzbehw7kdheti --vault MCP --fields label=password --reveal)
-CODE=$(curl -sS -X POST https://api.workos.com/user_management/magic_auth \
-  -H "Authorization: Bearer $WK" -H 'Content-Type: application/json' \
-  -d '{"email":"gray@grayada.ms"}' | jq -r .code)
-
-SESSION=$(curl -sS -X POST https://api-staging.pull.fm/v1/auth/verify \
-  -H 'Content-Type: application/json' \
-  -d "{\"email\":\"gray@grayada.ms\",\"code\":\"$CODE\",\"transport\":\"bearer\"}" \
-  | jq -r .accessToken)
-```
+**The recipe is deliberately not written out here.** It requires the provider
+admin key, which grants full authority over the directory including deleting
+users, and a public runbook that spells out how to turn that key into a session
+for an arbitrary address is a sign-in bypass with a copy button. The steps are
+in the internal operator notes alongside the key itself.
 
 ### Minting another token
 
@@ -438,12 +428,12 @@ The whole command, from nothing:
 
 ```bash
 install -m 0600 /dev/null /tmp/pullfm-staging.key
-op read 'op://MCP/krqfwafozazi7xq6ftq4s35rba/private_key' > /tmp/pullfm-staging.key
+op read 'op://MCP/<staging-ssh-key-item>/private_key' > /tmp/pullfm-staging.key
 [ -s /tmp/pullfm-staging.key ] || echo 'EMPTY: wrong field or no vault access'
 
 ssh -i /tmp/pullfm-staging.key -o IdentitiesOnly=yes \
-    pullfm@100.121.161.79 'hostname; uptime'
-# pullfm-staging-app-1
+    pullfm@<staging-node-tailnet-ip> 'hostname; uptime'
+# <staging-app-node>
 ```
 
 The 1Password item is `pull-fm/infra/STAGING_SSH_KEY`, and it is addressed
@@ -454,17 +444,17 @@ MCP --fields label=private_key --reveal` is the equivalent by title. The public
 half is not a secret and is committed as `ssh_public_keys.operator` in
 `infra/terraform/envs/staging/terraform.tfvars`; cloud-init installs it into
 `~pullfm/.ssh/authorized_keys`, and Hetzner holds it as the SSH key
-`pullfm-staging-operator`, MD5 `f9:ac:9f:...:72:30`.
+`<staging-operator-key>`, MD5 `<key-fingerprint>`.
 
 **Three ways this goes wrong, all of which look like "the key is refused":**
 
-| What you did                      | What happens                       | Why                                                                                          |
-| --------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------- |
-| `ssh root@...`                    | `Permission denied (publickey)`    | Root login over SSH is disabled by cloud-init. The account is `pullfm`, and it has sudo.     |
-| `ssh pullfm@pullfm-staging-app-1` | `Could not resolve hostname`       | MagicDNS is not resolving from every client. Use the tailnet **address**, not the node name. |
-| `ssh` with several keys loaded    | `Too many authentication failures` | The server closes the connection before reaching the right one. `-o IdentitiesOnly=yes`.     |
+| What you did                    | What happens                       | Why                                                                                          |
+| ------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------- |
+| `ssh root@...`                  | `Permission denied (publickey)`    | Root login over SSH is disabled by cloud-init. The account is `pullfm`, and it has sudo.     |
+| `ssh pullfm@<staging-app-node>` | `Could not resolve hostname`       | MagicDNS is not resolving from every client. Use the tailnet **address**, not the node name. |
+| `ssh` with several keys loaded  | `Too many authentication failures` | The server closes the connection before reaching the right one. `-o IdentitiesOnly=yes`.     |
 
-The tailnet address is `100.121.161.79`. `tailscale status | grep pullfm` finds
+The tailnet address is `<staging-node-tailnet-ip>`. `tailscale status | grep pullfm` finds
 it if it ever moves.
 
 ### The scheduled jobs, which had never run until tonight
@@ -547,37 +537,31 @@ that is the design.
 | Layer        | What                                                                              |
 | ------------ | --------------------------------------------------------------------------------- |
 | DNS and edge | Cloudflare, proxied. `api-staging.pull.fm` and `app-staging.pull.fm`, A and AAAA. |
-| Origin       | Hetzner `cpx22`, 2 vCPU / 4 GB, `hel1`, `pullfm-staging-app-1`.                   |
+| Origin       | A single small cloud node in an EU region.                                        |
 | Ingress      | nginx, TLS from a Cloudflare Origin CA certificate, Authenticated Origin Pulls.   |
 | Application  | One container, image pinned **by digest**, never by tag.                          |
 | Redis        | Two instances on the same node, `allkeys-lru` cache and `noeviction` quota.       |
-| Database     | Neon branch `staging`, PG18, `aws-eu-central-1`. Not built by this environment.   |
-| Timers       | deploy (60 s), watchdog (60 s), cf-ranges (daily), and four job timers.           |
+| Database     | A managed Postgres branch in an EU region. Not built by this environment.         |
+| Timers       | deploy, watchdog, Cloudflare-range refresh, and four job timers.                  |
 
-**Who may reach the origin.** Verified on 2026-07-29 from `104.58.94.69`, an
-address outside Cloudflare's ranges: ports 443, 80, 22, 3000 and 6379 on the
-origin IP all **time out**. The same hostname through Cloudflare returns 200.
+**Who may reach the origin.** Verified on 2026-07-29 from an address outside
+Cloudflare's ranges: every port probed on the origin address timed out, and the
+same hostname through Cloudflare returned 200. The port inventory and the
+probing address are in the internal record rather than here.
 
 Be precise about what that buys, because the repository used to overclaim it.
-The Hetzner firewall restricting 80 and 443 to Cloudflare's published ranges is
-the control carrying the weight. Authenticated Origin Pulls does **not** prove
-traffic came from _our_ zone: the certificate, its CA and its subject
-`CN=origin-pull.cloudflare.net` are shared by every Cloudflare customer, so the
-subject check excludes an unrelated client certificate and nothing more. The
-control that would genuinely bind this origin to this zone is a **per-zone
-custom origin-pull certificate**, which does not exist yet.
+The stock Authenticated Origin Pulls certificate is shared across Cloudflare
+customers, so checking it excludes an unrelated client certificate and does
+**not** prove that traffic came from our own zone. The control that would
+genuinely bind this origin to this zone is a **per-zone custom origin-pull
+certificate**, which does not exist yet. That remains an open item rather than
+a solved one, and it is tracked with the rest of them in section 10.
 
-That is buildable with the credentials already in place and was deliberately
-not attempted overnight, because it is a four-step change to a live ingress
-where the wrong ordering 403s every request until someone notices. Probed
-2026-07-29, the staging Cloudflare token **can** write
-`/zones/<zone>/origin_tls_client_auth` and `.../hostnames`, and **cannot** touch
-`rulesets` or `rate_limits`, so a WAF or edge rate-limit ruleset needs a wider
-token than any this project holds. The work is: mint a private CA and a client
-certificate, upload the certificate to Cloudflare, enable per-hostname
-authenticated origin pulls for `api-staging.pull.fm`, and only then repoint
-nginx's `ssl_client_certificate` at our CA and tighten the subject check. Do
-the nginx half last and keep a break-glass path open while doing it.
+It is buildable with the credentials already in place and was deliberately not
+attempted overnight, because it is a multi-step change to a live ingress where
+the wrong ordering 403s every request until someone notices. The ordered
+procedure is in the internal ingress notes; do the nginx half last and keep a
+break-glass path open while doing it.
 
 `/metrics` is denied at nginx and 404s from the internet. The application also
 refuses any caller that is not loopback and holds no `METRICS_TOKEN`.
@@ -642,9 +626,9 @@ them.
 - **A rollback has never been executed.** The procedure is written in
   `RUNBOOK-DEPLOY.md` section 5 and remains untested, which is the open half of
   Gate D.
-- **Two account rows exist for `gray@grayada.ms`**, one from a sign-in made
+- **Two account rows exist for `operator@example.com`**, one from a sign-in made
   while the WorkOS client id was misconfigured. The live one is
-  `0ede7b7f-9c92-4914-8182-4509aae1656b`; the other has no tokens and no data.
+  `<account-uuid>`; the other has no tokens and no data.
 - ~~`pullfm-watchdog.service` carries `RuntimeMaxSec=` with `Type=oneshot`~~
   **Fixed 2026-07-29**: it is `TimeoutStartSec=50` now. It mattered more here
   than on the job units, because systemd will not start a second copy of a

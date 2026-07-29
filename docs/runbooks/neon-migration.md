@@ -4,7 +4,7 @@
 > Terraform in section 5.1 has been applied against the live Neon control
 > plane: 4 imported, 2 added, 1 changed, 0 destroyed, matching
 > [Appendix A](#appendix-a-the-verified-plan). The staging branch is
-> `br-calm-morning-asjr2h1v` and its endpoint is `ep-super-wind-asbuczm7`.
+> `<neon-staging-branch-id>` and its endpoint is `<neon-staging-endpoint-id>`.
 >
 > Since then, and recorded in full in
 > [section 11](#11-what-actually-happened-on-the-schema-and-role-cutover):
@@ -97,20 +97,20 @@ Everything below was read from the Neon API (`console.neon.tech/api/v2`) on
 2026-07-29, not from documentation or a ticket.
 
 ```
-org       org-tiny-leaf-89756764   "312.dev LLC", subscription free_v3
-project   steep-frost-83698289     "pull-fm", aws-eu-central-1, pg_version 18
-branch    br-curly-wave-as91izv6   "main", default, protected false
+org       <neon-org-id>   "312.dev LLC", subscription free_v3
+project   <neon-project-id>     "pull-fm", aws-eu-central-1, pg_version 18
+branch    <neon-main-branch-id>   "main", default, protected false
 database  neondb                   owned by neondb_owner
-endpoint  ep-red-wave-as1i96ei     read_write, 0.25-2 CU, pooler DISABLED
-          direct  ep-red-wave-as1i96ei.c-4.eu-central-1.aws.neon.tech
-          pooled  ep-red-wave-as1i96ei-pooler.c-4.eu-central-1.aws.neon.tech
+endpoint  <neon-main-endpoint-id>     read_write, 0.25-2 CU, pooler DISABLED
+          direct  <neon-main-endpoint-id>.c-4.eu-central-1.aws.neon.tech
+          pooled  <neon-main-endpoint-id>-pooler.c-4.eu-central-1.aws.neon.tech
 ```
 
 Three of those are load-bearing and easy to get wrong:
 
 - **The default branch is `main`, not `production`.** It was created as
   `production` and renamed through the API on 2026-07-29. A branch ID is stable
-  across a rename, so `br-curly-wave-as91izv6` and the endpoint host are both
+  across a rename, so `<neon-main-branch-id>` and the endpoint host are both
   unchanged; only the name moved. Re-verified after the rename.
 - **The database is `neondb` and the role is `neondb_owner`.** These are Neon
   console defaults and they cannot be renamed in place: every field of the
@@ -385,7 +385,7 @@ the API disagreed. Ask the API:
 
 ```bash
 curl -sS -H "Authorization: Bearer $NEON_API_KEY" \
-  "https://console.neon.tech/api/v2/projects/steep-frost-83698289/endpoints" |
+  "https://console.neon.tech/api/v2/projects/<neon-project-id>/endpoints" |
   python3 -c 'import json,sys; [print(e["id"], e["pooler_enabled"], e["pooler_mode"]) for e in json.load(sys.stdin)["endpoints"]]'
 ```
 
@@ -437,7 +437,7 @@ migration. If that changes before cutover, the procedure is:
 # From the operator's laptop, over the tailnet. Never from the node itself:
 # the dump would then exist on a disk we are about to destroy.
 pg_dump --format=custom --no-owner --no-acl \
-        "postgres://pullfm@10.20.1.21:5432/pullfm" > pullfm-$(date +%F).dump
+        "postgres://pullfm@<retired-db-node-private-ip>:5432/pullfm" > pullfm-$(date +%F).dump
 
 pg_restore --no-owner --no-acl --single-transaction \
            --dbname "$(terraform -chdir=infra/neon output -raw main_database_url_direct)" \
@@ -568,7 +568,7 @@ for a minute of 500s, or put the maintenance flag on first.
 # 1. Reset. This invalidates the current credential the moment it returns.
 curl -sS -X POST \
   -H "Authorization: Bearer $NEON_API_KEY" \
-  "https://console.neon.tech/api/v2/projects/steep-frost-83698289/branches/br-curly-wave-as91izv6/roles/neondb_owner/reset_password"
+  "https://console.neon.tech/api/v2/projects/<neon-project-id>/branches/<neon-main-branch-id>/roles/neondb_owner/reset_password"
 
 # 2. Re-read what Terraform now sees, and update 1Password from it.
 terraform -chdir=infra/neon refresh
@@ -655,8 +655,8 @@ It is worth knowing why nobody caught it, because the same shape will recur with
 other R2 features. Probing the bucket does not produce an error:
 
 ```
-aws s3api get-bucket-versioning --bucket pull-fm-tfstate   # exit 0, empty body
-aws s3api get-bucket-policy     --bucket pull-fm-tfstate   # NotImplemented
+aws s3api get-bucket-versioning --bucket <tfstate-bucket>   # exit 0, empty body
+aws s3api get-bucket-policy     --bucket <tfstate-bucket>   # NotImplemented
 ```
 
 An empty versioning configuration is exactly what S3 returns for a bucket where
@@ -757,9 +757,9 @@ it should end up in `RUNBOOK-DEPLOY.md`:
 # Reset `staging` to the current state of `main`. Seconds, not minutes.
 curl -sS -X POST \
   -H "Authorization: Bearer $NEON_API_KEY" \
-  "https://console.neon.tech/api/v2/projects/steep-frost-83698289/branches/<staging-branch-id>/restore" \
+  "https://console.neon.tech/api/v2/projects/<neon-project-id>/branches/<staging-branch-id>/restore" \
   -H 'Content-Type: application/json' \
-  --data '{"source_branch_id":"br-curly-wave-as91izv6"}'
+  --data '{"source_branch_id":"<neon-main-branch-id>"}'
 ```
 
 Get `<staging-branch-id>` from `terraform -chdir=infra/neon output -raw staging_branch_id`.
@@ -983,8 +983,8 @@ d.Set("host", host)
 So once the second apply enabled pooling, the module wanted to publish:
 
 ```
-staging_host_direct   ep-super-wind-asbuczm7-pooler.c-4...          the POOLED host, labelled direct
-staging_host_pooled   ep-super-wind-asbuczm7-pooler-pooler.c-4...   resolves to nothing
+staging_host_direct   <neon-staging-endpoint-id>-pooler.c-4...          the POOLED host, labelled direct
+staging_host_pooled   <neon-staging-endpoint-id>-pooler-pooler.c-4...   resolves to nothing
 ```
 
 Neither is an error at plan time. The first would silently run migrations
@@ -1309,22 +1309,22 @@ Predicted 2026-07-29, then **applied the same day with exactly this result**.
 ```
 Plan: 4 to import, 2 to add, 1 to change, 0 to destroy.
 
-  neon_project.pullfm       import  steep-frost-83698289
-  neon_database.main        import  steep-frost-83698289/br-curly-wave-as91izv6/neondb
-  neon_role.owner           import  steep-frost-83698289/br-curly-wave-as91izv6/neondb_owner
-  neon_endpoint.main        import  steep-frost-83698289/ep-red-wave-as1i96ei
+  neon_project.pullfm       import  <neon-project-id>
+  neon_database.main        import  <neon-project-id>/<neon-main-branch-id>/neondb
+  neon_role.owner           import  <neon-project-id>/<neon-main-branch-id>/neondb_owner
+  neon_endpoint.main        import  <neon-project-id>/<neon-main-endpoint-id>
                             change  pooler_enabled false -> true
-  neon_branch.staging       create  name "staging", parent br-curly-wave-as91izv6
+  neon_branch.staging       create  name "staging", parent <neon-main-branch-id>
   neon_endpoint.staging     create  read_write, pooled, 0.25-1 CU
 ```
 
 What it actually created:
 
 ```
-branch    br-calm-morning-asjr2h1v   "staging", parent br-curly-wave-as91izv6
-endpoint  ep-super-wind-asbuczm7     read_write, 0.25-1 CU
-          direct  ep-super-wind-asbuczm7.c-4.eu-central-1.aws.neon.tech
-          pooled  ep-super-wind-asbuczm7-pooler.c-4.eu-central-1.aws.neon.tech
+branch    <neon-staging-branch-id>   "staging", parent <neon-main-branch-id>
+endpoint  <neon-staging-endpoint-id>     read_write, 0.25-1 CU
+          direct  <neon-staging-endpoint-id>.c-4.eu-central-1.aws.neon.tech
+          pooled  <neon-staging-endpoint-id>-pooler.c-4.eu-central-1.aws.neon.tech
 ```
 
 **The last line of the predicted plan was wrong, and Terraform was not lying.**
