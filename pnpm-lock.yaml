@@ -53,6 +53,12 @@ importers:
       '@pull-fm/crypto':
         specifier: workspace:^
         version: link:../../packages/crypto
+      '@pull-fm/discovery':
+        specifier: workspace:^
+        version: link:../../packages/discovery
+      '@pull-fm/upstream':
+        specifier: workspace:^
+        version: link:../../packages/upstream
       '@scalar/fastify-api-reference':
         specifier: ^1.63.0
         version: 1.63.0

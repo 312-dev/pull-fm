@@ -21,7 +21,12 @@ export type FeedSectionKind =
   | "explore_by_mood"
   | "trending"
   | "connections"
-  | "rediscover";
+  | "rediscover"
+  // Not produced by the blend. The BFF returns the same envelope from
+  // /v1/stations and /v1/search so a client learns one response shape, and a
+  // kind it does not recognise is a shelf it skips rather than a parse error.
+  | "stations"
+  | "search_results";
 
 export interface FeedSection {
   kind: FeedSectionKind;

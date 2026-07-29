@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto";
 
 import type { TestApp } from "./app.js";
 import { jsonOf } from "./json.js";
+import { FIXTURE_ARTIST_MBID } from "./upstreams.js";
 
 export interface Subject {
   /** Pull.fm user id. */
@@ -70,6 +71,7 @@ export interface Fixtures {
   readonly connectState: string;
   readonly exportTicket: string;
   readonly stationId: string;
+  readonly feedCursor: string;
 }
 
 /**
@@ -144,6 +146,19 @@ export async function seedFixtures(
         "http://x/?token=none",
     ).searchParams.get("token") ?? "none";
 
+  // Stations and feed cursors are DERIVED objects: a station is a seed artist
+  // plus its owner and a feed cursor is a section offset plus its owner, both
+  // signed. There is no row to create, so they are minted through the real
+  // service the way the connection fixture goes through the real connect flow.
+  // Minting them here rather than reading them off a response is what keeps the
+  // BOLA assertions non-vacuous on a cold cache, where /v1/stations legitimately
+  // returns nothing.
+  const stationId = ctx.services.discovery.stationId(
+    subject.id,
+    FIXTURE_ARTIST_MBID,
+  );
+  const feedCursor = ctx.services.discovery.feedCursor(subject.id, 0);
+
   return {
     markers: [subject.id, wishlistItemId, secondId, issued.tokenRecord.id],
     wishlistItemId,
@@ -152,9 +167,7 @@ export async function seedFixtures(
     apiTokenSecret: issued.token,
     connectState: connectState ?? "missing-state",
     exportTicket,
-    // No stations exist until packages/discovery lands. A syntactically valid
-    // identifier is enough for the route to be exercised, and the route is
-    // flagged not-implemented in the spec so the suite knows what to expect.
-    stationId: randomUUID(),
+    stationId,
+    feedCursor,
   };
 }

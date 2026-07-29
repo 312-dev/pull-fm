@@ -116,6 +116,18 @@ export interface ProviderCredential {
 
 export type ProviderRegistry = Partial<Record<Provider, ProviderAdapter>>;
 
+/**
+ * A decrypted credential, in memory, for one call.
+ *
+ * Deliberately NOT a `ConnectionView`: the two must never be confusable, and
+ * the view is the type every route returns. This type appears in exactly one
+ * place (the discovery service's port adapter) and is never serialised.
+ */
+export interface OpenedCredential {
+  readonly providerAccountId: string;
+  readonly accessToken: string;
+}
+
 /** State lifetime. Long enough for a slow OAuth round trip, short enough that a
  *  stolen state is dead before it can be used. */
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -310,6 +322,60 @@ export class ConnectionService {
     /* c8 ignore next 3 -- RETURNING on an upsert always yields a row */
     if (row === undefined) throw new Error("connection upsert returned no row");
     return toView(row);
+  }
+
+  /**
+   * Opens one stored credential for the duration of one upstream call.
+   *
+   * This is the only method in the application that produces plaintext from the
+   * vault, and the shape of its contract is the control:
+   *
+   *   - It RETURNS the plaintext rather than accepting a place to put it. The
+   *     caller passes it as an argument to an upstream client and lets it go.
+   *     Nothing here writes it to the request, the reply, a cache, a log, or a
+   *     field on a longer-lived object. `pullfm-no-decrypted-token-on-request`
+   *     in .semgrep/pullfm.yml fails CI on the assignment form, and
+   *     `pullfm-no-token-in-logs` fails CI on the logging form.
+   *   - The predicate is `user_id = $1 AND provider = $2`, so there is no
+   *     connection id in this path at all and therefore no id to substitute.
+   *   - A revoked or absent connection is `null`, not an error. Discovery
+   *     degrades on a missing connection; it does not fail the request.
+   *
+   * AAD binds user, provider, and column into the GCM tag, so a ciphertext
+   * moved between rows or columns by an attacker with database write access
+   * fails to authenticate rather than decrypting into another user's session
+   * (M02/T08).
+   */
+  async openCredential(
+    userId: string,
+    provider: Provider,
+  ): Promise<OpenedCredential | null> {
+    const { rows } = await this.#db.query<{
+      provider_account_id: string;
+      kek_id: string;
+      wrapped_dek: Buffer;
+      access_token_ct: Buffer;
+    }>(
+      `SELECT provider_account_id, kek_id, wrapped_dek, access_token_ct
+         FROM user_connections
+        WHERE user_id = $1 AND provider = $2 AND revoked_at IS NULL
+          AND status = 'active'`,
+      [userId, provider],
+    );
+    const row = rows[0];
+    if (row === undefined) return null;
+
+    return {
+      providerAccountId: row.provider_account_id,
+      accessToken: this.#cipher.open(
+        {
+          kekId: row.kek_id,
+          wrappedDek: row.wrapped_dek,
+          ciphertext: row.access_token_ct,
+        },
+        { userId, provider, field: "access_token" },
+      ),
+    };
   }
 
   /**

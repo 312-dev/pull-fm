@@ -10,6 +10,8 @@
 import { EnvelopeCipher, parseKek } from "@pull-fm/crypto";
 import type { Redis } from "ioredis";
 
+import type { FetchLike } from "@pull-fm/upstream";
+
 import type { Config } from "./config.js";
 import { AuditLog } from "./lib/audit.js";
 import { Database } from "./lib/db.js";
@@ -20,6 +22,8 @@ import {
   type ProviderRegistry,
 } from "./services/connections.js";
 import { DeletionService } from "./services/deletion.js";
+import { DiscoveryService } from "./services/discovery.js";
+import { EventsService } from "./services/events.js";
 import { ExportService } from "./services/export.js";
 import { TokenService } from "./services/tokens.js";
 import { UserService } from "./services/users.js";
@@ -27,6 +31,7 @@ import { WishlistService } from "./services/wishlist.js";
 import { WorkOsClient } from "./services/workos.js";
 import type { Services } from "./routes/deps.js";
 import { buildProviderRegistry } from "./services/providers.js";
+import { buildUpstream } from "./services/upstream.js";
 
 /** Minimal logger surface the audit writer needs. */
 export interface WiringLogger {
@@ -40,6 +45,15 @@ export interface WiringOverrides {
   readonly quotaRedis?: Redis;
   readonly providers?: ProviderRegistry;
   readonly fetchImpl?: typeof fetch;
+  /**
+   * HTTP transport for the upstream music providers.
+   *
+   * Distinct from `fetchImpl`, which answers WorkOS. Substituted by the test
+   * harness so no suite can reach MusicBrainz, Last.fm, iTunes or Deezer: those
+   * providers revoke access for exactly the traffic a test suite produces, and
+   * MusicBrainz and Apple have no appeals process.
+   */
+  readonly upstreamFetch?: FetchLike;
 }
 
 export function buildServices(
@@ -104,6 +118,13 @@ export function buildServices(
     providers: overrides.providers ?? buildProviderRegistry(cfg),
   });
 
+  const upstream = buildUpstream(cfg, db, {
+    ...(overrides.upstreamFetch === undefined
+      ? {}
+      : { fetchImpl: overrides.upstreamFetch }),
+    log,
+  });
+
   return {
     cfg,
     db,
@@ -122,6 +143,9 @@ export function buildServices(
       cooldownSeconds: cfg.EXPORT_COOLDOWN_S,
     }),
     workos,
+    upstream,
+    discovery: new DiscoveryService(upstream, connections, keys),
+    events: new EventsService(upstream),
   };
 }
 

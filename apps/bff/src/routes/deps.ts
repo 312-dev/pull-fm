@@ -16,9 +16,12 @@ import type { Database } from "../lib/db.js";
 import type { SigningKeys } from "../lib/keys.js";
 import type { ConnectionService } from "../services/connections.js";
 import type { DeletionService } from "../services/deletion.js";
+import type { DiscoveryService } from "../services/discovery.js";
+import type { EventsService } from "../services/events.js";
 import type { ExportService } from "../services/export.js";
 import type { TokenService } from "../services/tokens.js";
 import type { UserService } from "../services/users.js";
+import type { UpstreamBundle } from "../services/upstream.js";
 import type { WishlistService } from "../services/wishlist.js";
 import type { WorkOsClient } from "../services/workos.js";
 
@@ -36,4 +39,13 @@ export interface Services {
   readonly deletion: DeletionService;
   readonly exports: ExportService;
   readonly workos: WorkOsClient;
+  /**
+   * Every third-party client, and the cache that fronts them. Exposed on the
+   * bundle rather than hidden inside DiscoveryService because `GET /v1/config`
+   * reports coarse provider health and because the kill switch has to be
+   * reachable without going through a discovery call.
+   */
+  readonly upstream: UpstreamBundle;
+  readonly discovery: DiscoveryService;
+  readonly events: EventsService;
 }

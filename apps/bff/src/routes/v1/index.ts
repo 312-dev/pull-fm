@@ -87,17 +87,18 @@ export async function registerV1Routes(
       features: {
         personalApiTokens: true,
         wishlist: true,
-        // False until packages/discovery lands; the client hides the shelf
-        // rather than rendering an empty one.
-        discovery: false,
+        discovery: true,
+        // A client hides the shelf rather than rendering an empty one. False
+        // means no events provider is configured or the kill switch is thrown,
+        // and the route answers 501 rather than an empty list.
+        events: services.cfg.eventsEnabled,
       },
-      providers: {
-        listenbrainz: "ok",
-        lastfm: "ok",
-        musicbrainz: "ok",
-        previews: "ok",
-        events: "disabled",
-      },
+      // Read from the live clients rather than hard-coded, so an open circuit
+      // breaker or a thrown kill switch is visible to a client within seconds
+      // instead of at the next deploy. Coarse on purpose: this is a
+      // reconnaissance endpoint (API9), so it says whether a shelf will render
+      // and never which providers hold credentials.
+      providers: services.upstream.status(),
     }),
   );
 

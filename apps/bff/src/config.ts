@@ -212,6 +212,37 @@ const schema = z.object({
    */
   LASTFM_CACHE_CAP_MB: z.coerce.number().positive().default(80),
 
+  /**
+   * SeatGeek, the live-events provider.
+   *
+   * Absent client id disables `GET /v1/artists/:mbid/events` outright: the
+   * route answers 501, which is a stable "this deployment has no events
+   * provider" rather than an empty list that looks like "this artist is not
+   * touring". The two are different answers and a client renders them
+   * differently.
+   *
+   * The client id is 35 characters and the secret is 64. Only the secret is a
+   * credential, but the id is still kept out of URLs and logs (see the Basic
+   * auth reasoning in packages/upstream/src/seatgeek/client.ts).
+   */
+  SEATGEEK_CLIENT_ID: z.string().min(1).optional(),
+  SEATGEEK_CLIENT_SECRET: z.string().min(1).optional(),
+
+  /**
+   * Runtime kill switch for the events provider.
+   *
+   * Separate from the credential being absent because the two situations are
+   * operationally different: absent credentials are a deployment that never had
+   * events, while this flag is the lever to pull the moment SeatGeek write to
+   * say our use breaches their terms. Their terms make "stop now" a legal
+   * obligation measured in hours, not deploy cycles, so it must be a
+   * configuration flip rather than a code change.
+   */
+  SEATGEEK_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+
   CORS_ORIGINS: z
     .string()
     .default("")
@@ -251,6 +282,8 @@ export interface Config extends Omit<RawConfig, "CREDENTIAL_KEKS"> {
   readonly workosApiBaseUrl: string;
   /** Token prefix for this deployment: `pfm_live` or `pfm_test`. */
   readonly apiTokenPrefix: "pfm_live" | "pfm_test";
+  /** True when the events route has both a credential and the switch on. */
+  readonly eventsEnabled: boolean;
 }
 
 /** The only host WorkOS identity material may ever be fetched from. */
@@ -353,5 +386,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workosJwksUrl,
     workosApiBaseUrl,
     apiTokenPrefix: cfg.DEPLOY_ENV === "production" ? "pfm_live" : "pfm_test",
+    eventsEnabled: cfg.SEATGEEK_ENABLED && cfg.SEATGEEK_CLIENT_ID !== undefined,
   };
 }

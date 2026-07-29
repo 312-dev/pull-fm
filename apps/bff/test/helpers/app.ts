@@ -31,6 +31,7 @@ import type {
   ProviderCredential,
   ProviderRegistry,
 } from "../../src/services/connections.js";
+import { fakeUpstreams, type FakeUpstreams } from "./upstreams.js";
 import { testDatabaseUrl } from "./database.js";
 
 type SigningKey = Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
@@ -176,6 +177,12 @@ export interface RoutedOperation {
 
 export interface TestApp {
   readonly app: FastifyInstance;
+  /**
+   * Every music provider, faked. Exposed so a suite can assert what was NOT
+   * called: a warm cache must produce zero upstream calls, and no request path
+   * may reach MusicBrainz or iTunes at all.
+   */
+  readonly upstreams: FakeUpstreams;
   /** Every route the ROUTER holds, as seen by Fastify rather than by the spec. */
   readonly routes: RoutedOperation[];
   readonly services: Services;
@@ -212,6 +219,15 @@ export async function buildTestApp(
     WORKOS_JWKS_URL: idp.jwksUrl,
     WORKOS_API_BASE_URL: idp.jwksUrl.replace(/\/jwks$/, ""),
     MUSICBRAINZ_USER_AGENT: "PullFM/0.1.0 (test@pull.fm)",
+    // Both halves of the discovery blend are exercised: without a Last.fm key
+    // the enrichment branch is never entered and half the merge logic in
+    // packages/discovery is dead code as far as the integration suites are
+    // concerned. Neither value reaches a real provider; see upstreams.ts.
+    LASTFM_API_KEY: "lastfm-fixture-key-not-a-credential",
+    LASTFM_SHARED_SECRET: "lastfm-fixture-secret-not-a-credential",
+    // Events are enabled so the compliance assertions (session-only, logo
+    // attribution, coverage) run against a live route rather than a 501.
+    SEATGEEK_CLIENT_ID: "seatgeek-fixture-client-id-not-a-secret",
     PUBLIC_BASE_URL: "http://127.0.0.1:3000",
     // The global per-IP floor is not what these suites test, and every request
     // in them arrives from 127.0.0.1. Left at its default the suite would
@@ -222,6 +238,8 @@ export async function buildTestApp(
     ...opts.env,
   });
 
+  const upstreams = fakeUpstreams();
+
   const services = buildServices(
     cfg,
     { error: () => undefined, warn: () => undefined },
@@ -231,6 +249,10 @@ export async function buildTestApp(
       // locally. The signature-verified webhook path and the JWT path are the
       // security-relevant parts and both run for real.
       fetchImpl: stubWorkOsFetch,
+      // The music providers are answered locally too, and this one is not a
+      // convenience: MusicBrainz blocks IPs and Apple has no appeals process,
+      // so a suite that reached them could cost the project its API access.
+      upstreamFetch: upstreams.fetch,
     },
   );
 
@@ -250,6 +272,7 @@ export async function buildTestApp(
     app,
     routes,
     services,
+    upstreams,
     cfg,
     idp,
     webhookSecret: TEST_WEBHOOK_SECRET,

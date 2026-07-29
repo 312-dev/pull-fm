@@ -200,6 +200,8 @@ export const sectionsEnvelopeSchema = {
               "trending",
               "connections",
               "rediscover",
+              "stations",
+              "search_results",
             ],
           },
           title: { type: "string" },
@@ -242,5 +244,231 @@ export const sectionsEnvelopeSchema = {
     "degraded",
     "unavailableProviders",
     "attribution",
+  ],
+} as const;
+
+// ---------------------------------------------------------------------------
+// Catalogue responses.
+//
+// Every one of these declares `attribution` as REQUIRED. Last.fm's terms
+// mandate their specified link format, Apple requires "provided courtesy of
+// iTunes" alongside a preview, and MusicBrainz requires acknowledgement. A
+// client that cannot see the attribution cannot render it, and a product that
+// does not render it is in breach, so the field is part of the contract rather
+// than an advisory note.
+//
+// `resolution` says where a record came from. A catalogue route may answer from
+// a full MusicBrainz record or from the thinner name the crosswalk learned, and
+// a client that cannot tell them apart will present a provisional name as
+// canonical.
+// ---------------------------------------------------------------------------
+
+const attributionArray = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      source: { type: "string" },
+      text: { type: "string" },
+      url: { type: "string" },
+    },
+    required: ["source", "text"],
+  },
+} as const;
+
+export const artistSchema = {
+  type: "object",
+  properties: {
+    mbid: { type: "string" },
+    name: { type: "string" },
+    sortName: { type: ["string", "null"] },
+    country: { type: ["string", "null"] },
+    beganYear: { type: ["integer", "null"] },
+    // No `tags` property, and its absence is the enforcement. MusicBrainz core
+    // data is CC0; tags, genres and ratings are supplementary data under
+    // CC BY-NC-SA 3.0. Declaring the property would let a handler put
+    // NonCommercial + ShareAlike content on the wire, including through the
+    // personal API token surface. See docs/compliance/metabrainz-terms-review.md.
+    resolution: { type: "string", enum: ["musicbrainz", "crosswalk"] },
+    attribution: attributionArray,
+  },
+  required: ["mbid", "name", "resolution", "attribution"],
+} as const;
+
+export const similarArtistsSchema = {
+  type: "object",
+  properties: {
+    artists: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          artistMbid: { type: ["string", "null"] },
+          name: { type: "string" },
+          score: { type: "number" },
+          sources: { type: "array", items: { type: "string" } },
+          attribution: attributionArray,
+        },
+        required: ["name", "score", "sources", "attribution"],
+      },
+    },
+    degraded: { type: "boolean" },
+    unavailableProviders: { type: "array", items: { type: "string" } },
+    attribution: attributionArray,
+  },
+  required: ["artists", "degraded", "unavailableProviders", "attribution"],
+} as const;
+
+export const trackSchema = {
+  type: "object",
+  properties: {
+    mbid: { type: "string" },
+    title: { type: "string" },
+    artistName: { type: "string" },
+    artistMbid: { type: ["string", "null"] },
+    durationMs: { type: ["integer", "null"] },
+    resolution: { type: "string", enum: ["musicbrainz"] },
+    attribution: attributionArray,
+  },
+  required: ["mbid", "title", "artistName", "resolution", "attribution"],
+} as const;
+
+export const albumSchema = {
+  type: "object",
+  properties: {
+    mbid: { type: "string" },
+    title: { type: "string" },
+    artistName: { type: "string" },
+    artistMbid: { type: ["string", "null"] },
+    date: { type: ["string", "null"] },
+    country: { type: ["string", "null"] },
+    trackCount: { type: ["integer", "null"] },
+    resolution: { type: "string", enum: ["musicbrainz"] },
+    attribution: attributionArray,
+  },
+  required: ["mbid", "title", "artistName", "resolution", "attribution"],
+} as const;
+
+/**
+ * A 30 second preview.
+ *
+ * `expiresAt` and `cacheable` are on the wire because the two providers behave
+ * differently and only the server knows which one answered. An iTunes URL is
+ * unsigned and permanent; a Deezer URL is signed and dies in minutes, so a
+ * client that caches one serves its user a 403 later. Making the client infer
+ * that from `provider` would work right up until a third provider is added.
+ */
+export const previewSchema = {
+  type: "object",
+  properties: {
+    recordingMbid: { type: "string" },
+    provider: { type: "string", enum: ["itunes", "deezer"] },
+    url: { type: "string" },
+    durationMs: { type: ["integer", "null"] },
+    expiresAt: { type: ["integer", "null"] },
+    cacheable: { type: "boolean" },
+    attribution: { type: "string" },
+  },
+  required: [
+    "recordingMbid",
+    "provider",
+    "url",
+    "expiresAt",
+    "cacheable",
+    "attribution",
+  ],
+} as const;
+
+/**
+ * Live events.
+ *
+ * NOT the `sections` envelope, and the attribution object is why. SeatGeek's
+ * terms 3.1 require their LOGO wherever their material appears, linked to their
+ * homepage, and the feed envelope's `{ source, text, url }` cannot express
+ * that. Routing events through the feed would produce a response that satisfies
+ * our schema while silently dropping a contractual obligation. See
+ * apps/bff/src/services/events.ts for the full argument.
+ *
+ * `coverage` and `artistUnknownToProvider` are required so a client can render
+ * an honest empty state: "we cannot see much here" and "this artist has no
+ * shows" are different answers, and SeatGeek is a US and Canada catalogue.
+ */
+export const eventsSchema = {
+  type: "object",
+  properties: {
+    artistMbid: { type: "string" },
+    artistName: { type: "string" },
+    coverage: {
+      type: "string",
+      enum: ["primary", "limited", "unknown"],
+      description:
+        "How dependable this provider's catalogue is for the requested region. `limited` means we cannot see much here, which is a different message from an artist having no shows.",
+    },
+    artistUnknownToProvider: {
+      type: "boolean",
+      description:
+        "True when the artist could not be matched to a provider performer at all.",
+    },
+    events: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          type: { type: ["string", "null"] },
+          startsAtUtc: { type: ["string", "null"] },
+          startsAtLocal: { type: ["string", "null"] },
+          datetimeTbd: { type: "boolean" },
+          venue: {
+            type: ["object", "null"],
+            properties: {
+              name: { type: "string" },
+              city: { type: ["string", "null"] },
+              state: { type: ["string", "null"] },
+              country: { type: ["string", "null"] },
+              url: { type: ["string", "null"] },
+            },
+            required: ["name"],
+          },
+          performerNames: { type: "array", items: { type: "string" } },
+          url: { type: "string" },
+        },
+        required: ["id", "title", "datetimeTbd", "url"],
+      },
+    },
+    attribution: {
+      type: "object",
+      description:
+        "Attribution the provider's terms require. `logoRequired` true means a text credit alone is a breach: the logo must be obtained from `logoAssetPage` and every rendered instance must link to `linkUrl`.",
+      properties: {
+        source: { type: "string" },
+        text: { type: "string" },
+        logoRequired: { type: "boolean" },
+        logoAssetPage: { type: ["string", "null"] },
+        linkUrl: { type: "string" },
+        logoModification: {
+          type: "string",
+          enum: ["proportional-resize-only", "unrestricted"],
+        },
+      },
+      required: [
+        "source",
+        "text",
+        "logoRequired",
+        "linkUrl",
+        "logoModification",
+      ],
+    },
+    providerName: { type: "string" },
+  },
+  required: [
+    "artistMbid",
+    "artistName",
+    "coverage",
+    "artistUnknownToProvider",
+    "events",
+    "attribution",
+    "providerName",
   ],
 } as const;

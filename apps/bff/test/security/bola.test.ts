@@ -239,7 +239,13 @@ function objectValue(
 ): string {
   switch (param) {
     case "cursor":
-      return fixtures.wishlistCursor ?? "opaque-cursor";
+      // Two routes page with a `cursor`, and they are not interchangeable: a
+      // cursor is scoped to the route that issued it as well as to the subject,
+      // so handing the wishlist's cursor to /v1/feed would 400 for the OWNER
+      // too and the positive control would prove nothing.
+      return objectType === "wishlist_item"
+        ? (fixtures.wishlistCursor ?? "opaque-cursor")
+        : fixtures.feedCursor;
     case "state":
       return fixtures.connectState;
     case "token":
@@ -260,7 +266,7 @@ function objectValue(
       return fixtures.stationId;
     case "feed":
     case "recommendation_set":
-      return fixtures.wishlistCursor ?? "opaque-cursor";
+      return fixtures.feedCursor;
     case "subject":
       return fixtures.markers[0] ?? "unknown";
     case "connection":
@@ -602,16 +608,16 @@ describe("cross-cutting authorization", () => {
   });
 
   // -- The exemption cannot grow silently ------------------------------------
-  test("only the discovery routes claim the not-implemented exemption", () => {
+  test("no route claims the not-implemented exemption", () => {
+    // Every product route now has a handler, so the exemption covers nothing.
+    // Asserting the empty set rather than deleting the test is the point: this
+    // is what stops a future route being marked deferred and quietly skipping
+    // the denial assertions above.
     const deferredUserScoped = userScoped
       .filter((r) => notImplemented.has(r.route))
       .map((r) => r.route)
       .sort();
-    expect(deferredUserScoped).toEqual([
-      "GET /v1/feed",
-      "GET /v1/recommendations",
-      "GET /v1/stations",
-      "GET /v1/stations/{id}/tracks",
-    ]);
+    expect(deferredUserScoped).toEqual([]);
+    expect([...notImplemented]).toEqual([]);
   });
 });
