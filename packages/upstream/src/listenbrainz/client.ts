@@ -40,6 +40,17 @@ export const LISTENBRAINZ_BASE_URL = "https://api.listenbrainz.org";
 export const LISTENBRAINZ_LABS_BASE_URL = "https://labs.api.listenbrainz.org";
 
 /** Observed: `x-ratelimit-limit: 30` per 10 seconds, per token. */
+/**
+ * FALLBACK ONLY. The real limit comes from the response headers.
+ *
+ * ListenBrainz publish no numeric rate limit anywhere and their documentation
+ * instructs clients to read `X-RateLimit-Limit`, `X-RateLimit-Remaining` and
+ * `X-RateLimit-Reset-In` from each response to discover it. This constant is an
+ * observation from 2026-07-28, used until the first response arrives and
+ * whenever a response omits the headers, and `adaptiveQuota` below is what
+ * stops it becoming a guess that fails silently the day they lower the real
+ * ceiling (docs/compliance/metabrainz-terms-review.md F3).
+ */
 export const LISTENBRAINZ_QUOTA = { limit: 30, windowMs: 10_000 } as const;
 
 /**
@@ -106,6 +117,9 @@ export class ListenBrainzClient implements Provider {
       name: "listenbrainz" as const,
       headers: { ...headers, Accept: "application/json" },
       quota: opts.quota ?? LISTENBRAINZ_QUOTA,
+      // The provider is the authority on its own limit; the constant above is
+      // only what we use before it has told us.
+      adaptiveQuota: true,
     };
     this.#http = new ProviderClient({
       ...common,

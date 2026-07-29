@@ -55,3 +55,40 @@ describe("QuotaCounter", () => {
     expect(q.tryConsume()).toBe(true);
   });
 });
+
+describe("QuotaCounter.retune", () => {
+  it("adopts a budget the provider declared", () => {
+    const clock = new FakeClock();
+    const quota = new QuotaCounter({ limit: 30, windowMs: 10_000 }, clock);
+    expect(quota.retune({ limit: 10, windowMs: 5_000 })).toBe(true);
+    expect(quota.snapshot().limit).toBe(10);
+    expect(quota.snapshot().windowMs).toBe(5_000);
+  });
+
+  it("reports no change when the policy is identical", () => {
+    const quota = new QuotaCounter({ limit: 30, windowMs: 10_000 });
+    expect(quota.retune({ limit: 30, windowMs: 10_000 })).toBe(false);
+  });
+
+  it("ignores a nonsensical policy rather than disabling the budget", () => {
+    // A provider sending `X-RateLimit-Limit: 0` (or garbage) must not be able
+    // to turn our local counter into something that never refuses, nor into
+    // something that refuses everything.
+    const quota = new QuotaCounter({ limit: 30, windowMs: 10_000 });
+    expect(quota.retune({ limit: 0, windowMs: 10_000 })).toBe(false);
+    expect(quota.retune({ limit: 30, windowMs: 0 })).toBe(false);
+    expect(quota.snapshot().limit).toBe(30);
+  });
+
+  it("does not forgive spends already made when the limit tightens", () => {
+    const clock = new FakeClock();
+    const quota = new QuotaCounter({ limit: 5, windowMs: 10_000 }, clock);
+    for (let i = 0; i < 5; i++) expect(quota.tryConsume()).toBe(true);
+    quota.retune({ limit: 2, windowMs: 10_000 });
+    // Already over the new ceiling, so the counter is simply full. That is the
+    // conservative reading, and the alternative would let a tightened limit
+    // hand us a fresh budget.
+    expect(quota.tryConsume()).toBe(false);
+    expect(quota.snapshot().remaining).toBe(0);
+  });
+});

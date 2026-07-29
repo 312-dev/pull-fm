@@ -56,6 +56,18 @@ export interface CrosswalkStore {
     minSimilarity: number,
     limit: number,
   ): Promise<CrosswalkHit[]>;
+  /**
+   * The reverse direction: MBID -> the key we learned it under.
+   *
+   * `crosswalk_mbid_idx` exists in the schema precisely for this. It is how a
+   * catalogue route answers "what is this MBID called" without spending one of
+   * MusicBrainz's one-per-second global requests. The answer is the NORMALISED
+   * key, not the original casing, and callers must present it as provisional.
+   */
+  lookupByMbid(
+    entityType: CrosswalkEntity,
+    mbid: string,
+  ): Promise<CrosswalkHit | null>;
   record(entry: CrosswalkRecord): Promise<void>;
 }
 
@@ -110,6 +122,23 @@ export class MemoryCrosswalkStore implements CrosswalkStore {
       (a, b) => b.similarity - a.similarity || b.confidence - a.confidence,
     );
     return Promise.resolve(hits.slice(0, Math.max(0, limit)));
+  }
+
+  lookupByMbid(
+    entityType: CrosswalkEntity,
+    mbid: string,
+  ): Promise<CrosswalkHit | null> {
+    let best: CrosswalkHit | null = null;
+    for (const [id, row] of this.#rows) {
+      if (!id.startsWith(`${entityType}${KEY_SEPARATOR}`)) continue;
+      if (row.mbid !== mbid) continue;
+      // Several names can map to one MBID (aliases, misspellings). The most
+      // confident one is the closest thing to a canonical name we hold.
+      if (best === null || row.confidence > best.confidence) {
+        best = { ...row, matchedBy: "exact", similarity: 1 };
+      }
+    }
+    return Promise.resolve(best);
   }
 
   record(entry: CrosswalkRecord): Promise<void> {

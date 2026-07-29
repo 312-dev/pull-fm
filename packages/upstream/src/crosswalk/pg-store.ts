@@ -130,6 +130,29 @@ export class PgCrosswalkStore implements CrosswalkStore {
       .filter((hit): hit is CrosswalkHit => hit !== null);
   }
 
+  /**
+   * MBID -> the key we learned it under. Uses `crosswalk_mbid_idx`.
+   *
+   * Several names can map to one MBID (aliases, misspellings, a fuzzy match
+   * that landed correctly), so the most confident row wins: it is the closest
+   * thing to a canonical name this table holds.
+   */
+  async lookupByMbid(
+    entityType: CrosswalkEntity,
+    mbid: string,
+  ): Promise<CrosswalkHit | null> {
+    const { rows } = await this.db.query<Row>(
+      `SELECT normalized_key, mbid::text AS mbid, confidence, source
+         FROM mbid_crosswalk
+        WHERE entity_type = $1 AND mbid = $2::uuid
+        ORDER BY confidence DESC
+        LIMIT 1`,
+      [entityType, mbid],
+    );
+    const row = rows[0];
+    return row === undefined ? null : toHit(entityType, row, "exact");
+  }
+
   async record(entry: CrosswalkRecord): Promise<void> {
     // A more confident resolution supersedes a less confident one; equal or
     // worse leaves the existing row alone, so a fuzzy match can never overwrite

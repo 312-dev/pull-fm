@@ -188,4 +188,41 @@ describe("ListenBrainzClient quota", () => {
       /quota/,
     );
   });
+
+  it("adopts a tighter budget the provider declares in its headers", async () => {
+    // ListenBrainz publish no number and tell clients to read the headers. A
+    // constant that never adapts fails SILENTLY the day they lower the limit:
+    // we would keep spending against a budget that no longer exists.
+    const clock = new FakeClock();
+    const http = new FakeHttp().always({
+      body: { payload: { mbids: [] } },
+      headers: {
+        "X-RateLimit-Limit": "5",
+        "X-RateLimit-Remaining": "4",
+        "X-RateLimit-Reset-In": "10",
+      },
+    });
+    const client = make(http, clock);
+
+    // The first call spends one unit against the fallback and learns the real
+    // limit from the response, so four remain rather than twenty-nine.
+    for (let i = 0; i < 5; i++) {
+      await client.recommendedRecordings("gray", TOKEN);
+    }
+    await expect(client.recommendedRecordings("gray", TOKEN)).rejects.toThrow(
+      /quota/,
+    );
+  });
+
+  it("keeps the fallback when the provider sends no rate-limit headers", async () => {
+    const clock = new FakeClock();
+    const http = new FakeHttp().always({ body: { payload: { mbids: [] } } });
+    const client = make(http, clock);
+    for (let i = 0; i < 30; i++) {
+      await client.recommendedRecordings("gray", TOKEN);
+    }
+    await expect(client.recommendedRecordings("gray", TOKEN)).rejects.toThrow(
+      /quota/,
+    );
+  });
 });

@@ -34,8 +34,8 @@ export interface QuotaSnapshot {
 }
 
 export class QuotaCounter {
-  readonly #limit: number;
-  readonly #windowMs: number;
+  #limit: number;
+  #windowMs: number;
   readonly #clock: Clock;
   /** Spend timestamps, oldest first. Bounded by `limit`, so it cannot grow. */
   #spends: number[] = [];
@@ -83,6 +83,34 @@ export class QuotaCounter {
       return false;
     }
     for (let i = 0; i < cost; i++) this.#spends.push(now);
+    return true;
+  }
+
+  /**
+   * Adopts a budget the provider itself just told us about.
+   *
+   * ListenBrainz publishes no numeric limit anywhere and their documentation
+   * says the client must read `X-RateLimit-*` from each response to learn it.
+   * A hard-coded constant is therefore a guess that fails SILENTLY if they ever
+   * lower the real limit: we would keep spending against a budget that no
+   * longer exists and find out through 429s.
+   *
+   * Only ever narrows or widens the policy; it does not forgive spends already
+   * made. If the new limit is below what is already spent inside the window,
+   * the counter is simply full, which is the correct and conservative reading.
+   *
+   * Returns true when the policy actually changed, so a caller can log a
+   * provider quietly tightening its limits.
+   */
+  retune(policy: QuotaPolicy): boolean {
+    if (policy.limit < 1 || policy.windowMs < 1) return false;
+    if (policy.limit === this.#limit && policy.windowMs === this.#windowMs) {
+      return false;
+    }
+    this.#limit = policy.limit;
+    this.#windowMs = policy.windowMs;
+    // A shortened window may have aged spends out already.
+    this.#prune(this.#clock.now());
     return true;
   }
 

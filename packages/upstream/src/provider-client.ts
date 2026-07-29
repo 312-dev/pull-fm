@@ -33,6 +33,7 @@ import { QueueOverflowError, RateLimiter } from "./rate-limiter.js";
 import type {
   Clock,
   FetchLike,
+  HttpHeadersLike,
   HttpResponse,
   ProviderName,
   ProviderStatus,
@@ -103,6 +104,19 @@ export interface ProviderClientOptions {
    */
   readonly rateLimiter?: RateLimiter;
   readonly killSwitch?: KillSwitch;
+  /**
+   * Re-tune the local quota from `X-RateLimit-*` on every response.
+   *
+   * For providers that publish no numeric limit and instead document that the
+   * client MUST read the headers - ListenBrainz is the one we depend on. A
+   * hard-coded constant for such a provider is a guess that fails silently the
+   * day they lower the real limit: we keep spending against a budget that no
+   * longer exists and learn about it through 429s.
+   *
+   * `quota` remains the fallback, used until the first response arrives and
+   * whenever a response omits the headers.
+   */
+  readonly adaptiveQuota?: boolean;
   readonly clock?: Clock;
   readonly onEvent?: (event: ProviderEvent) => void;
 }
@@ -167,6 +181,7 @@ export class ProviderClient {
   readonly #quota: QuotaCounter | null;
   readonly #rateLimiter: RateLimiter | null;
   readonly #killSwitch: KillSwitch;
+  readonly #adaptiveQuota: boolean;
   readonly #clock: Clock;
   readonly #onEvent: ((event: ProviderEvent) => void) | undefined;
 
@@ -188,6 +203,7 @@ export class ProviderClient {
         : new QuotaCounter(opts.quota, this.#clock);
     this.#rateLimiter = opts.rateLimiter ?? null;
     this.#killSwitch = opts.killSwitch ?? new KillSwitch();
+    this.#adaptiveQuota = opts.adaptiveQuota === true;
     this.#onEvent = opts.onEvent;
   }
 
@@ -435,6 +451,26 @@ export class ProviderClient {
     return Math.floor(this.#clock.random() * ceiling);
   }
 
+  /**
+   * Adopts the budget the provider just declared.
+   *
+   * `X-RateLimit-Limit` is the units per window and `X-RateLimit-Reset-In` is
+   * the seconds remaining in it, which is the window length only when the
+   * window has just started. Using it as the window is therefore slightly
+   * conservative and never optimistic, which is the correct direction of error
+   * for a limit whose breach has no appeals process.
+   *
+   * Any missing or unparseable header leaves the configured fallback in place.
+   */
+  #adaptQuota(headers: HttpHeadersLike): void {
+    if (!this.#adaptiveQuota || this.#quota === null) return;
+    const limit = Number(headers.get("x-ratelimit-limit"));
+    const resetIn = Number(headers.get("x-ratelimit-reset-in"));
+    if (!Number.isFinite(limit) || limit < 1) return;
+    if (!Number.isFinite(resetIn) || resetIn < 1) return;
+    this.#quota.retune({ limit, windowMs: resetIn * 1000 });
+  }
+
   async #attempt(
     url: string,
     method: string,
@@ -453,6 +489,7 @@ export class ProviderClient {
         headers: { ...this.#headers, ...spec.headers },
         signal: controller.signal,
       });
+      this.#adaptQuota(res.headers);
     } catch (err) {
       const aborted =
         controller.signal.aborted ||

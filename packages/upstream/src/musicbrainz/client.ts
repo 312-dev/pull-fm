@@ -7,6 +7,20 @@
  * ending in `musicbrainz/client.ts`. Do not move or rename this file without
  * updating that rule.
  *
+ * CORE DATA IS CC0. SUPPLEMENTARY DATA IS NOT, AND THAT SPLIT IS LOAD BEARING.
+ * MusicBrainz's own position on core data is
+ * "anyone can download and use the core data in any way they see fit. No
+ * restrictions, no worries!" (musicbrainz.org/doc/About/Data_License). There is
+ * no cache cap, no TTL requirement, no systematic-storage limit and no AI/ML
+ * restriction, so the permanent MBID crosswalk is squarely within the licence
+ * and the Last.fm 100 MB reflex must not be copied here.
+ *
+ * SUPPLEMENTARY data - tags, ratings, genres, folksonomy content - is
+ * CC BY-NC-SA 3.0. Requesting any of it with an `inc` parameter attaches
+ * attribution, NonCommercial and ShareAlike obligations to everything derived
+ * downstream, so no method here asks for it. See
+ * docs/compliance/metabrainz-terms-review.md F1.
+ *
  * Two conditions of use, both licence terms rather than preferences:
  *
  *   1. 1 request per second, averaged, PER IP - not per user, not per process.
@@ -47,7 +61,6 @@ export interface MusicBrainzArtist {
   readonly sortName: string | undefined;
   readonly country: string | undefined;
   readonly beganYear: number | undefined;
-  readonly tags: readonly string[];
 }
 
 export interface MusicBrainzRecording {
@@ -99,16 +112,12 @@ function parseArtist(v: unknown): MusicBrainzArtist {
   }
   const lifeSpan = isRecord(v) ? v["life-span"] : undefined;
   const begin = optString(lifeSpan, "begin");
-  const tags = arrayOrSingle(v, "tags")
-    .map((t) => optString(t, "name"))
-    .filter((n): n is string => n !== undefined);
   return {
     mbid,
     name: reqString(v, "name", "artist.name"),
     sortName: optString(v, "sort-name"),
     country: optString(v, "country"),
     beganYear: begin === undefined ? undefined : Number.parseInt(begin, 10),
-    tags,
   };
 }
 
@@ -218,10 +227,27 @@ export class MusicBrainzClient implements Provider {
     return this.#http.status();
   }
 
+  /**
+   * One artist. CORE DATA ONLY.
+   *
+   * `inc` deliberately requests nothing. MusicBrainz core data is CC0 -
+   * "anyone can download and use the core data in any way they see fit. No
+   * restrictions, no worries!" (musicbrainz.org/doc/About/Data_License) - but
+   * SUPPLEMENTARY data is not. Tags, ratings, and folksonomy content are
+   * CC BY-NC-SA 3.0, and a single `inc=tags` attaches attribution,
+   * NonCommercial, and ShareAlike obligations to everything derived downstream
+   * of it, including any surface we expose them through.
+   *
+   * `inc=tags` was here and was removed once something started consuming the
+   * result (docs/compliance/metabrainz-terms-review.md F1). Do not add it, or
+   * `inc=ratings`, or `inc=genres`, without taking that licensing decision
+   * explicitly: the cost is not a parameter, it is a licence change to the
+   * whole product.
+   */
   async lookupArtist(mbid: string): Promise<MusicBrainzArtist | null> {
     const payload = await this.#http.requestJson({
       path: `/artist/${encodeURIComponent(mbid)}`,
-      query: { fmt: "json", inc: "tags" },
+      query: { fmt: "json" },
       emptyStatuses: [404],
     });
     return payload === null ? null : parseArtist(payload);

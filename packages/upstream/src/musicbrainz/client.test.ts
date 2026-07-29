@@ -70,6 +70,8 @@ describe("MusicBrainzClient parsing", () => {
         "sort-name": "Björk",
         country: "IS",
         "life-span": { begin: "1977", ended: false },
+        // Present in the payload and deliberately NOT parsed; see the licence
+        // assertion below.
         tags: [{ name: "electronic", count: 12 }],
       },
     });
@@ -81,8 +83,33 @@ describe("MusicBrainzClient parsing", () => {
       sortName: "Björk",
       country: "IS",
       beganYear: 1977,
-      tags: ["electronic"],
     });
+  });
+
+  it("never requests or parses supplementary data (CC BY-NC-SA 3.0)", async () => {
+    // MusicBrainz CORE data is CC0. Tags, ratings and genres are supplementary
+    // and are CC BY-NC-SA 3.0, so a single `inc=tags` would attach attribution,
+    // NonCommercial and ShareAlike obligations to everything derived from this
+    // response. The parameter was removed for that reason
+    // (docs/compliance/metabrainz-terms-review.md F1) and this test is what
+    // stops it coming back as a one-line "enrichment".
+    const http = new FakeHttp().always({
+      body: {
+        id: mbid(7),
+        name: "Björk",
+        tags: [{ name: "electronic", count: 12 }],
+        genres: [{ name: "trip hop" }],
+        rating: { value: 4.5 },
+      },
+    });
+    const { client } = make(http);
+    const artist = await client.lookupArtist(mbid(7));
+
+    const url = http.lastRequest?.url ?? "";
+    expect(url).not.toContain("inc=");
+    expect(Object.keys(artist ?? {})).not.toContain("tags");
+    expect(JSON.stringify(artist)).not.toContain("electronic");
+    expect(JSON.stringify(artist)).not.toContain("trip hop");
   });
 
   it("reads the artist name from artist-credit on a recording", async () => {
