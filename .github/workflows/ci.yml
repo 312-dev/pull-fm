@@ -27,7 +27,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: pullfm
           POSTGRES_PASSWORD: pullfm_ci_not_a_secret

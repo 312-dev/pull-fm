@@ -13,9 +13,9 @@ name: pullfm-dev
 
 services:
   postgres:
-    # Pinned to the same major we run in production. A version skew between dev
+    # Pinned to the same major we run in production (Neon runs 18). A skew here
     # and prod is how "migrations passed locally" turns into a prod incident.
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     container_name: pullfm-postgres
     restart: unless-stopped
     environment:
@@ -29,7 +29,10 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # PG18+ images store data under a major-version-specific subdirectory
+      # (matching pg_ctlcluster), so the mount point moved up one level. Keeping
+      # the old /data path makes the container refuse to start.
+      - pgdata:/var/lib/postgresql
       - ./infra/local/postgres-init:/docker-entrypoint-initdb.d:ro
     command:
       # WAL settings mirror the production replication + PITR configuration so
