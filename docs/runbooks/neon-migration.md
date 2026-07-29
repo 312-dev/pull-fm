@@ -1,9 +1,17 @@
 # Runbook: migrating the database to Neon
 
-> **Status: NOT APPLIED.** `terraform plan` has been run against the live Neon
-> control plane and is clean (see [Appendix A](#appendix-a-the-verified-plan)).
-> `terraform apply` is gated on operator sign-off and has not been run. Nothing
-> in the cutover section below has happened yet.
+> **Status: APPLIED 2026-07-29.** The Terraform in section 5.1 has been applied
+> against the live Neon control plane: 4 imported, 2 added, 1 changed, 0
+> destroyed, matching [Appendix A](#appendix-a-the-verified-plan). The staging
+> branch is `br-calm-morning-asjr2h1v` and its endpoint is
+> `ep-super-wind-asbuczm7`.
+>
+> **The rest of the cutover has not happened.** No data has moved, the
+> application still has to be pointed at Neon, the least-privilege role in
+> section 5.5 has not been created, and the Hetzner Postgres node has not been
+> retired. Two apply-time defects were found and are written up in
+> [section 10d](#10d-two-defects-that-only-appeared-against-real-infrastructure);
+> both are fixed, and `terraform plan` is clean again.
 >
 > The other runbooks in this repository live at `docs/RUNBOOK-*.md`. This one is
 > under `docs/runbooks/` because it is a one-off migration with a finite life,
@@ -257,6 +265,68 @@ imports, two creates, one in-place change, **zero destroys**. A plan that
 proposes destroying or replacing `neon_project.pullfm` is a bug in the
 configuration and is blocked by `prevent_destroy`; do not remove that block to
 make a plan go through.
+
+#### Two credential traps that both look like something else
+
+**`NEON_API_KEY` must be in the environment. `TF_VAR_neon_api_key` is not a
+substitute.** `provider "neon" {}` takes no arguments deliberately (a value
+assigned to a provider argument is rendered into the plan file, and this
+repository is public), so the provider reads the environment variable directly.
+There is no variable for it to pick up. With only the `TF_VAR_` form set, the
+provider authenticates as nobody and the failure is an authorisation error
+against Neon rather than anything mentioning the variable.
+
+**The 1Password R2 item uses custom field labels, not `username`/`password`.**
+`pull-fm/infra/R2_TFSTATE` stores `access key id`, `secret access key` and
+`s3 endpoint`. So this returns empty and does not error:
+
+```bash
+op read "op://MCP/pull-fm/infra/R2_TFSTATE/username"      # empty, exit 0
+```
+
+and Terraform then fails with **`No valid credential sources found`**, which
+reads like a missing AWS profile rather than an empty variable. Labels with
+spaces cannot be addressed by `op read` at all, which is why
+`infra/lib/credentials.sh` uses `op item get --fields "label=..."` and why
+`pullfm_load_credentials neon` is the supported path rather than a convenience.
+
+### 5.1a Verify the pooler AGAINST THE API, not against Terraform
+
+**Do this after every apply that creates an endpoint. Neon ignores
+`pooler_enabled` when an endpoint is created.**
+
+Observed on the first real apply, 2026-07-29: `neon_endpoint.staging` declared
+`pooler_enabled = true`, the provider sent it in the create request, and Neon
+created the endpoint with pooling **off**. The attribute works correctly on
+update, so the next plan detected the drift and a second apply fixed it.
+
+The consequence if nobody looks: a single apply leaves an endpoint that every
+output, connection string and document here calls pooled, while it is not. The
+application would open one server connection per client connection against a
+compute that scales to zero, which is the exact failure the pooled endpoint
+exists to prevent.
+
+**Terraform cannot be trusted to tell you this, and that is the point of the
+step.** State was written from the create response and agreed with the
+configuration, so `terraform plan` was clean immediately after the apply. Only
+the API disagreed. Ask the API:
+
+```bash
+curl -sS -H "Authorization: Bearer $NEON_API_KEY" \
+  "https://console.neon.tech/api/v2/projects/steep-frost-83698289/endpoints" |
+  python3 -c 'import json,sys; [print(e["id"], e["pooler_enabled"], e["pooler_mode"]) for e in json.load(sys.stdin)["endpoints"]]'
+```
+
+Every endpoint must report `True transaction`. If one reports `False`, re-run
+`terraform plan` (it will now show the drift, because refresh reads the API) and
+apply again.
+
+A `postcondition` on `pooler_enabled` would not catch this, because state is not
+where the lie is. The durable guard is the one Gate 0 already asks for:
+**re-plan after applying and require zero drift.**
+
+Note that the API's `host` field is the DIRECT host even when pooling is on. Do
+not read pooler status off the hostname.
 
 ### 5.2 Capture the OWNER connection strings into 1Password
 
@@ -781,10 +851,93 @@ transaction every time it runs.
 
 ---
 
+### 10d. Two defects that only appeared against real infrastructure
+
+Both were invisible to `terraform validate`, to `terraform plan` against an
+empty state, and to review. Both needed real resources to exist. That is the
+lesson worth keeping from this apply: a clean plan against nothing is not
+evidence.
+
+#### Neon ignores `pooler_enabled` on endpoint creation
+
+Covered as an operational step in [5.1a](#51a-verify-the-pooler-against-the-api-not-against-terraform).
+The mechanism, for the record: the provider does send it. Its create path builds
+`EndpointCreateRequestEndpoint.PoolerEnabled` from the attribute, so the request
+is correct and **the API drops it**. The same attribute is honoured on update,
+which is why a second apply fixed it.
+
+There is no Terraform-side guard for this and it is worth being precise about
+why, because the obvious ones look like they would work:
+
+- A `postcondition` on `self.pooler_enabled` reads **state**, and state was
+  written from the create response and agreed with the configuration.
+- The `neon_branch_endpoints` data source would re-read from the API, but it
+  exposes only `id`, `host`, `type`, `region_id` and `proxy_host`. It does not
+  expose `pooler_enabled`, so it cannot see the discrepancy either.
+- The hostname cannot be used as a proxy for pooler status, because the API's
+  `host` field is the direct host whether pooling is on or off.
+
+So the guard is procedural: verify against the API after an apply, and require a
+clean re-plan, which Gate 0 already asks for.
+
+#### The pooled hostname was derived from an attribute that changes meaning
+
+This one was a bug in this module rather than in Neon.
+
+`neon_endpoint` exposes a single `host` attribute, unlike `neon_project` which
+exposes `database_host` and `database_host_pooler` separately. The staging
+pooled host was therefore derived by appending `-pooler` to
+`neon_endpoint.staging.host`.
+
+**That attribute is the direct host while pooling is off and the pooled host
+once it is on.** The Neon API always returns the direct host; the provider
+rewrites it in `provider/resource_endpoint.go`:
+
+```go
+host := v.Host
+if v.PoolerEnabled {
+    host = newPooledHost(host)
+}
+d.Set("host", host)
+```
+
+So once the second apply enabled pooling, the module wanted to publish:
+
+```
+staging_host_direct   ep-super-wind-asbuczm7-pooler.c-4...          the POOLED host, labelled direct
+staging_host_pooled   ep-super-wind-asbuczm7-pooler-pooler.c-4...   resolves to nothing
+```
+
+Neither is an error at plan time. The first would silently run migrations
+through a transaction pooler, breaking the session advisory lock in exactly the
+way section 0 warns about; the second fails at connect time.
+
+The fix is to stop deriving from a mutable-meaning attribute and build both
+hostnames from `id` and `proxy_host`, neither of which the provider rewrites and
+neither of which changes when pooling is toggled:
+
+```hcl
+staging_direct_host = "${neon_endpoint.staging.id}.${neon_endpoint.staging.proxy_host}"
+staging_pooled_host = "${neon_endpoint.staging.id}-pooler.${neon_endpoint.staging.proxy_host}"
+```
+
+That is correct in both states, which matters because the two-step apply means
+both genuinely occur. It also reuses the provider's own composition rule rather
+than guessing one: `newPooledHost` splits the host at its first `.` and appends
+`-pooler` to the left part, and that left part is exactly the endpoint id while
+the right part is exactly `proxy_host`.
+
+`checks.tf` now asserts the invariant permanently, with the hard failures on the
+outputs so a hostname that does not resolve cannot be read out of
+`terraform output` at all. One detail there is worth reading before simplifying
+it: **the relative assertion alone does not catch this bug.** Both hostnames were
+shifted by one `-pooler`, so their relationship to each other still held while
+both values were wrong. Only the absolute assertions (the direct host contains no
+`-pooler`, the pooled host contains no `-pooler-pooler`) detect it.
+
 ## Appendix A: the verified plan
 
-Run 2026-07-29 against the live Neon control plane with a read-only intent.
-`terraform apply` has **not** been run.
+Predicted 2026-07-29, then **applied the same day with exactly this result**.
 
 ```
 Plan: 4 to import, 2 to add, 1 to change, 0 to destroy.
@@ -797,6 +950,22 @@ Plan: 4 to import, 2 to add, 1 to change, 0 to destroy.
   neon_branch.staging       create  name "staging", parent br-curly-wave-as91izv6
   neon_endpoint.staging     create  read_write, pooled, 0.25-1 CU
 ```
+
+What it actually created:
+
+```
+branch    br-calm-morning-asjr2h1v   "staging", parent br-curly-wave-as91izv6
+endpoint  ep-super-wind-asbuczm7     read_write, 0.25-1 CU
+          direct  ep-super-wind-asbuczm7.c-4.eu-central-1.aws.neon.tech
+          pooled  ep-super-wind-asbuczm7-pooler.c-4.eu-central-1.aws.neon.tech
+```
+
+**The last line of the predicted plan was wrong, and Terraform was not lying.**
+`neon_endpoint.staging` was created with pooling **off**, because Neon ignores
+`pooler_enabled` on create. A second apply turned it on. See
+[section 10d](#10d-two-defects-that-only-appeared-against-real-infrastructure)
+and verify with [5.1a](#51a-verify-the-pooler-against-the-api-not-against-terraform)
+rather than trusting this appendix.
 
 Zero destroys is the assertion that matters. The adopted project reads back with
 `branch { name = "main", database_name = "neondb", role_name = "neondb_owner" }`

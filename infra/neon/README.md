@@ -1,10 +1,16 @@
 # Pull.fm - Neon serverless Postgres
 
-> ## NOT APPLIED. THE PLAN IS CLEAN AND SIGN-OFF IS PENDING.
+> ## APPLIED 2026-07-29. PLAN IS CLEAN.
 >
-> `terraform plan` has been run against the live Neon control plane and reports
-> **4 to import, 2 to add, 1 to change, 0 to destroy**. `terraform apply` has
-> not been run and is gated on operator authorisation.
+> Applied against the live Neon control plane: **4 imported, 2 added, 1 changed,
+> 0 destroyed**, exactly the predicted plan. Staging branch
+> `br-calm-morning-asjr2h1v`, staging endpoint `ep-super-wind-asbuczm7`.
+>
+> Two defects appeared only once real resources existed, and both are fixed:
+> Neon **ignores `pooler_enabled` when an endpoint is created** (it honours it on
+> update), and this module derived the staging pooled hostname from an attribute
+> whose meaning changes when pooling is enabled. See `checks.tf` and the
+> `locals` block in `main.tf`. `terraform plan` reports no changes.
 >
 > This root **adopts an existing project**. The Neon project, its default
 > branch, its database, its owner role and its read-write endpoint were created
