@@ -39,6 +39,8 @@ gha-creds-*.json
 *.tfstate
 *.tfstate.*
 *.tfvars
+# Per-env backend wiring; backend.hcl.example is the committed template.
+backend.hcl
 *.tfvars.json
 !*.auto.tfvars.example
 !example.tfvars

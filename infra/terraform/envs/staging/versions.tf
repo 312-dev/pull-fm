@@ -39,7 +39,10 @@ terraform {
   # R2 has no DynamoDB equivalent, so locking uses Terraform 1.10+ native S3
   # lockfiles (use_lockfile, set in backend.hcl) rather than dynamodb_table.
   #
-  # backend "s3" {
-  #   key = "staging/terraform.tfstate"
-  # }
+  # Enabled 2026-07-29. Credentials come from AWS_ACCESS_KEY_ID and
+  # AWS_SECRET_ACCESS_KEY (the R2 token in 1Password: pull-fm/infra/R2_TFSTATE);
+  # everything non-secret lives in backend.hcl.
+  backend "s3" {
+    key = "staging/terraform.tfstate"
+  }
 }

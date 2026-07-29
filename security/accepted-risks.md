@@ -33,6 +33,22 @@ register:
     review_notes: "EXAMPLE SEED. Decide at review: separate the account before Gate 6 (prod cutover), or re-accept with a documented recovery procedure for account suspension. Re-accepting a third time should be treated as a signal that the migration is being avoided rather than deferred."
     example: true
 
+  - id: PULLFM-RISK-005
+    title: "Cloudflare automation still depends on the account-wide global API key"
+    status: accepted
+    severity: high
+    threat_ids:
+      - T27
+      - T30
+    description: "Terraform's Cloudflare provider runs with CLOUDFLARE_API_KEY, the legacy global key. That credential cannot be scoped: it grants full control of all 13 zones on the personal account, plus R2, plus billing, and it cannot be restricted to pull.fm. It is not isolated by environment either, so the same key serves staging and would serve production. A scoped token exists (1Password: Cloudflare API - fast.fm) and correctly sees only the pull.fm zone, but it holds read-only DNS and no R2 permission, so terraform plan fails against it with 'failed to make http request' on every dns_record and on the r2_bucket."
+    justification: "The scoped token needs two permissions it was not granted: Zone -> DNS -> Edit, and Workers R2 Storage -> Edit. Until those are added the global key is the only credential that can apply. Exposure is bounded by the key never being committed, never reaching CI, and living only in a local shell resolved from 1Password at call time. The R2 state backend already uses a properly scoped, R2-only token, so the highest-value target no longer depends on the global key."
+    compensating_controls: "Key is read from 1Password per invocation and never persisted, never written to a file, and never passed to a provider argument that would render it into a plan file. gitleaks blocks it at commit and in CI. Terraform state lives in R2 under a separate scoped credential. No workflow in this repository has access to it."
+    owner: "ope@312.dev"
+    accepted_on: 2026-07-29
+    expires_on: 2026-09-12
+    review_notes: "Close by re-issuing the pull.fm-scoped token with Zone -> DNS -> Edit and Workers R2 Storage -> Edit, then switching the provider to CLOUDFLARE_API_TOKEN and unsetting CLOUDFLARE_EMAIL and CLOUDFLARE_API_KEY. Verify by running terraform plan with the global key absent from the environment. Related: PULLFM-RISK-001 covers the shared account itself, which is a separate and larger change."
+    example: false
+
   - id: PULLFM-RISK-003
     title: "KEK escrow has no second holder (bus factor 1)"
     status: accepted
@@ -173,6 +189,7 @@ templates.
 | ID              | Title                                             | Severity | Expires    |
 | --------------- | ------------------------------------------------- | -------- | ---------- |
 | PULLFM-RISK-001 | Shared Cloudflare account                         | high     | 2026-10-26 |
+| PULLFM-RISK-005 | Cloudflare automation uses the global API key     | high     | 2026-09-12 |
 | PULLFM-RISK-003 | KEK escrow has no second holder                   | high     | 2026-10-15 |
 | PULLFM-RISK-004 | DAST active scan is nightly, not per-pull-request | low      | 2026-10-31 |
 
