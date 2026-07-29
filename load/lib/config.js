@@ -81,8 +81,10 @@ export const CONFIG = {
   rampDown: env("RAMP_DOWN", "1m"),
 
   /** Load held at full rate BEFORE measurement starts, so the cache is warm
-   *  when the SLO window opens. Excluded from every threshold. See lib/phase.js
-   *  for why the ">90% warm cache" gate is otherwise decided by run length. */
+   *  when the SLO window opens. Excluded from every threshold. Still needed
+   *  even though Gate 2's cache assertion is unmeasurable (lib/thresholds.js):
+   *  a cold JIT and an empty upstream cache distort the latency percentiles the
+   *  SLO gate IS measured on. */
   warmup: env("WARMUP", SMOKE ? "15s" : "5m"),
 
   /** Sessions started per second. See TRAFFIC MODEL in README.md for the
@@ -133,8 +135,10 @@ export const CONFIG = {
    *  resolved before, without needing the cache flushed first. */
   coldOffset: num("COLD_OFFSET", 0),
 
-  /** Staging-only bearer token. The BFF must accept it ONLY when its own
-   *  LOAD_TEST_MODE flag is on. See README, "Auth". */
+  /** A single bearer credential, for probing a target with no subject manifest.
+   *  Not a load path: every VU would share one identity, so per-user behaviour
+   *  is unmeasurable. There is no LOAD_TEST_MODE flag in the BFF and never was;
+   *  real credentials come from load/auth/seed-subjects.mjs. */
   authToken: env("LOAD_AUTH_TOKEN", ""),
 
   resultsDir: env("RESULTS_DIR", "k6-results"),
@@ -207,6 +211,16 @@ export function assertSafeTarget(url = CONFIG.baseUrl) {
  * @param {typeof import('k6/http').default} http
  */
 export function preflight(http, { requireMock = false } = {}) {
+  // THE GUARD CHECK RUNS FIRST, and the ordering is deliberate.
+  //
+  // It is the only check whose failure mode is permanent. A missing mock, an
+  // unreachable BFF or a stub response all produce a bad run; an unguarded
+  // target produces a revoked API key. Checking it after the others meant that
+  // pointing the suite at a real deployment reported "mock upstream control
+  // plane unreachable", which is true, unhelpful, and buries the finding that
+  // actually matters: that target's BFF is not protected.
+  const guard = checkGuard(http);
+
   const health = http.get(`${CONFIG.baseUrl}/healthz`, {
     timeout: "5s",
     tags: { endpoint: "healthz", slo: "no" },
@@ -217,8 +231,11 @@ export function preflight(http, { requireMock = false } = {}) {
       "",
       `BFF unreachable at ${CONFIG.baseUrl}/healthz (status ${health.status}${health.error ? `, ${health.error}` : ""}).`,
       "",
-      "  apps/bff does not exist yet, which is expected this early in the plan.",
-      "  To exercise the suite anyway, start the mock with the fake BFF attached:",
+      "  Bring the whole stack up, which starts the BFF behind the egress guard:",
+      "",
+      "    load/bin/stack-up.sh",
+      "",
+      "  To exercise the harness with no database, attach the fake BFF instead:",
       "",
       "    node load/mock-upstreams/server.js --bff-stub",
       "    BASE_URL=http://127.0.0.1:8787 k6 run load/scenarios/steady-10k.js",
@@ -252,8 +269,6 @@ export function preflight(http, { requireMock = false } = {}) {
   // A stub run must never be filed as gate evidence. Detected here and carried
   // into the summary rather than trusted to the operator's memory.
   const stubbed = String(health.headers["X-Pullfm-Stub"] ?? "") === "1";
-
-  const guard = checkGuard(http);
 
   return {
     healthy: health.status === 200,

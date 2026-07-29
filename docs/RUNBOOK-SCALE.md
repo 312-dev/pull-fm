@@ -510,6 +510,22 @@ quoting a cache-locality number.
 
 ### Staging
 
-Not run against staging. It did not exist when this was written. The scenarios
-take `BASE_URL`, and the guard preflight refuses a target it cannot confirm is
-protected, so pointing them at staging is configuration rather than code.
+`https://api-staging.pull.fm` came up while this was being written and was
+probed **read-only** (`/healthz`, `/v1/config`). No load was run against it, for
+two reasons, and both should hold until they are addressed:
+
+1. **It is not guarded.** Its BFF was started normally, so its provider clients
+   resolve the real MusicBrainz, iTunes and ListenBrainz. `/v1/config` reports
+   `musicbrainz: ok` and `events: ok`, which means live credentials. Pointing
+   the suite at it aborts at the guard preflight, which is the mechanism working
+   rather than an obstacle to route around. Running load there requires starting
+   its BFF with `--import` first.
+2. **A EUR 11.59/mo single node is not a load-test target.** Saturating it
+   measures Hetzner's smallest instance. The architecture question the suite
+   exists to answer is already answered locally, and more usefully.
+
+What staging IS good for once guarded: the correctness gates, which are about
+behaviour rather than throughput. `coalescing`, `fail-closed` and `breaker` all
+run at low request rates and would confirm the same properties on a real
+deployment with a real Neon pooler behind it, which is the one place Gate 1's
+pooler assertion could actually be measured.
