@@ -214,4 +214,10 @@ export const LOCK_NAMESPACE = {
   connectionRefresh: 1,
   accountDeletion: 2,
   directoryReap: 3,
+  /** Audit-log anonymization and expiry (services/audit-retention.ts). */
+  auditRetention: 4,
+  /** Idempotency-key and connect-state expiry (services/expiry-sweeper.ts). */
+  expirySweep: 5,
+  /** Background upstream cache warming (services/cache-warmer.ts). */
+  cacheWarm: 6,
 } as const;

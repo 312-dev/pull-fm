@@ -11,7 +11,10 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "openapi:emit": "tsc -p tsconfig.build.json && node dist/scripts/emit-openapi.js",
-    "reap:unverified": "node dist/scripts/reap-unverified.js"
+    "reap:unverified": "node dist/scripts/reap-unverified.js",
+    "warm:cache": "node dist/scripts/warm-cache.js",
+    "sweep:expired": "node dist/scripts/sweep-expired.js",
+    "purge:audit": "node dist/scripts/purge-audit.js"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
