@@ -269,40 +269,65 @@ because the offline queue is deliberately left enabled. Correct, and expensive:
 a quota-Redis outage converts the whole API to a one-second-per-request 503
 machine rather than a fast one.
 
-### `pool-ceiling` — PASS
+### `pool-ceiling` — PASS, and now **through the pooler**
 
-Staircase to 200 concurrent VUs against `DATABASE_POOL_MAX=10`, direct endpoint.
+Staircase to 200 concurrent VUs against `DATABASE_POOL_MAX=10`.
 
-| Metric                     | Measured     |
-| -------------------------- | ------------ |
-| requests                   | 215,877      |
-| p95                        | **90.7 ms**  |
-| p99                        | **178.6 ms** |
-| api error rate             | **0%**       |
-| pool exhaustion errors     | **0**        |
-| real wishlist rows written | 19,716       |
+| Metric                 | `POOL_ENDPOINT=direct` | `POOL_ENDPOINT=pooled` |
+| ---------------------- | ---------------------- | ---------------------- |
+| requests               | 215,877                | **386,601**            |
+| p95                    | 90.7 ms                | **87.7 ms**            |
+| p99                    | 178.6 ms               | **126.2 ms**           |
+| api error rate         | 0%                     | **0%**                 |
+| pool exhaustion errors | 0                      | **0**                  |
 
-200 concurrent clients multiplexed onto 10 connections queued and stayed
-correct. Roughly **2,000 req/s** sustained on one node.
+The pooled column is the first run in this repository that measured the
+transaction pooler rather than routing around it. See section 6.2 for what
+had to be fixed to make it possible, and read `POOL_ENDPOINT` in the run
+record before quoting either column.
 
-### `chaos` (the Gate 7 matrix) — **FAIL on recovery, PASS on everything else**
+Both pools behaved. Sampled from `SHOW POOLS` every six seconds across the
+whole ramp, with 200 concurrent request-level clients in flight:
+
+| PgBouncer    | Observed                             |
+| ------------ | ------------------------------------ |
+| `cl_active`  | 10 (the BFF's `DATABASE_POOL_MAX`)   |
+| `cl_waiting` | **0** at every sample                |
+| `sv_active`  | 0-10, against `DEFAULT_POOL_SIZE=25` |
+| `maxwait`    | **0** at every sample                |
+
+So the queueing happened where it was designed to happen - inside the BFF
+process, ahead of its own ten connections - and the pooler was never the
+constraint. Roughly **2,000 req/s** sustained on one node either way, so the
+extra hop cost nothing measurable.
+
+`statement_timeout` was confirmed in force on the pooled backends during the
+run (`pg_settings` reports 10000 on every backend from the PgBouncer container
+address), which is the property section 6.2 exists to protect.
+
+### `chaos` (the Gate 7 matrix) — PASS on five of six, recovery **not re-measured**
 
 ListenBrainz forced to 429, then 500, then timeout. 25 s hold per cell.
 
-| Gate 7 criterion       | Measured    | Verdict  |
-| ---------------------- | ----------- | -------- |
-| `/feed` returns 200    | yes         | PASS     |
-| with degraded sections | 0 empty     | PASS     |
-| p95 < 800 ms           | **32.5 ms** | PASS     |
-| errors < 1%            | **0%**      | PASS     |
-| no pool exhaustion     | 0           | PASS     |
-| **recovery < 60 s**    | > window    | **FAIL** |
+The numbers below predate the section 6.1 fix. The recovery row failed for the
+same reason the `breaker` scenario's did, and that cause is now closed and
+proven closed by `breaker`, but **this scenario has not been re-run**, so its
+recovery row is stale rather than passing. Re-run it from a cold upstream cache
+before quoting the matrix as green.
+
+| Gate 7 criterion       | Measured    | Verdict   |
+| ---------------------- | ----------- | --------- |
+| `/feed` returns 200    | yes         | PASS      |
+| with degraded sections | 0 empty     | PASS      |
+| p95 < 800 ms           | **32.5 ms** | PASS      |
+| errors < 1%            | **0%**      | PASS      |
+| no pool exhaustion     | 0           | PASS      |
+| **recovery < 60 s**    | > window    | **STALE** |
 
 4,952 requests, 51 upstream calls, worst key 1, zero refused hosts. Five of the
-six Gate 7 criteria hold comfortably. The sixth is section 6.1 and is the same
-defect the `breaker` scenario isolates.
+six Gate 7 criteria hold comfortably. The sixth is section 6.1.
 
-### `breaker` — **FAIL on recovery**
+### `breaker` — PASS, all six criteria
 
 | Metric                                  | Measured   | Gate       |
 | --------------------------------------- | ---------- | ---------- |
@@ -311,59 +336,136 @@ defect the `breaker` scenario isolates.
 | p95 while open                          | **9.5 ms** | < 800 ms   |
 | errors while open                       | **0%**     | < 1%       |
 | feed responses with 0 sections          | 0          | 0          |
-| **recovery after fault cleared**        | **62 s**   | **< 60 s** |
+| **recovery after fault cleared**        | **21.1 s** | **< 60 s** |
 
-Everything Gate 7 asks for except the last row. See section 6.
+Was the 999 "never came back" sentinel on every previous run. Section 6.1 has
+what it turned out to be.
+
+**This scenario is only valid from a cold upstream cache**, and it does not
+fail safe on its own if you forget: ListenBrainz feed rows are cached for an
+hour, so a re-run inside that hour never calls the provider, the breaker never
+opens, and the run reports on a fault it never applied. Its "breaker reached
+degraded" check is what catches that, and a run where that check fails is void.
+
+```bash
+docker exec pullfm-postgres psql -U pullfm -d pullfm -c 'TRUNCATE upstream_cache'
+k6 run load/scenarios/breaker.js
+```
 
 ---
 
-## 6. Open defects this suite found
+## 6. Defects this suite found
 
-### 6.1 Circuit-breaker recovery exceeds the Gate 7 budget
+6.1 and 6.2 are FIXED and the fixes are proved below. 6.3 and 6.4 remain open.
 
-**Measured 62 s against a 60 s gate, after only a 30 s fault.**
+### 6.1 Circuit-breaker recovery exceeded the Gate 7 budget - FIXED, and the recorded cause was the smaller half of it
 
-Cause is the exponential re-open backoff in
-`packages/upstream/src/circuit-breaker.ts`: every failed half-open trial re-opens
-the circuit and multiplies the reset timeout, `30s -> 60s -> 120s -> 240s cap`.
-A sustained fault therefore leaves the breaker in its **slowest** state exactly
-when the upstream comes back. A fault long enough to reach the cap means up to
-**240 s** of continued degradation after the provider is healthy.
+**This page previously said "measured 62 s against a 60 s gate, after only a 30 s
+fault". That number is not reproducible from any run in `k6-results/`.** Both
+recorded `breaker` runs carry `chaos_recovery_seconds = 999`, which is the
+scenario's sentinel for "never came back inside the observation window". 999 and
+62 call for completely different work, which is exactly why the scenario records
+the sentinel instead of omitting the sample.
 
-Two ways to close it, both in `packages/upstream`, neither owned by this suite:
+**Cause 1, the one that was written down: exponential re-open backoff.** Every
+failed half-open trial re-opened the circuit and doubled the reset timeout,
+`30s -> 60s -> 120s -> 240s cap`, so a sustained fault left the breaker at its
+**slowest** setting exactly when the provider came back. Note that this page's
+own suggested fix, "cap `maxResetTimeoutMs` nearer 60 s", does not work:
+recovery is the remaining backoff plus the trial round trip plus the observer's
+polling interval, so a 60 s cap reproduces a 62 s failure precisely. The cap has
+to sit below the budget with margin. It now defaults to `resetTimeoutMs`, i.e.
+no widening at all, and the ladder is discharged by any half-open success rather
+than only by a full close.
 
-1. Lower `resetTimeoutMs` or cap `maxResetTimeoutMs` nearer 60 s.
-2. Probe actively rather than waiting for a request to trigger the half-open
-   transition, so recovery is bounded by probe interval rather than by backoff.
+**Cause 2, the one that made it 999 rather than 62: recovery needed traffic that
+the system was busy suppressing.** A breaker learns that a provider recovered
+only by calling it, and half-open resolves only when `successThreshold` trial
+calls actually happen. While the circuit is open the feed is answered entirely
+from the upstream cache, so the provider is never called, no trial is ever
+admitted, and `GET /v1/config` keeps reporting `degraded` until the cached rows
+expire. **Recovery was bounded by cache TTL, not by the 30 s reset window.**
 
-The threshold is deliberately **left red** rather than relaxed to fit the
-measurement. A gate quietly moved to match reality is not a gate.
+Proved rather than reasoned: after `clearFaults()` the scenario drove 10 req/s
+of `/feed` for five minutes and the mock upstream recorded **zero** ListenBrainz
+calls. Flushing the cache by hand and re-driving produced zero calls as well,
+with `degraded: false` in the body while `/v1/config` still said `degraded`.
 
-### 6.2 The BFF cannot connect through the local PgBouncer at all
+The fix is in the cache rather than in the breaker, because the cache is where
+the suppression happens: while a provider's circuit is half-open,
+`CachedUpstream` gives up one fresh hit per key and calls the provider instead,
+which is the trial the breaker is waiting for. It is bounded by the breaker's
+own half-open cap, coalesced by single-flight, and a failed probe returns the
+same fresh row it gave up, so no user pays for it.
+
+**One rejected fix is worth recording, because it looked right and measured
+wrong.** Closing an idle half-open circuit - "after a window with nothing in
+flight and nothing failing there is no evidence left to justify the claim" - is
+defensible on paper and turns the gate green. Measured, it reported
+`listenbrainz = ok` 45 seconds into a live 105-second outage, and produced a
+1-second "recovery" because the breaker had already given up on the fault before
+it cleared. It makes the run green by making the signal stop tracking the thing
+it measures, which is the same defect as moving the threshold, wearing better
+clothes.
+
+The threshold was **left red** throughout rather than relaxed to fit.
+
+### 6.2 The BFF could not connect through the local PgBouncer at all - FIXED, and the one-line fix was not enough
 
 ```
 ERR unsupported startup parameter: statement_timeout
 ```
 
 `apps/bff/src/lib/db.ts` passes `statement_timeout` and
-`idle_in_transaction_session_timeout` as connection parameters. PgBouncer rejects
-unknown startup parameters unless `IGNORE_STARTUP_PARAMETERS` names them, and
-the `pgbouncer` service in `docker-compose.dev.yml` does not set it.
+`idle_in_transaction_session_timeout` as connection parameters, node-postgres
+puts both in the libpq StartupMessage, and PgBouncer rejects any startup
+parameter that `ignore_startup_parameters` does not name. The `pgbouncer`
+service in `docker-compose.dev.yml` did not name them, so `DATABASE_URL` had to
+point at 5432 and Gate 1's pooler assertion could not be measured locally.
 
-**Consequence: Gate 1's "transaction pooler serves >= 200 client conns on <= 25
-server conns" cannot be measured locally today.** `pool-ceiling` currently runs
-against the direct endpoint and records `POOL_ENDPOINT=direct` so the result can
-never be quoted as evidence for the pooled path.
+`IGNORE_STARTUP_PARAMETERS` is indeed the fix for the connection, and this page
+previously stopped there. **It is only half of it, and the missing half is
+worse than the defect it replaces.**
 
-The fix is one line in the `pgbouncer` service:
+`ignore_startup_parameters` means IGNORE. PgBouncer accepts the connection and
+throws the value away. Measured through 6432 with `statement_timeout: 3000`:
 
-```yaml
-IGNORE_STARTUP_PARAMETERS: statement_timeout,idle_in_transaction_session_timeout
+| step                                   | result                              |
+| -------------------------------------- | ----------------------------------- |
+| connect                                | succeeds                            |
+| `current_setting('statement_timeout')` | **`0`** - unbounded                 |
+| `SELECT pg_sleep(6)`                   | **completes** - no timeout in force |
+
+So the one-line fix trades a loud connection failure for the silent removal of
+THREAT-MODEL T10's mitigation: "a query with no ceiling is a connection-pool
+exhaustion vector that takes the whole API down", quoting `db.ts` itself.
+
+`track_extra_parameters` (PgBouncer 1.22+, and the image here is 1.25.2) was
+tried as the purpose-built alternative and does not rescue it either: it stops
+the rejection, but the value is still dropped, because Postgres does not
+`GUC_REPORT` either setting so PgBouncer never observes them.
+
+**No PgBouncer setting makes a startup-parameter `statement_timeout` take
+effect.** The ceiling has to come from somewhere the pooler cannot swallow, and
+a role default is the only mechanism that survives session pooling, transaction
+pooling and a direct connection alike:
+
+```sql
+ALTER ROLE pullfm SET statement_timeout = '10s';
+ALTER ROLE pullfm SET idle_in_transaction_session_timeout = '10s';
 ```
 
-Neon's pooler accepts `statement_timeout`, so this is expected to be
-local-only. That expectation is **unverified** and should be confirmed against
-the real pooled endpoint before Gate 1 is called green.
+That is `infra/local/postgres-init/01-role-timeouts.sql`. With both halves in
+place, a connection through 6432 reports `statement_timeout = 10s` and
+`SELECT pg_sleep(15)` is cancelled at 10.0 s.
+
+**This is not a local quirk, and that is the part worth carrying upward.**
+Neon's pooled endpoint is PgBouncer in transaction mode operated by Neon. Any
+deployment whose `DATABASE_URL` is the `-pooler` host has been running with no
+statement timeout at all, whatever `DATABASE_STATEMENT_TIMEOUT_MS` says. The
+equivalent `ALTER ROLE` belongs in the Neon provisioning path (`infra/neon`)
+before Gate 1 is called green, and the app-side pool option should be treated
+as effective only on the direct endpoint until it is.
 
 ### 6.3 `x-cache` does not exist, so Gate 2's cache gate was green over nothing
 

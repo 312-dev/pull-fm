@@ -637,9 +637,12 @@ Stated plainly, because a load suite that oversells itself is worse than none.
   unless a separate Redis cache node is enabled, because Redis holds the shared MusicBrainz token
   bucket. Single-flight is a PER-PROCESS map, so its cross-node behaviour (two nodes, two calls)
   is unmeasured rather than merely untested. So is Gate 6's rolling deploy.
-- **Gate 1's pooler assertion is unmeasurable locally.** The BFF cannot connect through the local
-  PgBouncer at all: it passes `statement_timeout` as a connection parameter and PgBouncer answers
-  `unsupported startup parameter`. One-line fix in `docs/RUNBOOK-SCALE.md` section 6.2.
+- **Gate 1's pooler assertion is measurable again, with a caveat that outlives the fix.** The BFF
+  could not connect through the local PgBouncer at all (`unsupported startup parameter:
+statement_timeout`); `DATABASE_URL` now points at 6432 and runs record `POOL_ENDPOINT=pooled`.
+  The caveat: PgBouncer accepts that parameter only by DISCARDING it, so the statement timeout
+  now comes from a role default rather than from the application's pool options, and the same is
+  true of Neon's pooled endpoint in production. `docs/RUNBOOK-SCALE.md` section 6.2.
 - **The population is smaller than the model.** Runs used 200 provisioned subjects against a model
   that wants 2,000 daily-active, which overstates per-user cache locality. The run record says
   `boundBy: "fixtures"` when that applies.

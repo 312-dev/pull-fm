@@ -1,0 +1,48 @@
+-- Server-side query ceilings, as ROLE DEFAULTS rather than as connection
+-- parameters.
+--
+-- THREAT-MODEL T10: a query with no ceiling is a connection-pool exhaustion
+-- vector that takes the whole API down. `apps/bff/src/lib/db.ts` sets
+-- `statement_timeout` and `idle_in_transaction_session_timeout` on the pg.Pool
+-- to close it, and node-postgres sends both in the libpq StartupMessage.
+--
+-- THAT DOES NOT SURVIVE A TRANSACTION POOLER, and the failure is silent. Two
+-- results, both measured against the pgbouncer service in
+-- docker-compose.dev.yml rather than reasoned about:
+--
+--   without `ignore_startup_parameters`  the connection is REFUSED outright,
+--                                        "unsupported startup parameter:
+--                                        statement_timeout"
+--   with it                              the connection succeeds and the value
+--                                        is DISCARDED. The backend reports
+--                                        current_setting('statement_timeout')
+--                                        = '0' and SELECT pg_sleep(6) runs to
+--                                        completion.
+--
+-- `track_extra_parameters` was tried as well and does not help: it stops the
+-- rejection but the value is still dropped, because Postgres does not
+-- GUC_REPORT either setting, so PgBouncer never observes them and never
+-- forwards them.
+--
+-- A role default is applied by the backend at start, before any pooler is
+-- involved, and `DISCARD ALL` resets to it rather than away from it. It is the
+-- one mechanism that holds through session pooling, transaction pooling and a
+-- direct connection alike.
+--
+-- This matters beyond the laptop. Neon's pooled endpoint is PgBouncer in
+-- transaction mode operated by Neon, so the same thing is true of production:
+-- the equivalent `ALTER ROLE` belongs in the Neon provisioning path, and this
+-- file is the local mirror of it, not a local workaround.
+--
+-- The value matches apps/bff/src/config.ts DATABASE_STATEMENT_TIMEOUT_MS
+-- (10_000). It is a FLOOR, not the whole control: a deployment that lowers the
+-- app setting still gets the tighter value on a direct connection, and this
+-- ceiling everywhere else. Raising the app setting above it without changing
+-- this is the case to watch for.
+--
+-- Only runs on an empty data directory (docker-entrypoint-initdb.d). On an
+-- existing volume, apply it with `pnpm stack:reset`, or by hand:
+--   docker exec -i pullfm-postgres psql -U pullfm -d pullfm < this file
+
+ALTER ROLE pullfm SET statement_timeout = '10s';
+ALTER ROLE pullfm SET idle_in_transaction_session_timeout = '10s';

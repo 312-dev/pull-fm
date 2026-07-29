@@ -7,10 +7,10 @@
  * answers "does it survive faults". It does not isolate the specific state this
  * scenario is about, because a breaker takes FIVE consecutive
  * provider-attributable failures to open (`DEFAULT_BREAKER` in
- * `packages/upstream/src/provider-client.ts`) and stays open for 30 seconds,
- * doubling to a 240 second cap on repeated re-opens. A matrix cell that holds a
- * fault for 45 seconds spends part of that time in "failing", part in "open",
- * and part in "half-open", and reports one blended percentile over all three.
+ * `packages/upstream/src/provider-client.ts`) and then stays open for 30
+ * seconds at a time. A matrix cell that holds a fault for 45 seconds spends
+ * part of that time in "failing", part in "open", and part in "half-open", and
+ * reports one blended percentile over all three.
  *
  * The states behave completely differently and only one of them is fast:
  *
@@ -44,6 +44,17 @@
  * at zero SEPARATELY from the status code. That distinction is the whole
  * difference between "the API stayed up" and "the API stayed useful".
  *
+ * THIS SCENARIO REQUIRES A COLD UPSTREAM CACHE, AND WILL LIE IF IT DOES NOT
+ * GET ONE
+ * ---------------------------------------------------------------------------
+ * The fault can only reach the breaker through a cache MISS. ListenBrainz feed
+ * rows are cached for an hour, so a second run inside that hour never calls the
+ * provider, the breaker never opens, and the run measures a healthy system
+ * while reporting confidently on a broken one. The "breaker reached degraded"
+ * check below is what catches it: if that check fails, the run is void, not
+ * merely disappointing.
+ *
+ *   docker exec pullfm-postgres psql -U pullfm -d pullfm -c 'TRUNCATE upstream_cache'
  *   BREAKER_PROVIDER=listenbrainz k6 run load/scenarios/breaker.js
  */
 import { check, sleep } from "k6";
@@ -82,19 +93,19 @@ const OPEN_SECONDS = Number(__ENV.BREAKER_OPEN_SECONDS ?? 60);
 /**
  * How long to WATCH for recovery. Not a gate, and much larger than one.
  *
- * The gate is 60 seconds (PLAN.md gate 7). The observation window is 300,
- * because of the exponential re-open backoff in
- * `packages/upstream/src/circuit-breaker.ts`: every failed half-open trial
- * re-opens the circuit and multiplies the reset timeout, from 30s to 60s to
- * 120s to a 240s cap. A sustained fault therefore leaves the breaker in its
- * slowest state precisely when the upstream comes back.
+ * The gate is 60 seconds (PLAN.md gate 7). The window is 300 so that a run
+ * which misses the gate still says BY HOW MUCH: 61 seconds and permanently
+ * broken need completely different responses, and a 60 second window collapses
+ * them into the same 999 sentinel.
  *
- * Watching for only 60 seconds would record the 999 sentinel and report "never
- * recovered", which is both true and useless: it cannot distinguish 61 seconds
- * from permanently broken, and those need completely different responses.
- * Measured here at 62 seconds after a 30 second fault, which FAILS the gate by
- * two seconds and is exactly the kind of result a short window would have
- * rounded off into a mystery.
+ * That distinction earned its keep. This scenario recorded 999 on every run it
+ * had ever made, against a runbook that said 62 seconds, and the gap between
+ * those two numbers was the whole defect: recovery was waiting on the upstream
+ * CACHE to expire, not on the breaker's reset window, because a warm cache
+ * means the provider is never called and the breaker's half-open trial never
+ * happens. Fixed by a half-open probe in `CachedUpstream`
+ * (packages/upstream/src/cache/cache-first.ts), wired in
+ * apps/bff/src/services/upstream.ts.
  */
 const RECOVER_SECONDS = Number(__ENV.BREAKER_RECOVER_SECONDS ?? 300);
 
@@ -134,12 +145,12 @@ export const options = {
     /**
      * Gate 7: recovery under 60s after the fault clears.
      *
-     * MEASURED AT 62s AND THEREFORE CURRENTLY RED. Left at the plan's number
-     * rather than relaxed to fit the observation, because the gate is what
-     * PLAN.md requires and a threshold quietly moved to match reality is not a
-     * gate any more. The cause and the two ways to close it are in
-     * docs/RUNBOOK-SCALE.md; both are changes to the breaker policy in
-     * packages/upstream, which this suite does not own.
+     * Was RED on every run this scenario ever made, at the 999 "never came
+     * back" sentinel rather than the 62s the runbook recorded. The threshold
+     * was held at the plan's number throughout rather than relaxed to fit the
+     * observation. See docs/RUNBOOK-SCALE.md section 6.1 for what it turned out
+     * to be, and for the plausible-looking breaker-side fix that was rejected
+     * because it made this threshold pass by making it measure nothing.
      */
     chaos_recovery_seconds: ["p(95)<60"],
     problem_json_violations: ["count<1"],
@@ -290,10 +301,10 @@ export function handleSummary(data) {
         "provider timeout (5s, 10s for MusicBrainz) plus retries, which is not our SLO to meet.",
       "Driven with 500s, not 429s: provider-client.ts records quota exhaustion as a " +
         "breaker SUCCESS, so a 429-driven run would never trip the circuit.",
-      "KNOWN RED: recovery measured at 62s after a 30s fault, against a 60s gate. " +
-        "Cause is the exponential re-open backoff (30s -> 60s -> 120s -> 240s cap): " +
-        "a sustained fault leaves the breaker in its slowest state exactly when the " +
-        "upstream returns. See docs/RUNBOOK-SCALE.md.",
+      "Recovery is bounded by the breaker's reset window only because CachedUpstream " +
+        "spends a fresh hit on a half-open trial. Without that probe a warm cache " +
+        "answers every request, the provider is never called, and recovery waits for " +
+        "the cache TTL instead. See docs/RUNBOOK-SCALE.md section 6.1.",
       `duration derived: ${durationSeconds(`${TOTAL}s`)}s total`,
     ],
   });

@@ -28,17 +28,20 @@
  * database-heavy authenticated route and watches for the transition from
  * "queues, stays correct" to "errors". That is pool 1, and it is measurable.
  *
- * Pool 2 is NOT measurable on the local stack today, and the reason is a real
+ * Pool 2 used to be unmeasurable on the local stack, and the reason was a real
  * defect rather than a missing feature: the BFF passes `statement_timeout` and
  * `idle_in_transaction_session_timeout` as connection parameters, and PgBouncer
- * rejects them with `unsupported startup parameter: statement_timeout` unless
- * `IGNORE_STARTUP_PARAMETERS` names them. The local `pgbouncer` service does
- * not set it, so the BFF cannot connect through port 6432 at all. See
- * docs/RUNBOOK-SCALE.md for the one-line fix and the Neon caveat.
+ * rejected them with `unsupported startup parameter: statement_timeout`, so the
+ * BFF could not connect through port 6432 at all. Fixed in
+ * docker-compose.dev.yml plus infra/local/postgres-init/01-role-timeouts.sql -
+ * both halves, because `ignore_startup_parameters` on its own lets the
+ * connection through while silently discarding the timeout. The reasoning and
+ * the measurements are in docs/RUNBOOK-SCALE.md section 6.2.
  *
- * So: run this against the pooled endpoint once that is fixed, and against the
- * direct endpoint meanwhile. `POOL_ENDPOINT` is recorded in the run record so a
- * result can never be quoted as evidence for the endpoint it did not use.
+ * So: point `DATABASE_URL` at 6432 and run with `POOL_ENDPOINT=pooled`.
+ * `POOL_ENDPOINT` is recorded in the run record so a result can never be quoted
+ * as evidence for the endpoint it did not use, and a run against 5432 is still
+ * a legitimate measurement of pool 1 alone as long as it says so.
  *
  *   CEILING_VUS=200 k6 run load/scenarios/pool-ceiling.js
  */

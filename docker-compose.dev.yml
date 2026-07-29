@@ -106,6 +106,35 @@ services:
       DEFAULT_POOL_SIZE: "25"
       AUTH_TYPE: scram-sha-256
       ADMIN_USERS: pullfm
+      # WITHOUT THIS THE BFF CANNOT CONNECT AT ALL.
+      #
+      # node-postgres puts the `statement_timeout` and
+      # `idle_in_transaction_session_timeout` options from `apps/bff/src/lib/db.ts`
+      # into the libpq StartupMessage, and PgBouncer rejects any startup
+      # parameter outside this list:
+      #
+      #   ERR unsupported startup parameter: statement_timeout
+      #
+      # So DATABASE_URL had to point at 5432 to get a working stack, which meant
+      # the pooler this file exists to mirror was never on the path and Gate 1's
+      # transaction-pooling assertion could not be measured locally.
+      #
+      # READ THIS BEFORE TRUSTING THE SETTING: `ignore_startup_parameters` means
+      # IGNORE. PgBouncer accepts the connection and DISCARDS the value; the
+      # backend then runs with `statement_timeout = 0`, unbounded. Measured, not
+      # assumed - connecting through 6432 with `statement_timeout: 3000` and
+      # asking the server gives `current_setting('statement_timeout') = '0'`, and
+      # `SELECT pg_sleep(6)` completes. `track_extra_parameters` does not rescue
+      # it either: it stops the rejection but the value is still dropped, because
+      # Postgres does not GUC_REPORT these two so PgBouncer never learns them.
+      #
+      # That is why infra/local/postgres-init/01-role-timeouts.sql sets the same
+      # ceiling as a ROLE DEFAULT, which every backend picks up at start and
+      # which no pooler can swallow. The two have to move together. This is not a
+      # local quirk: Neon's pooled endpoint is PgBouncer too, so an application
+      # relying on the startup parameter has no statement timeout in production
+      # either, which is THREAT-MODEL T10 with the mitigation missing.
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits,statement_timeout,idle_in_transaction_session_timeout
     ports:
       - "127.0.0.1:6432:5432"
     healthcheck:
