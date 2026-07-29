@@ -15,9 +15,14 @@
 > unhealthy. Measured by doing it. See
 > [`../staging/README.md`](../staging/README.md).
 >
-> State lives in **R2** (`pull-fm-tfstate`), not on the laptop, since
-> 2026-07-29. Backend wiring is per-root `backend.hcl` (gitignored); the
-> credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+> **`envs/staging` state lives in R2** (`pull-fm-tfstate`) since 2026-07-29.
+> Backend wiring is per-root `backend.hcl` (gitignored); the credentials come
+> from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+>
+> **`envs/shared` and `envs/prod` still have the backend block commented out, so
+> their state is local.** That matters most for `shared`, which is the root that
+> is actually applied: losing this laptop orphans the zone TLS posture. Migrating
+> both is the next infrastructure task.
 >
 > **Applies run on a per-environment scoped Cloudflare token.** The account-wide
 > global API key is bootstrap-only and `infra/lib/credentials.sh` refuses to run
