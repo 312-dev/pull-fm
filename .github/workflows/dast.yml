@@ -1,0 +1,168 @@
+# ---------------------------------------------------------------------------
+# Pull.fm - DAST (Gate 8, ZAP)
+#
+# Gate 8 reads "zero high/critical from Semgrep, Trivy, gitleaks, ZAP baseline
+# with pinned tool versions". Until 2026-07-29 the first three ran on every push
+# and the fourth had NEVER EXECUTED, in any workflow, on any commit.
+# security/AUDIT-2026-07-29.md F19: "security/zap/ is written, tested by hand,
+# and wired to nothing." This is the wire.
+#
+# WHY THIS IS A SEPARATE WORKFLOW, AND NOT ON `pull_request`
+#
+# DAST needs a deployed target. The only one that exists is staging, which is
+# shared: running a scan on every pull request would mean concurrent scans
+# against one origin, all of them competing for the same per-IP rate-limit
+# budget, and each producing a report that describes the rate limiter rather
+# than the application. Nightly plus on-demand is the honest cadence for a
+# single shared environment.
+#
+# WHY IT IS FREE
+#
+# GitHub-hosted runners are free for public repositories, and the whole toolchain
+# is the ZAP container. There is no paid scanning service anywhere in this file,
+# which is a requirement rather than an accident: docs/PLAN.md section 9 cuts
+# standing cost wherever the capability can be kept.
+#
+# THE CONSTRAINT
+#
+# MusicBrainz permits 1 request per second GLOBALLY per IP and revokes without
+# appeal. The runner removes every provider-reaching operation from the spec ZAP
+# imports, proves the scan subject holds no provider credentials, and compares
+# provider state before and after. See security/DAST-RUNBOOK.md and
+# security/zap/upstream-scope.tsv. `concurrency` below is part of that: two
+# overlapping scans would double whatever egress a mistake produced.
+# ---------------------------------------------------------------------------
+name: dast
+
+on:
+  schedule:
+    # 03:41 UTC nightly. Off the hour on purpose: the top of the hour is when
+    # every other project's cron fires and GitHub queues them.
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+    inputs:
+      plan:
+        description: "baseline (passive, the Gate 8 plan) or active (sends attacks)"
+        type: choice
+        options: [baseline, active]
+        default: baseline
+      target:
+        description: "Target origin"
+        type: string
+        default: https://api-staging.pull.fm
+
+permissions:
+  contents: read
+
+# Never two scans at once against one shared origin, and never cancel one
+# mid-flight: an interrupted scan leaves the target's rate-limit counters in a
+# state the next run will misread, and a partial report is the kind of artefact
+# somebody later cites as evidence.
+concurrency:
+  group: dast
+  cancel-in-progress: false
+
+jobs:
+  zap:
+    name: "Gate 8: ZAP ${{ inputs.plan || 'baseline' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A scan that cannot authenticate is not a cheaper scan, it is a different
+      # and much weaker one: every request 401s, the passive scanner sees nothing
+      # but error bodies, and the plan exits 0 with a clean report. Refuse to
+      # start rather than produce that artefact. If this step is what is failing,
+      # add the repository secret; do not remove the check.
+      - name: require a DAST credential
+        env:
+          TOKEN: ${{ secrets.PULLFM_DAST_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::PULLFM_DAST_TOKEN is not set. This workflow scans an API whose"
+            echo "::error::entire surface requires authentication, so without it the run"
+            echo "::error::would report clean over 401 responses. Mint a personal API token"
+            echo "::error::for a DAST-only subject that holds NO provider connections, and"
+            echo "::error::add it as a repository secret. See security/DAST-RUNBOOK.md."
+            exit 1
+          fi
+
+      # The plans and the runner pin ZAP by digest; this only warms the layer
+      # cache so a slow pull does not eat the job timeout.
+      - name: pre-pull the pinned scanner
+        run: |
+          docker pull ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
+
+      - name: run the scan
+        env:
+          PULLFM_ZAP_TOKEN: ${{ secrets.PULLFM_DAST_TOKEN }}
+          # Optional. When the node exposes /metrics with a token, the runner
+          # compares the MusicBrainz pacer counters before and after and fails on
+          # any rise. Without it the run says "NOT observed" rather than
+          # "flat", which is the difference this project keeps having to relearn.
+          PULLFM_METRICS_URL: ${{ secrets.PULLFM_METRICS_URL }}
+          PULLFM_METRICS_TOKEN: ${{ secrets.PULLFM_METRICS_TOKEN }}
+        run: |
+          ./security/scripts/run-dast.sh \
+            "${{ inputs.plan || 'baseline' }}" \
+            "${{ inputs.target || 'https://api-staging.pull.fm' }}"
+
+      # Always, including on a failing gate: the report is how the failure gets
+      # diagnosed, so uploading it only on success would withhold it exactly when
+      # it is needed.
+      #
+      # NOTE ON CONTENTS. These artefacts hold request and response bodies from
+      # an AUTHENTICATED scan against staging. They are workflow artefacts rather
+      # than committed files, and security/.gitignore keeps the same directory
+      # out of git, because this repository is public.
+      - name: upload reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zap-${{ inputs.plan || 'baseline' }}-${{ github.run_id }}
+          path: security/zap/work/
+          retention-days: 14
+          if-no-files-found: error
+
+  headers:
+    name: "Gate 8: Observatory and TLS"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # Gate 8's last clause is "Observatory >= A+", and it had never been
+      # measured: on 2026-07-29 the origin answered 521, so a grade would have
+      # described a Cloudflare error page. It is measurable now, and this is
+      # what does the measuring. The script reports the official MDN verdict and
+      # a locally computed equivalent separately, and never lets one stand in
+      # for the other.
+      - name: header grade
+        run: |
+          node security/scripts/observatory-grade.mjs \
+            "${{ inputs.target || 'https://api-staging.pull.fm' }}"
+
+      # Gate 0 asks for "testssl.sh >= A". Pinned by tag on the vendor's own
+      # registry; the JSON is kept as evidence rather than as a pass/fail, because
+      # grading TLS is a judgement the report supports rather than replaces.
+      - name: TLS scan
+        run: |
+          mkdir -p security/zap/work
+          docker run --rm -v "$PWD/security/zap/work:/out" \
+            ghcr.io/testssl/testssl.sh:3.2 \
+            --quiet --color 0 --severity LOW \
+            --jsonfile /out/testssl.json \
+            --protocols --headers --vulnerable --server-defaults \
+            "$(echo "${{ inputs.target || 'https://api-staging.pull.fm' }}" | sed -E 's#^https?://##')"
+
+      - name: upload TLS evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tls-${{ github.run_id }}
+          path: security/zap/work/testssl.json
+          if-no-files-found: warn

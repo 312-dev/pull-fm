@@ -1,0 +1,129 @@
+# =============================================================================
+# Pull.fm - upstream egress classification for DAST scoping
+#
+# CANONICAL SOURCE, read by security/zap/scripts/scope-upstream.mjs.
+#
+# WHY THIS FILE EXISTS, SEPARATELY FROM x-pullfm-dast
+#
+# `x-pullfm-dast: include | exclude` answers ONE question: "would the scanner
+# destroy the subject it is testing?" That is why DELETE /v1/me is excluded and
+# GET /v1/artists/{mbid}/similar is included.
+#
+# It does not answer the question that can end this project. MusicBrainz permits
+# 1 request per second GLOBALLY per IP and revokes without appeal
+# (docs/UPSTREAM-TERMS.md, docs/PLAN.md section 8). A DAST crawler sends garbage
+# identifiers by construction, every one of which is a guaranteed cache MISS, so
+# "not destructive" and "will not egress to a provider" are different properties
+# and the annotation only carried the first.
+#
+# Three operations annotated `x-pullfm-dast: include` can egress to a provider
+# on scanner-shaped input. They are marked `egress` below and removed from the
+# scanned spec. Relying on the DAST annotation alone would have scanned them.
+#
+# CLASSIFICATIONS
+#
+#   none           A request to this operation cannot cause an outbound HTTP
+#                  call to a third-party provider, on any input, hit or miss.
+#                  Scanned.
+#
+#   subject-gated  Can egress, but only when the AUTHENTICATED SUBJECT holds a
+#                  stored provider credential. Scanned only when the runner has
+#                  PROVED the scan subject holds zero connections
+#                  (`connectionCount == 0` on GET /v1/me) and passed
+#                  --allow-subject-gated. Excluded by default.
+#
+#   egress         Can cause an outbound provider call on input a scanner will
+#                  actually send. NEVER scanned. There is no flag to include
+#                  these; removing the flag is the control.
+#
+# The `providers` column names who is reached, so a future reader can re-derive
+# the decision rather than trust it.
+#
+# FAILS CLOSED. scope-upstream.mjs reconciles this register against the spec in
+# BOTH directions: an operation in the spec with no row here is a hard failure,
+# and a row here with no operation in the spec is a hard failure. A new route
+# therefore cannot be scanned until somebody has answered the egress question in
+# writing. That is the same shape as the prune-openapi.mjs refusal to default an
+# unannotated operation, and for the same reason: the convenient default is the
+# one that gets our provider access revoked.
+#
+# THE STRONGER FIX, RECOMMENDED. This belongs on the route as a required field
+# of `PullfmAnnotations` (apps/bff/src/lib/openapi.ts) next to `dast`, so the
+# classification is written where the fetch is written and cannot be forgotten
+# in a second file. It is here instead because that is 38 route-definition edits
+# across six files in a tree other agents are writing to, and the reconciliation
+# below gives the same fail-closed property today. See security/DAST-RUNBOOK.md.
+#
+# TAB-SEPARATED, like security/zap/rules/baseline-rules.tsv. Format:
+#   <METHOD> <path><TAB><classification><TAB><providers><TAB><evidence>
+# Blank lines and lines beginning with # are ignored.
+# =============================================================================
+
+# --- Platform surface. No provider client is reachable from any of these. -----
+GET /healthz	none	-	Postgres and Redis liveness only; no upstream client is constructed on this path.
+GET /readyz	none	-	Postgres and Redis readiness only.
+GET /metrics	none	-	Reads the local prom-client registry. Also gated to loopback or METRICS_TOKEN (routes/health.ts) and denied at nginx.
+GET /v1/config	none	-	Reads the in-memory provider status snapshot (services/upstream.ts status()); does not refresh it.
+
+# --- Auth. WorkOS is our identity provider, not a rate-limited music provider.
+# It is not in docs/UPSTREAM-TERMS.md and has no per-IP request ceiling we can
+# breach. Every one of these is `x-pullfm-dast: exclude` anyway, so none reaches
+# the scanner; classified here only because the register must be total.
+POST /v1/auth/start	none	workos	Calls WorkOS magic-auth. Not a metered music provider. Already dast:exclude.
+POST /v1/auth/verify	none	workos	As above.
+GET /v1/auth/callback	none	workos	As above.
+POST /v1/auth/refresh	none	workos	As above.
+POST /v1/auth/logout	none	workos	As above.
+
+# --- Account. -----------------------------------------------------------------
+GET /v1/me	none	-	Reads users and counts; no provider client on the path.
+DELETE /v1/me	none	workos	Deletion cascade calls WorkOS deleteUser. Already dast:exclude for destructiveness.
+PATCH /v1/me	none	workos	WorkOS updateUser. Already dast:exclude.
+GET /v1/me/export	none	-	Local export job. Already dast:exclude and in the ZAP context excludePaths.
+GET /v1/me/export/download	none	-	Serves a local artefact. Already dast:exclude.
+
+# --- Personal API tokens. Entirely local. -------------------------------------
+GET /v1/tokens	none	-	Postgres only.
+POST /v1/tokens	none	-	Postgres only. dast:exclude because it mints credentials.
+DELETE /v1/tokens/{id}	none	-	Postgres only.
+POST /v1/tokens/{id}/rotate	none	-	Postgres only.
+
+# --- Connections. Two of these egress, and one does so on EVERY request. ------
+GET /v1/connections	none	-	Postgres only; does not validate stored credentials against the provider.
+POST /v1/connections/{service}	egress	listenbrainz	services/providers.ts validate-token: one UNCACHED call to api.listenbrainz.org per request carrying a token body field. No cache, no gate. Already dast:exclude, but for credential reasons, not this one.
+DELETE /v1/connections/{service}	none	-	Local revoke; does not notify the provider.
+GET /v1/connections/{service}/callback	egress	lastfm	services/providers.ts auth.getSession against ws.audioscrobbler.com. Guarded by a signed single-use state, so a scanner is rejected first, but the guard is one bug away from being the only thing between a fuzzer and Last.fm. Also excluded at the ZAP context level.
+
+# --- Wishlist. Acquisition links are built as strings, not resolved. ----------
+GET /v1/wishlist	none	-	Postgres only.
+POST /v1/wishlist	none	-	Postgres only.
+DELETE /v1/wishlist/{id}	none	-	Postgres only.
+GET /v1/wishlist/{id}/acquire	none	-	services/wishlist.ts constructs vendor URLs by string interpolation. No outbound call.
+
+# --- Personalised discovery. Gated on the SUBJECT holding a credential. -------
+# Every one of these opens the caller's stored ListenBrainz credential first and
+# returns a degraded section when there is none, so a subject with zero
+# connections cannot make them egress. The runner proves that rather than
+# assuming it.
+GET /v1/feed	subject-gated	listenbrainz, lastfm	discovery.ts openCredential returns null for a subject with no connection and every port short-circuits before the client is called.
+GET /v1/recommendations	subject-gated	listenbrainz, lastfm	Same credential gate as /v1/feed.
+GET /v1/stations	subject-gated	listenbrainz	ListenBrainz topArtists behind the same gate, cached per user per month.
+GET /v1/stations/{id}/tracks	subject-gated	listenbrainz	ListenBrainz artistRadio. Additionally HMAC-gated: a forged station id is rejected before any port is touched.
+
+# --- Catalogue. This is where the DAST annotation was not enough. -------------
+# MusicBrainz is NOT reachable from any of these. Every request-path MusicBrainz
+# read goes through CachedUpstream.peek, which is database-only and returns null
+# on a miss rather than calling load(). The MusicBrainz client is reached only by
+# the background cache-warmer job (services/cache-warmer.ts) and the offline
+# warm-cache script. That is why the pacer cannot move during a scan, and it is
+# a property of the code rather than of the scan configuration.
+GET /v1/search	none	-	crosswalkStore.search is a Postgres trigram query. No provider call on hit or miss.
+GET /v1/artists/{mbid}	none	-	peek + crosswalk, database-only. An unknown mbid returns 404 without egress.
+GET /v1/artists/{mbid}/similar	egress	listenbrainz, lastfm	THE DANGEROUS ONE. #labsSimilarArtists calls labs.api.listenbrainz.org for ANY well-formed UUID with no prior existence check, and a random UUID is a guaranteed cache miss, so a scanner gets one outbound call per request. Annotated dast:include, which is why the DAST annotation alone was not a sufficient control.
+GET /v1/tracks/{mbid}	none	-	peek only, database-only.
+GET /v1/tracks/{mbid}/preview	egress	deezer	Deezer resolution on the request path, deliberately never cached because the signed URLs expire. A warm recording is required first, so a garbage mbid does not egress today; excluded anyway because that safety is an accident of the cache state, not a control.
+GET /v1/albums/{mbid}	none	-	peek only, database-only.
+GET /v1/artists/{mbid}/events	egress	seatgeek	SeatGeek events. Requires a warm artist, but the cache key includes city/state/country, so fuzzing the geo query parameters against ONE valid artist produces one SeatGeek call per distinct combination. Annotated dast:include.
+
+# --- Webhooks. ----------------------------------------------------------------
+POST /v1/webhooks/workos	none	-	Verifies a signature and writes locally.
