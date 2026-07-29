@@ -194,7 +194,8 @@ variable on it.
 
 **There is no public SSH, and adding one is not the answer when you cannot get
 in.** The Hetzner firewall carries no inbound rule for port 22 at all. The public
-address `204.168.129.82` therefore **drops** a connection to 22, so the symptom
+address (see `terraform output`, deliberately not written down here) therefore
+**drops** a connection to 22, so the symptom
 of trying it is a timeout rather than "connection refused", and no key on earth
 will help. The only inbound ports are 80 and 443 from Cloudflare's ranges, plus
 UDP 41641 for Tailscale and ICMP. Verify with
@@ -252,7 +253,7 @@ Only when Tailscale cannot be reached at all:
 cd infra/terraform/envs/staging && terraform apply
 
 # 2. Do the thing.
-ssh -i /tmp/pullfm-staging.key pullfm@204.168.129.82
+ssh -i /tmp/pullfm-staging.key pullfm@"$(terraform -chdir=infra/terraform/envs/staging output -raw ingress_ipv4)"
 
 # 3. Take it back out, and apply again. This step is the one that gets skipped.
 ```

@@ -428,8 +428,9 @@ ssh pullfm@<tailnet-ip> sudo rm /etc/pullfm/flags/maintenance
 
 **Admin is over Tailscale. It is never over the public IP.** The Hetzner
 firewall carries no inbound rule for port 22 at all - not an allowlisted one,
-none - and the public address `204.168.129.82` therefore drops a connection to
-22 rather than refusing it, so the symptom is a timeout, not "connection
+none - and the public address (obtainable from `terraform output`, and deliberately
+not recorded in this public repository) therefore drops a connection to 22
+rather than refusing it, so the symptom is a timeout, not "connection
 refused". The only public ports are 80 and 443, and only from Cloudflare's
 ranges. That posture is deliberate and must not be traded away for convenience.
 
