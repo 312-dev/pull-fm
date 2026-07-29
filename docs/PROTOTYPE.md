@@ -28,10 +28,13 @@ curl -sS https://api-staging.pull.fm/readyz
 
 curl -sS https://api-staging.pull.fm/v1/config
 # {"minSupportedBuild":1,"maintenance":false,
-#  "features":{"personalApiTokens":true,"wishlist":true,"discovery":true,"events":true},
+#  "features":{"personalApiTokens":true,"wishlist":true,"discovery":true,"events":false},
 #  "providers":{"listenbrainz":"ok","lastfm":"disabled","musicbrainz":"ok",
-#               "previews":"ok","events":"ok"}}
+#               "previews":"ok","events":"disabled"}}
 ```
+
+`events` is **false on purpose**, and it read `true` until 2026-07-29. See
+section 4.
 
 Those three need no credential. `version` is the commit that is serving, and it
 is the answer to "did my change deploy": it should equal `git rev-parse
@@ -245,19 +248,19 @@ works too, with the scope named. `none` means no credential.
 
 ### Discovery and catalogue
 
-| Method | Path                        | Auth                            | What it does                                |
-| ------ | --------------------------- | ------------------------------- | ------------------------------------------- |
-| GET    | `/v1/feed`                  | session, `read:recommendations` | Personalised feed, paged over sections.     |
-| GET    | `/v1/recommendations`       | session, `read:recommendations` | Recommendations for the account.            |
-| GET    | `/v1/stations`              | session, `read:recommendations` | Derived stations.                           |
-| GET    | `/v1/stations/:id/tracks`   | session, `read:recommendations` | Tracks for one station.                     |
-| GET    | `/v1/search?q=`             | session                         | Catalogue search over the local crosswalk.  |
-| GET    | `/v1/artists/:mbid`         | session                         | One artist.                                 |
-| GET    | `/v1/artists/:mbid/similar` | session                         | Similar artists, ListenBrainz plus Last.fm. |
-| GET    | `/v1/artists/:mbid/events`  | session                         | Live events from SeatGeek.                  |
-| GET    | `/v1/tracks/:mbid`          | session                         | One recording.                              |
-| GET    | `/v1/tracks/:mbid/preview`  | session                         | A 30-second preview URL.                    |
-| GET    | `/v1/albums/:mbid`          | session                         | One release.                                |
+| Method | Path                        | Auth                            | What it does                                                                |
+| ------ | --------------------------- | ------------------------------- | --------------------------------------------------------------------------- |
+| GET    | `/v1/feed`                  | session, `read:recommendations` | Personalised feed, paged over sections.                                     |
+| GET    | `/v1/recommendations`       | session, `read:recommendations` | Recommendations for the account.                                            |
+| GET    | `/v1/stations`              | session, `read:recommendations` | Derived stations.                                                           |
+| GET    | `/v1/stations/:id/tracks`   | session, `read:recommendations` | Tracks for one station.                                                     |
+| GET    | `/v1/search?q=`             | session                         | Catalogue search over the local crosswalk.                                  |
+| GET    | `/v1/artists/:mbid`         | session                         | One artist.                                                                 |
+| GET    | `/v1/artists/:mbid/similar` | session                         | Similar artists, ListenBrainz plus Last.fm.                                 |
+| GET    | `/v1/artists/:mbid/events`  | session                         | Live events from SeatGeek. **501 here**: off pending Gate L, see section 4. |
+| GET    | `/v1/tracks/:mbid`          | session                         | One recording.                                                              |
+| GET    | `/v1/tracks/:mbid/preview`  | session                         | A 30-second preview URL.                                                    |
+| GET    | `/v1/albums/:mbid`          | session                         | One release.                                                                |
 
 Every `:mbid` is a MusicBrainz UUID and is validated before use.
 
@@ -327,18 +330,37 @@ The response carries an `attribution.badge` block. It is not decoration: the
 iTunes terms require the badge and the Apple Music link to be rendered next to
 the preview, and the block tells a client exactly where and in what order.
 
-**Live events.** SeatGeek is configured, so this is a real upstream call.
-Radiohead is known to the provider and has nothing scheduled in Chicago, which
-is an empty list rather than an error:
+**Live events are OFF, and this is the one place the prototype deliberately
+does less than the code can.** The SeatGeek client is built and the credentials
+are on the node, and for several hours on 2026-07-29 the route really did return
+live data. It should not have:
 
 ```bash
 curl -sS "https://api-staging.pull.fm/v1/artists/$ARTIST/events?city=Chicago&state=IL&country=US" \
-  -H "Authorization: Bearer $SESSION" | jq '{coverage, artistUnknownToProvider, events}'
-# {"coverage":"primary","artistUnknownToProvider":false,"events":[]}
+  -H "Authorization: Bearer $SESSION"
+# 501
+# {"type":"https://pull.fm/problems/not-implemented","title":"Not Implemented",
+#  "status":501,"detail":"Live events are not enabled on this deployment."}
 ```
 
-Only `city`, `state`, `country` and `limit` are accepted. Coordinates and
-postal codes are refused because SeatGeek's terms forbid them.
+`docs/PLAN.md` §3 and §11.7 both record this route as 501 pending **Gate L**,
+which is a legal gate and has not passed: the DPAs are unsigned, no EU Article 27
+representative is appointed, and no published EULA names the SeatGeek Entities as
+third-party beneficiaries under their clause 4.3. Serving their data before those
+are true is a breach of contract, not a missing feature.
+
+It was on because the flag failed open in two places at once - `SEATGEEK_ENABLED`
+defaulted to `true` in the BFF's config schema, and `infra/lib/secrets.sh` wrote
+`SEATGEEK_ENABLED=true` into `bff.env` whenever a client id existed in 1Password.
+Between them, a "kill switch" was something every deployment holding a credential
+had already bypassed. Both now default to `false`, so the next environment starts
+correct rather than inheriting the fix. Turning events on is a reviewed edit that
+can cite the signed documents; turning them off stays a line in
+`/etc/pullfm/bff.env` and a restart, which is the hours-not-deploy-cycles
+obligation their terms actually impose.
+
+When it is switched on, only `city`, `state`, `country` and `limit` are accepted.
+Coordinates and postal codes are refused because SeatGeek's terms forbid them.
 
 **The wishlist.** Adding requires an idempotency key:
 
@@ -358,6 +380,7 @@ curl -sS -X POST https://api-staging.pull.fm/v1/wishlist \
 | `/v1/feed`, `/v1/recommendations`, `/v1/stations` | `{"sections":[],"degraded":true,"unavailableProviders":["listenbrainz"]}` | Same reason. Connect ListenBrainz and they populate.                                                                                      |
 | `/v1/artists/<any other mbid>`                    | 404                                                                       | The request path **never calls MusicBrainz** (section 6). An unwarmed MBID is indistinguishable from one that does not exist, on purpose. |
 | `/v1/connections/lastfm`                          | 501                                                                       | No Last.fm credentials on this deployment.                                                                                                |
+| `/v1/artists/:mbid/events`                        | 501                                                                       | Credentials are present and the client works. `SEATGEEK_ENABLED=false` until Gate L passes. Section 4.                                    |
 
 None of these is a bug. To make discovery interesting, connect ListenBrainz
 (`POST /v1/connections/listenbrainz` with `{"token":"<your LB token>"}`) and
@@ -403,14 +426,45 @@ ssh pullfm@<tailnet-ip> sudo rm /etc/pullfm/flags/maintenance
 
 ### Reaching the node
 
-There is **no public SSH**. The firewall carries no rule for port 22 and the
-origin drops everything except 80 and 443 from Cloudflare's ranges. The node is
-on the tailnet as `pullfm-staging-app-1`:
+**Admin is over Tailscale. It is never over the public IP.** The Hetzner
+firewall carries no inbound rule for port 22 at all - not an allowlisted one,
+none - and the public address `204.168.129.82` therefore drops a connection to
+22 rather than refusing it, so the symptom is a timeout, not "connection
+refused". The only public ports are 80 and 443, and only from Cloudflare's
+ranges. That posture is deliberate and must not be traded away for convenience.
+
+The whole command, from nothing:
 
 ```bash
-tailscale status | grep pullfm            # find the address
-ssh pullfm@100.121.161.79                 # the address on 2026-07-29
+install -m 0600 /dev/null /tmp/pullfm-staging.key
+op read 'op://MCP/krqfwafozazi7xq6ftq4s35rba/private_key' > /tmp/pullfm-staging.key
+[ -s /tmp/pullfm-staging.key ] || echo 'EMPTY: wrong field or no vault access'
+
+ssh -i /tmp/pullfm-staging.key -o IdentitiesOnly=yes \
+    pullfm@100.121.161.79 'hostname; uptime'
+# pullfm-staging-app-1
 ```
+
+The 1Password item is `pull-fm/infra/STAGING_SSH_KEY`, and it is addressed
+**by item id** above for the same reason as the API token in section 2: `op read`
+cannot resolve an `op://` reference whose item title contains a slash, and every
+item in this project has one. `op item get pull-fm/infra/STAGING_SSH_KEY --vault
+MCP --fields label=private_key --reveal` is the equivalent by title. The public
+half is not a secret and is committed as `ssh_public_keys.operator` in
+`infra/terraform/envs/staging/terraform.tfvars`; cloud-init installs it into
+`~pullfm/.ssh/authorized_keys`, and Hetzner holds it as the SSH key
+`pullfm-staging-operator`, MD5 `f9:ac:9f:...:72:30`.
+
+**Three ways this goes wrong, all of which look like "the key is refused":**
+
+| What you did                      | What happens                       | Why                                                                                          |
+| --------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------- |
+| `ssh root@...`                    | `Permission denied (publickey)`    | Root login over SSH is disabled by cloud-init. The account is `pullfm`, and it has sudo.     |
+| `ssh pullfm@pullfm-staging-app-1` | `Could not resolve hostname`       | MagicDNS is not resolving from every client. Use the tailnet **address**, not the node name. |
+| `ssh` with several keys loaded    | `Too many authentication failures` | The server closes the connection before reaching the right one. `-o IdentitiesOnly=yes`.     |
+
+The tailnet address is `100.121.161.79`. `tailscale status | grep pullfm` finds
+it if it ever moves.
 
 ### The scheduled jobs, which had never run until tonight
 
@@ -590,15 +644,26 @@ them.
 - **Two account rows exist for `gray@grayada.ms`**, one from a sign-in made
   while the WorkOS client id was misconfigured. The live one is
   `0ede7b7f-9c92-4914-8182-4509aae1656b`; the other has no tokens and no data.
-- **`pullfm-watchdog.service` still carries `RuntimeMaxSec=` with
-  `Type=oneshot`**, which systemd ignores, so the watchdog has no effective
-  timeout. The four job units had the same defect and it is fixed there;
-  the watchdog unit belongs to `infra/observability/`.
-- **The cache node's server resource does not ignore `user_data`**, so if
-  `enable_cache_node` is ever turned on, an apply run outside
-  `staging-env.sh` will replace it with a node that has no Tailscale and is
-  therefore unreachable. The application node is fixed; the cache node is not,
-  because it does not exist to test against.
+- ~~`pullfm-watchdog.service` carries `RuntimeMaxSec=` with `Type=oneshot`~~
+  **Fixed 2026-07-29**: it is `TimeoutStartSec=50` now. It mattered more here
+  than on the job units, because systemd will not start a second copy of a
+  oneshot that is still activating: a watchdog wedged on a hung `/metrics` read
+  did not miss one minute, it suppressed every later run indefinitely while
+  `systemctl list-timers` still showed the timer armed. Not exercised against a
+  wedged scrape; the correctness claim is that systemd no longer discards the
+  directive.
+- ~~The cache node's server resource does not ignore `user_data`~~ **Fixed
+  2026-07-29**, and it is the sharper half of the same defect: that node is built
+  with no public IPv4 and a firewall that opens nothing inbound but Tailscale, so
+  a keyless apply would have left it unreachable by every path rather than merely
+  degraded. **Untested by construction** - `enable_cache_node` is false, so the
+  resource has `count = 0` and no server exists to apply it against.
+- **`infra/scripts/check-job-schedule.mjs` was asserting the broken form of the
+  job units** (`OnFailure` in `[Service]`, `RuntimeMaxSec` on a oneshot), so it
+  passed for as long as the units were wrong and went red the moment they were
+  fixed. Corrected 2026-07-29; `make jobs` and the CI step pass again. Worth
+  noting as a class of gap: a guard written against the bug is worse than no
+  guard, because it reports green.
 
 ---
 

@@ -190,14 +190,61 @@ variable on it.
 
 ---
 
-## 7. Break-glass SSH
+## 7. Administering the node: Tailscale, never the public IP
 
-There is **no standing interactive path to the node**. The firewall carries no
-port 22 rule, and Tailscale is not installed because `tailscale_auth_key` is
-empty in every committed configuration. Routine operation needs none, because the
-deploy loop pulls.
+**There is no public SSH, and adding one is not the answer when you cannot get
+in.** The Hetzner firewall carries no inbound rule for port 22 at all. The public
+address `204.168.129.82` therefore **drops** a connection to 22, so the symptom
+of trying it is a timeout rather than "connection refused", and no key on earth
+will help. The only inbound ports are 80 and 443 from Cloudflare's ranges, plus
+UDP 41641 for Tailscale and ICMP. Verify with
+`curl -H "Authorization: Bearer $HCLOUD_TOKEN" https://api.hetzner.cloud/v1/firewalls`
+before and after anything that touches infrastructure.
 
-To get in:
+The standing path is Tailscale. `staging-env.sh up` mints an auth key and
+cloud-init joins the node to the tailnet, so this works from any tailnet member:
+
+```bash
+install -m 0600 /dev/null /tmp/pullfm-staging.key
+op read 'op://MCP/krqfwafozazi7xq6ftq4s35rba/private_key' > /tmp/pullfm-staging.key
+[ -s /tmp/pullfm-staging.key ] || { echo 'EMPTY - op read failed'; exit 1; }
+
+ssh -i /tmp/pullfm-staging.key -o IdentitiesOnly=yes pullfm@100.121.161.79
+```
+
+`op read` on a missing field **returns empty at exit 0**, which is why the
+emptiness check is on the line after the read and not left to the ssh failure to
+report.
+
+Addressed **by item id** (`krqfwafozazi7xq6ftq4s35rba`, title
+`pull-fm/infra/STAGING_SSH_KEY`) because `op read` cannot resolve an `op://`
+reference whose item title contains a slash, and every item in this project has
+one. The public half is committed as `ssh_public_keys.operator` in
+`infra/terraform/envs/staging/terraform.tfvars`; only the private half is a
+secret, and 1Password holds the only recorded copy. **Never write it into this
+repository** - it is public.
+
+Three failures that all present as "the key is refused":
+
+- `ssh root@` - root login over SSH is disabled by cloud-init. The account is
+  `pullfm`, and it has passwordless sudo.
+- `ssh pullfm@pullfm-staging-app-1` - MagicDNS does not resolve from every
+  client. Use the tailnet **address**.
+- several keys in the agent - the server closes the connection before it reaches
+  the right one. Always pass `-o IdentitiesOnly=yes`.
+
+On 2026-07-29 an operator concluded the node was unadministerable and was one
+step from rebuilding it. The key was `~/.ssh/id_ed25519` all along, exactly as
+`infra/staging-env.sh` defaults to and as `terraform.tfvars` records; the
+attempts had been made as `root` and against the MagicDNS name. Recovering an
+authorised key is a five-minute read of `terraform.tfvars` plus
+`GET /v1/ssh_keys` on the Hetzner API and a fingerprint comparison
+(`ssh-keygen -E md5 -lf`, because Hetzner reports MD5). **Do that before
+rebuilding anything.**
+
+### Break-glass, if the tailnet itself is the thing that is broken
+
+Only when Tailscale cannot be reached at all:
 
 ```bash
 # 1. Add your current /32 to a LOCAL terraform.tfvars (never committed):
@@ -205,17 +252,17 @@ To get in:
 cd infra/terraform/envs/staging && terraform apply
 
 # 2. Do the thing.
-ssh root@<node>
+ssh -i /tmp/pullfm-staging.key pullfm@204.168.129.82
 
 # 3. Take it back out, and apply again. This step is the one that gets skipped.
 ```
 
 Leaving the rule in place is a real finding, not untidiness: it converts a
 zero-inbound posture into an allowlisted one, and the allowlist is a home IP that
-changes.
+changes. `ssh_allowlist_cidrs` is validated to reject a default route, so the
+lazy version of this fails at plan time.
 
-**This is also the gap behind Gate 4.** A way in for a human is not a rebuild.
-See [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 2.
+See [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 2 for the rebuild path.
 
 ---
 
