@@ -45,9 +45,10 @@ import {
   KillSwitch,
   LastfmClient,
   ListenBrainzClient,
+  LocalFirstMusicBrainzClient,
   MUSICBRAINZ_MIN_INTERVAL_MS,
-  MusicBrainzClient,
   PgCacheStore,
+  PgCanonicalStore,
   PgCrosswalkStore,
   PgPreviewStore,
   PreviewResolver,
@@ -59,6 +60,7 @@ import {
   type CrosswalkStore,
   type EventsProvider,
   type FetchLike,
+  type MusicBrainzClient,
   type ProviderEvent,
   type ProviderName,
   type ProviderStatus,
@@ -103,6 +105,15 @@ export interface UpstreamBundle {
   readonly listenbrainz: ListenBrainzClient;
   /** Undefined when no app-wide Last.fm key is configured. */
   readonly lastfm: LastfmClient | undefined;
+  /**
+   * Still a `MusicBrainzClient` to every consumer.
+   *
+   * The concrete type is `LocalFirstMusicBrainzClient`, a subclass, so
+   * `CrosswalkResolver` and the cache warmer take it without knowing. Narrowed
+   * to the base class here on purpose: nothing outside this module should be
+   * able to reach `localStats` or the store, and nothing outside it should
+   * depend on whether the local path exists.
+   */
   readonly musicbrainz: MusicBrainzClient;
   readonly crosswalk: CrosswalkResolver;
   readonly crosswalkStore: CrosswalkStore;
@@ -235,10 +246,31 @@ export function buildUpstream(
     maxQueueDepth: 64,
   });
 
-  const musicbrainz = new MusicBrainzClient({
+  /**
+   * The MusicBrainz client, optionally answering searches from the local
+   * canonical dump before it reaches the network.
+   *
+   * `LocalFirstMusicBrainzClient` EXTENDS `MusicBrainzClient` and calls `super`
+   * for everything it cannot answer locally, so it is constructed
+   * unconditionally and the flag only decides whether the local table is
+   * consulted. That is deliberate: one class in the graph rather than a branch
+   * that produces two different objects, so `MB_LOCAL_ENABLED=false` is provably
+   * the previous behaviour rather than a second configuration of it.
+   *
+   * The rate limiter, single flight and circuit breaker are UNCHANGED and are
+   * still reached through the same `ProviderClient`. They see less traffic; they
+   * do not behave differently for the traffic they see.
+   *
+   * `enabled` is passed the parsed boolean, and the class requires the boolean
+   * `true`. See the flag's comment in config.ts for the four layers that fail
+   * closed and the one that is not ours.
+   */
+  const musicbrainz = new LocalFirstMusicBrainzClient({
     userAgent: cfg.MUSICBRAINZ_USER_AGENT,
     rateLimiter: musicbrainzLimiter,
     killSwitch,
+    canonical: new PgCanonicalStore(queryable),
+    enabled: cfg.MB_LOCAL_ENABLED,
     ...withFetch,
     ...withEvents,
   });
@@ -281,6 +313,33 @@ export function buildUpstream(
           }),
           cache,
         });
+
+  /**
+   * Lets the cache convert a fresh hit into a circuit-breaker trial call.
+   *
+   * Wired here, after the clients exist, because the cache is constructed
+   * before them and this is the only place that knows both. Without it a
+   * provider's circuit can never leave half-open while its cached rows are
+   * fresh, because a warm cache means the provider is never called and the
+   * breaker's trial never happens: recovery ends up bounded by cache TTL
+   * instead of by the 30s reset window. The full reasoning, and the two
+   * breaker-side fixes that were tried and rejected first, are on
+   * `CachedUpstream.setProbeWanted`.
+   *
+   * Only the providers the request path reaches synchronously are listed.
+   * MusicBrainz is `peek`-only from the request path and iTunes and Deezer are
+   * preview-side, so converting their hits would buy no recovery signal that
+   * anything reads.
+   */
+  cache.setProbeWanted((provider) => {
+    if (provider === "listenbrainz") {
+      return listenbrainz.breaker.state === "half_open";
+    }
+    if (provider === "lastfm") {
+      return lastfm?.breaker.state === "half_open";
+    }
+    return false;
+  });
 
   return {
     cache,

@@ -68,6 +68,15 @@ export interface CacheStats {
    * start going wrong.
    */
   readonly coalesced: number;
+  /**
+   * Fresh hits deliberately spent on a circuit-breaker half-open trial.
+   *
+   * Counted as hits as well, because the row was there and the caller got it.
+   * This number is the price of bounded recovery, and it should be small and
+   * bursty: it can only be non-zero while a provider's circuit is half-open.
+   * See `setProbeWanted`.
+   */
+  readonly probes: number;
   /** Hits over total lookups. The Gate 2 number. */
   readonly hitRate: number;
 }
@@ -78,6 +87,7 @@ interface Counters {
   stale: number;
   poisoned: number;
   coalesced: number;
+  probes: number;
 }
 
 /**
@@ -103,12 +113,14 @@ const zeroCounters = (): Counters => ({
   stale: 0,
   poisoned: 0,
   coalesced: 0,
+  probes: 0,
 });
 
 export class CachedUpstream {
   readonly #store: CacheStore;
   readonly #governor: CacheGovernor | undefined;
   readonly #now: () => number;
+  #probeWanted: ((provider: ProviderName) => boolean) | undefined;
   readonly #counters = new Map<ProviderName, Counters>();
   /**
    * One map for every provider and key, because the key already carries the
@@ -123,6 +135,51 @@ export class CachedUpstream {
     this.#store = store;
     this.#governor = opts.governor;
     this.#now = opts.now ?? (() => Date.now());
+  }
+
+  /**
+   * Teaches the cache when to spend a fresh hit on a circuit-breaker probe.
+   *
+   * WHY THIS EXISTS, AND WHY IT IS HERE RATHER THAN IN THE BREAKER
+   *
+   * A circuit breaker cannot learn that a provider recovered except by calling
+   * it, so its half-open state needs traffic to resolve. This cache is what
+   * makes sure that traffic never arrives: while the circuit is open the feed
+   * is answered entirely from cached rows, the provider is not called at all,
+   * no trial is ever admitted, and the breaker sits in half-open advertising
+   * `degraded` through GET /v1/config until the cached rows expire. Recovery is
+   * then bounded by the CACHE TTL, which is hours, rather than by the breaker's
+   * reset window, which is 30 seconds.
+   *
+   * That is measured, not inferred. `load/scenarios/breaker.js` cleared the
+   * fault and then drove 10 req/s of /feed for five minutes: the mock upstream
+   * recorded ZERO calls in that window and the run wrote the 999 "never came
+   * back" sentinel.
+   *
+   * Tuning the breaker cannot fix this, and two attempts at fixing it inside
+   * the breaker were rejected before landing here. Closing an idle half-open
+   * circuit makes the run green by making the signal meaningless: measured, it
+   * reported `listenbrainz = ok` 45 seconds into a live 105-second outage.
+   *
+   * So the probe belongs where the suppression happens. When `probeWanted`
+   * says a provider's circuit is half-open, ONE caller per key gives up its
+   * cache hit and calls the provider instead, which is exactly the trial the
+   * breaker is waiting for.
+   *
+   * It is safe by construction rather than by tuning:
+   *   - the breaker itself caps concurrent trials at `successThreshold`, so a
+   *     provider that is still down sees two calls, not a stampede, however
+   *     many cache hits are converted;
+   *   - single-flight collapses concurrent probes on one key into one call;
+   *   - a probe that fails falls back to the SAME fresh row it would have
+   *     returned, as a normal hit, so no user pays for it;
+   *   - two successes close the circuit, which stops the probing.
+   *
+   * Late-bound because the cache is constructed before the provider clients
+   * whose breakers it has to ask about. Unset, nothing changes.
+   */
+  setProbeWanted(fn: (provider: ProviderName) => boolean): void {
+    this.#probeWanted = fn;
   }
 
   stats(provider: ProviderName): CacheStats {
@@ -145,6 +202,9 @@ export class CachedUpstream {
   async fetch<T>(spec: CacheFirstSpec<T>): Promise<CacheFirstResult<T>> {
     let expiredPayload: unknown;
     let hasExpiredPayload = false;
+    /** A FRESH row held back so a failed half-open probe costs the caller nothing. */
+    let probePayload: unknown;
+    let isProbe = false;
 
     if (spec.refresh !== true) {
       const entry = await this.#store.get(spec.provider, spec.key);
@@ -154,8 +214,15 @@ export class CachedUpstream {
         if (!expired) {
           try {
             const value = spec.parse(entry.payload);
-            this.#bump(spec.provider, "hits");
-            return { value, hit: true, stale: false };
+            if (this.#probeWanted?.(spec.provider) === true) {
+              // Spend this hit on the breaker's half-open trial. See
+              // setProbeWanted.
+              probePayload = entry.payload;
+              isProbe = true;
+            } else {
+              this.#bump(spec.provider, "hits");
+              return { value, hit: true, stale: false };
+            }
           } catch (err) {
             if (!(err instanceof MalformedPayloadError)) throw err;
             this.#bump(spec.provider, "poisoned");
@@ -168,7 +235,11 @@ export class CachedUpstream {
       }
     }
 
-    this.#bump(spec.provider, "misses");
+    // A probe found a usable row, so it is a hit however the call goes. Scoring
+    // it as a miss would let a provider outage quietly depress the Gate 2 warm
+    // hit rate with lookups the cache actually answered.
+    this.#bump(spec.provider, isProbe ? "probes" : "misses");
+    if (isProbe) this.#bump(spec.provider, "hits");
 
     // Provider and key are joined with a NUL so no provider name can collide
     // with the start of a key. Separators that can appear in a key are how two
@@ -188,6 +259,17 @@ export class CachedUpstream {
       // failure is our own bug or a poisoned write, and serving a stale row to
       // paper over it would hide the defect behind plausible data.
       if (err instanceof FillLoadError) {
+        // A failed probe is not a failed lookup. The row it gave up was fresh,
+        // so the caller gets exactly what it would have got had the probe never
+        // happened: a hit, not stale, no error. This is what makes converting a
+        // hit into a trial call free at the call site.
+        if (isProbe) {
+          try {
+            return { value: spec.parse(probePayload), hit: true, stale: false };
+          } catch {
+            // Fall through: an unparseable row is the more interesting failure.
+          }
+        }
         if (hasExpiredPayload) {
           try {
             const value = spec.parse(expiredPayload);

@@ -61,6 +61,16 @@ export const DEFAULT_RETRY: RetryPolicy = {
   maxRetryAfterMs: 5_000,
 };
 
+/**
+ * `resetTimeoutMs` is the probe interval AND therefore the worst-case recovery
+ * latency: a provider that comes back one millisecond after a re-open is not
+ * noticed for another 30 seconds. That is deliberate and it is what Gate 7's
+ * "recovery <60s" is spent on, with the remainder left as margin for the
+ * `successThreshold` trials and for whoever is watching to notice.
+ *
+ * `maxResetTimeoutMs` is intentionally not set, so the window does not widen.
+ * The reasoning is on `BreakerPolicy.maxResetTimeoutMs` in circuit-breaker.ts.
+ */
 export const DEFAULT_BREAKER: BreakerPolicy = {
   failureThreshold: 5,
   resetTimeoutMs: 30_000,

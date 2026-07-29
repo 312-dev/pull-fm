@@ -517,4 +517,98 @@ describe("CachedUpstream", () => {
     ).rejects.toBeInstanceOf(TypeError);
     expect(new MalformedPayloadError("p", "d")).toBeInstanceOf(Error);
   });
+
+  describe("half-open breaker probe", () => {
+    const spec = (load: () => Promise<unknown>) => ({
+      provider: "listenbrainz" as const,
+      key: "top-artists:u1",
+      ttlSeconds: 3600,
+      load,
+      parse: parseName,
+    });
+
+    it("spends a fresh hit on a probe while the circuit is half-open", async () => {
+      // The defect this closes: while a circuit is open the cache answers every
+      // request, so the provider is never called, so the breaker's half-open
+      // trial never happens and recovery waits for the cache TTL rather than
+      // for the 30s reset window. Measured as the 999 "never recovered"
+      // sentinel in load/scenarios/breaker.js.
+      const store = new MemoryCacheStore();
+      const cache = new CachedUpstream(store);
+      const load = vi.fn(() => Promise.resolve({ name: "warm" }));
+
+      await cache.fetch(spec(load));
+      expect(load).toHaveBeenCalledTimes(1);
+
+      // Circuit closed: the cache answers and the provider is left alone.
+      let halfOpen = false;
+      cache.setProbeWanted(() => halfOpen);
+      await cache.fetch(spec(load));
+      expect(load).toHaveBeenCalledTimes(1);
+
+      // Circuit half-open: the same fresh row is given up for a trial call.
+      halfOpen = true;
+      const probed = await cache.fetch(spec(load));
+      expect(load).toHaveBeenCalledTimes(2);
+      // `hit: false` because this answer came from the provider, which is the
+      // honest per-call report. The provider-level counter still scores it a
+      // hit: the row was there and the lookup was answered. The two are
+      // different questions and the Gate 2 rate wants the second one.
+      expect(probed).toEqual({ value: "warm", hit: false, stale: false });
+      expect(cache.stats("listenbrainz").probes).toBe(1);
+    });
+
+    it("costs the caller nothing when the probe fails", async () => {
+      // The row was fresh, so a failed trial must return it unchanged: same
+      // value, still a hit, not stale, no throw. Anything else would make
+      // recovery probing a user-visible risk and it would rightly be turned off.
+      const store = new MemoryCacheStore();
+      const cache = new CachedUpstream(store);
+
+      await cache.fetch(spec(() => Promise.resolve({ name: "warm" })));
+
+      cache.setProbeWanted(() => true);
+      const failing = vi.fn(() =>
+        Promise.reject(
+          new UpstreamError({
+            provider: "listenbrainz",
+            kind: "circuit_open",
+            message: "circuit open",
+          }),
+        ),
+      );
+      const result = await cache.fetch(spec(failing));
+
+      expect(failing).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({ value: "warm", hit: true, stale: false });
+    });
+
+    it("counts a probe as a hit, so recovery traffic cannot depress the Gate 2 rate", async () => {
+      const store = new MemoryCacheStore();
+      const cache = new CachedUpstream(store);
+      const load = vi.fn(() => Promise.resolve({ name: "warm" }));
+
+      await cache.fetch(spec(load)); // the one genuine miss
+      cache.setProbeWanted(() => true);
+      await cache.fetch(spec(load));
+      await cache.fetch(spec(load));
+
+      const stats = cache.stats("listenbrainz");
+      expect(stats.misses).toBe(1);
+      expect(stats.hits).toBe(2);
+      expect(stats.probes).toBe(2);
+      expect(stats.hitRate).toBeCloseTo(2 / 3);
+    });
+
+    it("does nothing at all when no predicate is set", async () => {
+      const store = new MemoryCacheStore();
+      const cache = new CachedUpstream(store);
+      const load = vi.fn(() => Promise.resolve({ name: "warm" }));
+
+      await cache.fetch(spec(load));
+      await cache.fetch(spec(load));
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(cache.stats("listenbrainz").probes).toBe(0);
+    });
+  });
 });

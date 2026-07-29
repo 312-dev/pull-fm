@@ -33,6 +33,7 @@ import {
   optString,
 } from "../json.js";
 import type { ProviderClientOptions } from "../provider-client.js";
+import type { CircuitBreaker } from "../circuit-breaker.js";
 import { ProviderClient } from "../provider-client.js";
 import type { Provider, ProviderStatus } from "../types.js";
 
@@ -193,6 +194,16 @@ export class LastfmClient implements Provider {
       headers: { ...headers, Accept: "application/json" },
       quota: opts.quota ?? LASTFM_QUOTA,
     });
+  }
+
+  /**
+   * The circuit breaker for the main API, so the cache can convert a fresh hit
+   * into the half-open trial call the breaker is waiting for. See
+   * `CachedUpstream.setProbeWanted`. Read-only in practice; nothing outside a
+   * test should be driving it.
+   */
+  get breaker(): CircuitBreaker {
+    return this.#http.breaker;
   }
 
   status(): ProviderStatus {
