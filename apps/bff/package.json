@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "node --watch --experimental-strip-types src/index.ts",
     "start": "node dist/index.js",
+    "pretest": "pnpm -w run build",
     "test": "vitest run",
     "openapi:emit": "tsc -p tsconfig.build.json && node dist/scripts/emit-openapi.js",
     "reap:unverified": "node dist/scripts/reap-unverified.js",
