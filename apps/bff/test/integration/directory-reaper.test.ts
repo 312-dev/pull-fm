@@ -212,7 +212,9 @@ describe("a sweep", () => {
     // its verify budget and this test 400s for the rest of the window. The
     // email was already randomised; the address has to be too, for the same
     // reason and against the same counter.
-    const ip = `10.${randomInt(256)}.${randomInt(256)}.${randomInt(1, 255)}`;
+    const octet = (min: number, max: number): string =>
+      String(randomInt(min, max));
+    const ip = `10.${octet(0, 256)}.${octet(0, 256)}.${octet(1, 255)}`;
     await ctx.app.inject({
       method: "POST",
       url: "/v1/auth/start",
