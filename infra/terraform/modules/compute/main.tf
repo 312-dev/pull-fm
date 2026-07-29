@@ -112,7 +112,26 @@ resource "hcloud_server" "app" {
     # Hetzner base-image refresh would otherwise show up as a plan that
     # replaces both BFF nodes. Rolling onto a new image is a deliberate act:
     # bump image_name, then terraform apply -replace one node at a time.
-    ignore_changes = [image]
+    #
+    # user_data is here for a sharper reason, learned by destroying a converged
+    # node with a firewall edit. `staging-env.sh up` mints a FRESH Tailscale key
+    # on every run and that key is interpolated into user_data, so without this
+    # line every apply rewrites user_data and every apply therefore REPLACES the
+    # server. Two ways that bites, and the second one is worse:
+    #
+    #   * any later apply - a firewall rule, a DNS record, a label - silently
+    #     becomes a rebuild of the running node.
+    #   * an apply run WITHOUT a key, which is what a plain `terraform apply`
+    #     outside the wrapper script is, replaces the node with one that has no
+    #     Tailscale at all. The firewall carries no rule for port 22, so the
+    #     replacement is unreachable the moment it finishes booting.
+    #
+    # Ignoring it is safe because the key is single-use and ephemeral: it is
+    # spent when the node joins, so the value in state authorises nothing and
+    # re-rendering it changes nothing about a node that has already booted.
+    # Changing cloud-init for real is then an explicit act, exactly like the
+    # image: edit the template, then `terraform apply -replace`.
+    ignore_changes = [image, user_data]
   }
 }
 

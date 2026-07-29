@@ -46,7 +46,35 @@ readonly PULLFM_SECRETS_VAULT="${PULLFM_OP_VAULT:-MCP}"
 # Redis it could never reach. Both halves now come from the same terraform
 # output (`redis_host`), passed in by the caller.
 readonly PULLFM_CACHE_PRIVATE_IP_DEFAULT="${PULLFM_CACHE_PRIVATE_IP:-10.20.1.21}"
-readonly PULLFM_WORKOS_CLIENT_ID="${PULLFM_WORKOS_CLIENT_ID:-client_01KYMZ05X60BJKZKY5RTA5YP8B}"
+# THE CLIENT ID AND THE API KEY ARE ONE PAIR AND THEY WERE MISMATCHED.
+#
+# The 1Password vault holds two WorkOS staging keys whose titles differ by a
+# prefix - `Pull.fm WorkOS Staging API Key` and `WorkOS Staging API Key` - and
+# they belong to two different WorkOS APPLICATIONS inside the same environment.
+# This file paired the client id of one with the API key of the other. That
+# combination authenticates successfully, which is what made it survive review
+# and every test: `POST /v1/auth/verify` returned 200 and a real access token.
+#
+# The token was then rejected by our own auth plugin on every subsequent
+# request, with the deliberately uniform 401 that says nothing about why.
+#
+# The reason is that WorkOS issues `iss` PER ENVIRONMENT and serves JWKS PER
+# APPLICATION. Its own discovery document is unambiguous, and it is the check
+# worth re-running if this ever moves:
+#
+#   GET https://api.workos.com/user_management/<any client in the env>/.well-known/openid-configuration
+#     issuer   -> https://api.workos.com/user_management/client_01KYMWRZ8BA37K6H268J4ZSVQD
+#     jwks_uri -> https://api.workos.com/sso/jwks/<that same client>
+#
+# So the issuer names ONE client whatever you ask with, and apps/bff derives its
+# expected issuer from WORKOS_CLIENT_ID. Only the application that WorkOS names
+# in `iss` can therefore be configured here, and its key is the item read below.
+# Both halves are addressed BY ITEM ID rather than by title, because the titles
+# differ by one word and picking the wrong one costs a working sign-in.
+readonly PULLFM_WORKOS_CLIENT_ID="${PULLFM_WORKOS_CLIENT_ID:-client_01KYMWRZ8BA37K6H268J4ZSVQD}"
+
+# `WorkOS Staging API Key`, the key belonging to the client id above.
+readonly PULLFM_WORKOS_OP_ITEM="${PULLFM_WORKOS_OP_ITEM:-qr6sfpfzskhpqtzbehw7kdheti}"
 readonly PULLFM_PUBLIC_BASE_URL="${PULLFM_PUBLIC_BASE_URL:-https://api-staging.pull.fm}"
 readonly PULLFM_MB_USER_AGENT="${PULLFM_MB_USER_AGENT:-PullFM/0.1.0 (ope@312.dev)}"
 
@@ -145,7 +173,7 @@ pullfm_render_staging_secrets() {
   redis_quota_pw="$(_pullfm_field 'pull-fm/staging/REDIS_QUOTA_PASSWORD' 'password')" || return 1
   kek="$(_pullfm_field 'pull-fm/staging/CREDENTIAL_KEK' 'password')" || return 1
   kek_id="$(_pullfm_field 'pull-fm/staging/CREDENTIAL_KEK' 'kek_id')" || return 1
-  workos_key="$(_pullfm_field 'Pull.fm WorkOS Staging API Key' 'password')" || return 1
+  workos_key="$(_pullfm_field "${PULLFM_WORKOS_OP_ITEM}" 'password')" || return 1
   workos_webhook="$(_pullfm_field 'pull-fm/staging/WORKOS_WEBHOOK_SECRET' 'credential')" || return 1
 
   # The SeatGeek client id lives in the item's NOTES ("client id = <35 chars>")

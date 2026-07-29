@@ -383,6 +383,30 @@ cmd_converge() {
     "${secrets}/bff.env" "${secrets}/origin.pem" "${secrets}/origin.key" \
     "${secrets}/origin-pull-ca.pem"
 
+  # infra/observability ships alongside the app directory rather than inside it,
+  # so it is sent as a second tar into the same working directory. bootstrap.sh
+  # installs from ./observability if it is there.
+  tar czf - -C "${ROOT}/infra" observability |
+    ssh_node "${app_ip}" "tar xzf - -C /tmp/pullfm-config"
+
+  # THE ALERT URL IS A CREDENTIAL AND TRAVELS LIKE ONE. On ntfy the topic name
+  # is the entire access control, so a URL in a log or an argv is a channel
+  # anyone can read and forge into. install-alert-env.sh --stdout resolves it
+  # from 1Password and writes it to stdout and nowhere else; it is piped
+  # straight into a root-owned 0600 file over the same SSH channel the other
+  # secrets use, and never through Terraform user_data, which is persisted in
+  # state and readable from the Hetzner API for the life of the server.
+  #
+  # Non-fatal. An unarmed channel is a real gap and bootstrap.sh says so loudly,
+  # but it is not a reason to leave the environment without a serving origin.
+  if "${ROOT}/infra/observability/install-alert-env.sh" --stdout 2>/dev/null |
+    ssh_node "${app_ip}" \
+      "sudo install -m 0600 -o root -g root /dev/stdin /etc/pullfm/alert.env"; then
+    log "  alert channel armed from 1Password"
+  else
+    warn "  could not arm /etc/pullfm/alert.env; the node will run its timers and notify nobody"
+  fi
+
   # The TLS material is placed separately: it is group readable by www-data
   # rather than root-only, which is a different mode from the env file and
   # collapsing the two would loosen one of them.

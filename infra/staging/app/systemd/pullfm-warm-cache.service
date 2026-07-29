@@ -10,6 +10,8 @@ Requires=docker.service
 # OnFailure. Once pullfm-deploy has written the file once, it stays written.
 ConditionPathExists=/etc/pullfm/deploy.env
 
+OnFailure=pullfm-job-alert@%n.service
+
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/pullfm-job warm-cache
@@ -20,7 +22,6 @@ ExecStart=/usr/local/bin/pullfm-job warm-cache
 # unbounded, so they are logged and not alerted. Exit 1 is not in this list on
 # purpose: that is the run that could not start, and it becomes a unit failure.
 SuccessExitStatus=2
-OnFailure=pullfm-job-alert@%n.service
 
 # The warmer's own whole-run deadline is 20 minutes (CACHE_WARMER_DEFAULTS.
 # runDeadlineMs). This is that plus two minutes of shutdown margin, and it is
@@ -30,4 +31,21 @@ OnFailure=pullfm-job-alert@%n.service
 # them as two jobs. systemd will not start a second copy of a running oneshot,
 # and the advisory lock covers the case of a second node; this bound is what
 # stops a wedged run from being the thing that needs either of them.
-RuntimeMaxSec=1320
+TimeoutStartSec=1320
+
+# systemd IGNORES BOTH OF THE DIRECTIVES THAT USED TO BE HERE, and it says so
+# on every daemon-reload, where nobody was reading:
+#
+#   Unknown key name 'OnFailure' in section 'Service', ignoring.
+#   RuntimeMaxSec= has no effect in combination with Type=oneshot. Ignoring.
+#
+# OnFailure= is a [Unit] directive. Sitting in [Service] it parsed, logged, and
+# did nothing, so every one of these jobs was running with NO alert path at all
+# - the failure mode the whole exit-code contract exists to make visible. It is
+# now in [Unit] above.
+#
+# RuntimeMaxSec= bounds a service that has REACHED the running state, and a
+# Type=oneshot service never does: it is in "activating" from ExecStart until
+# ExecStart returns. The directive that bounds that window is TimeoutStartSec=,
+# which is what pullfm-deploy.service already used correctly. A wedged job was
+# therefore unbounded.

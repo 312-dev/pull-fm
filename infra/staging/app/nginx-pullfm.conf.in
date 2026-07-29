@@ -45,9 +45,29 @@
 #      load balancer does not change one value in audit_log.ip or one decision
 #      in the per-IP rate limiter.
 #
-#   4. Authenticated Origin Pulls uses a CA shared by every Cloudflare
-#      customer, so `ssl_verify_client on` alone proves only that the peer is
-#      *someone's* Cloudflare. The subject check closes that gap.
+#   4. AUTHENTICATED ORIGIN PULLS DOES NOT PROVE THE TRAFFIC CAME FROM OUR
+#      ZONE, AND THE SUBJECT CHECK BELOW DOES NOT CHANGE THAT. Zone-level
+#      origin pulls present a certificate that Cloudflare issues to every
+#      customer: the CA is shared and so is the subject,
+#      `CN=origin-pull.cloudflare.net`. Checking the subject therefore narrows
+#      "a peer holding any certificate this nginx trusts" to "a peer holding
+#      the shared Cloudflare origin-pull certificate", which is where it
+#      already was. It excludes an unrelated client certificate. It does not
+#      exclude a different Cloudflare customer proxying our origin IP.
+#
+#      This comment used to say the subject check "closes that gap". It does
+#      not, and the wrong version was worse than no comment, because the next
+#      reader counts it as a layer. What actually carries the weight on the
+#      direct path is the Hetzner firewall restricting inbound 80/443 to
+#      Cloudflare's published ranges, refreshed by pullfm-cf-ranges.timer, plus
+#      the $cloudflare_edge allowlist below - and both of those admit any
+#      Cloudflare customer too.
+#
+#      The control that would genuinely bind this origin to this zone is a
+#      PER-ZONE custom origin-pull certificate, which has a subject we choose.
+#      Until that exists, treat "reached the origin" as proving only "came
+#      through Cloudflare", and rely on application authentication for
+#      anything that matters.
 # ---------------------------------------------------------------------------
 
 upstream pullfm_bff {
@@ -145,15 +165,29 @@ server {
         return 403;
     }
 
-    # Shared-CA gap: every Cloudflare customer's origin-pull certificate
-    # validates against the same CA, so the issuer proves the peer is
-    # Cloudflare but not that it is fronting *our* zone. The subject is the
-    # only distinguishing field available at this layer.
+    # Shared CA AND SHARED SUBJECT. Every Cloudflare customer's zone-level
+    # origin-pull certificate validates against the same CA and carries this
+    # same CN, so neither field distinguishes our zone from anyone else's. This
+    # check rejects a client certificate that is not the Cloudflare origin-pull
+    # certificate at all, and nothing more. It is NOT the layer that makes the
+    # origin private; see item 4 in the header for what is, and for what a
+    # per-zone certificate would buy.
     if ($ssl_client_s_dn !~ "CN=origin-pull.cloudflare.net") {
         return 403;
     }
 
     client_max_body_size 256k;
+
+    # /metrics CARRIES NO AUTHENTICATION IN THE APPLICATION. It is annotated
+    # `authz: "system"` and its own comment says it must be unreachable from the
+    # edge - but "unreachable" was nobody's job until this block, because the
+    # location below proxies everything. Scrape it from the node or over the
+    # tailnet instead. 404 rather than 403 so the edge does not confirm that a
+    # metrics endpoint exists here at all.
+    location = /metrics {
+        deny all;
+        return 404;
+    }
 
     location / {
         proxy_pass http://pullfm_bff;

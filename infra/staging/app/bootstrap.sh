@@ -26,6 +26,19 @@ for f in /etc/pullfm/bff.env /etc/ssl/pullfm/origin.pem /etc/ssl/pullfm/origin.k
   }
 done
 
+# /etc/pullfm/alert.env is NOT in that list, and the asymmetry is deliberate.
+# The four files above are ones the node cannot serve traffic without, so a
+# missing one must stop the bootstrap. The alert channel is one the node can
+# serve traffic without, so refusing to bootstrap over it would trade a working
+# origin for a notification channel. It is still a real gap, so it is loud
+# rather than fatal: an unarmed node runs its timers and tells nobody when they
+# fail, which is the exact defect this environment exists to stop shipping.
+if [ ! -f /etc/pullfm/alert.env ]; then
+  echo "WARNING: /etc/pullfm/alert.env is missing. The watchdog and the four" >&2
+  echo "job timers will run and will NOT be able to notify anyone." >&2
+  echo "Arm it with: infra/observability/install-alert-env.sh --stdout | ssh ..." >&2
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq docker.io docker-compose-v2 nginx
@@ -169,9 +182,35 @@ for job in warm-cache sweep-expired purge-audit reap-unverified; do
   install -m 0644 "systemd/pullfm-${job}.timer" /etc/systemd/system/
 done
 
+# --- notification channel and watchdog -------------------------------------
+# Shipped from infra/observability/, which converge places alongside this
+# directory as ./observability. The alert sender is installed even when
+# alert.env is absent: the four job units above name pullfm-job-alert@ in their
+# OnFailure, and a missing /usr/local/bin/pullfm-alert would turn a job failure
+# into a second, more confusing failure of the thing meant to report it.
+#
+# The watchdog is what turns a metric CONDITION into a notification, so without
+# it the four timers can only report their own exit codes and nothing reports a
+# limiter that stopped pacing or a container that stopped answering.
+if [ -d observability ]; then
+  install -m 0755 observability/pullfm-alert /usr/local/bin/pullfm-alert
+  install -m 0755 observability/pullfm-watchdog /usr/local/bin/pullfm-watchdog
+  install -m 0644 observability/systemd/pullfm-watchdog.service /etc/systemd/system/
+  install -m 0644 observability/systemd/pullfm-watchdog.timer /etc/systemd/system/
+  # ReadWritePaths= in the watchdog unit names both of these, and a unit whose
+  # ReadWritePaths does not exist fails to start rather than creating it.
+  install -d -m 0755 /var/lib/pullfm /var/log/pullfm
+else
+  echo "WARNING: observability/ was not shipped; no watchdog will be installed" >&2
+fi
+
 systemctl daemon-reload
 systemctl enable --now pullfm-cf-ranges.timer
 systemctl enable --now pullfm-deploy.timer
+
+if [ -x /usr/local/bin/pullfm-watchdog ]; then
+  systemctl enable --now pullfm-watchdog.timer
+fi
 
 # `enable --now` on a timer, never on the .service. Starting the service here
 # would run every job once during bootstrap, before the first deploy has put an
