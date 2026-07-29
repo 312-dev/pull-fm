@@ -16,6 +16,10 @@ export interface User {
   readonly displayName: string | null;
   readonly createdAt: string;
   readonly deletedAt: string | null;
+  /** The mechanism that last proved control of the account. */
+  readonly authMethod: string;
+  readonly emailVerifiedAt: string | null;
+  readonly lastAuthenticatedAt: string | null;
 }
 
 interface UserRow {
@@ -25,6 +29,9 @@ interface UserRow {
   display_name: string | null;
   created_at: Date;
   deleted_at: Date | null;
+  auth_method: string;
+  email_verified_at: Date | null;
+  last_authenticated_at: Date | null;
 }
 
 function toUser(row: UserRow): User {
@@ -35,10 +42,14 @@ function toUser(row: UserRow): User {
     displayName: row.display_name,
     createdAt: row.created_at.toISOString(),
     deletedAt: row.deleted_at?.toISOString() ?? null,
+    authMethod: row.auth_method,
+    emailVerifiedAt: row.email_verified_at?.toISOString() ?? null,
+    lastAuthenticatedAt: row.last_authenticated_at?.toISOString() ?? null,
   };
 }
 
-const COLUMNS = `id, workos_user_id, email, display_name, created_at, deleted_at`;
+const COLUMNS = `id, workos_user_id, email, display_name, created_at, deleted_at,
+                 auth_method, email_verified_at, last_authenticated_at`;
 
 export interface UpsertInput {
   readonly workosUserId: string;
@@ -108,6 +119,57 @@ export class UserService {
       `SELECT ${COLUMNS} FROM users
         WHERE id = $1 AND deleted_at IS NULL`,
       [id],
+    );
+    const row = rows[0];
+    return row === undefined ? null : toUser(row);
+  }
+
+  /**
+   * Records a completed magic-link sign-in.
+   *
+   * `email_verified_at` is set here rather than by a separate verification step
+   * because completing the exchange IS the proof: the code only reaches someone
+   * who can read the mailbox. Both timestamps move together for that reason.
+   *
+   * The WHERE clause carries `deleted_at IS NULL` alongside the id, in the same
+   * statement, so a sign-in cannot write to a deleted account's row. Updating
+   * zero rows is the correct outcome there, not an error: the caller's own
+   * subject lookup is what refuses the session.
+   */
+  async recordAuthentication(id: string): Promise<void> {
+    await this.#db.query(
+      `UPDATE users
+          SET last_authenticated_at = now(),
+              email_verified_at     = now()
+        WHERE id = $1 AND deleted_at IS NULL`,
+      [id],
+    );
+  }
+
+  /**
+   * Updates the locally cached profile.
+   *
+   * WorkOS owns the profile and is written first; this is the read model the
+   * account screen renders from, so it is only reached once the identity
+   * provider has accepted the change.
+   *
+   * Ownership is a predicate in the same statement as the id (THREAT-MODEL M11
+   * / OWASP API #1), not a check performed beforehand. A caller who is not this
+   * subject never reaches here, and if the id were ever wrong the UPDATE
+   * affects nothing rather than writing to a stranger's row. Null is returned
+   * for "no such live row", and the route turns that into 404 rather than 403,
+   * so the response cannot be used to learn which ids exist.
+   */
+  async updateProfile(
+    id: string,
+    displayName: string | null,
+  ): Promise<User | null> {
+    const { rows } = await this.#db.query<UserRow>(
+      `UPDATE users
+          SET display_name = $2
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING ${COLUMNS}`,
+      [id, displayName],
     );
     const row = rows[0];
     return row === undefined ? null : toUser(row);

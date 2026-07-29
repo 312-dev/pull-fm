@@ -117,6 +117,51 @@ const schema = z.object({
   WORKOS_API_KEY: z.string().min(1),
 
   /**
+   * Magic Auth abuse budgets, counted in the QUOTA Redis (`noeviction`).
+   *
+   * Two dimensions, because they stop different attacks and neither one
+   * subsumes the other:
+   *
+   *   PER_IP     one host enumerating or spraying many addresses.
+   *   PER_EMAIL  many hosts pointed at one address, which is mailbox flooding
+   *              and is the shape a botnet produces. A per-IP limit alone does
+   *              not see it at all.
+   *
+   * The verify budget is separate and much tighter, because a Magic Auth code
+   * is short and guessable at volume in a way that a request for one is not.
+   */
+  AUTH_MAGIC_AUTH_PER_IP_MAX: z.coerce.number().int().positive().default(10),
+  AUTH_MAGIC_AUTH_PER_EMAIL_MAX: z.coerce.number().int().positive().default(5),
+  AUTH_MAGIC_AUTH_VERIFY_MAX: z.coerce.number().int().positive().default(10),
+  AUTH_MAGIC_AUTH_WINDOW_S: z.coerce.number().int().positive().default(3600),
+
+  /**
+   * Floor on how long POST /v1/auth/start takes to answer, in milliseconds.
+   *
+   * The route must not disclose whether an address has an account, and the
+   * response body alone does not achieve that: an upstream that answers a known
+   * address in 400ms and an unknown one in 40ms leaks the same fact through the
+   * clock. Padding every response up to a fixed floor removes the correlation
+   * that a caller can actually measure. It is not a constant-time guarantee and
+   * is not claimed as one; see services/magic-auth.ts.
+   */
+  AUTH_START_FLOOR_MS: z.coerce.number().int().nonnegative().default(250),
+
+  /**
+   * Lifetime of the sealed session cookie.
+   *
+   * Bounds the cookie, not the WorkOS session: the access token inside it
+   * expires on WorkOS's schedule and the refresh token is what the cookie is
+   * really carrying. This is the outer limit past which the cookie is refused
+   * without decrypting anything.
+   */
+  SESSION_COOKIE_TTL_S: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30 * 24 * 3600),
+
+  /**
    * Shared secret for `POST /v1/webhooks/workos` signature verification.
    *
    * Optional in configuration but never optional in effect: without it the
@@ -284,6 +329,28 @@ export interface Config extends Omit<RawConfig, "CREDENTIAL_KEKS"> {
   readonly apiTokenPrefix: "pfm_live" | "pfm_test";
   /** True when the events route has both a credential and the switch on. */
   readonly eventsEnabled: boolean;
+  /** Name of the sealed session cookie. `__Host-` prefixed where it can be. */
+  readonly sessionCookieName: string;
+  /** Whether the session cookie carries `Secure`. False only on plain-HTTP local. */
+  readonly sessionCookieSecure: boolean;
+}
+
+/**
+ * The session cookie name, which is a security control rather than a label.
+ *
+ * The `__Host-` prefix is enforced by the browser, not by us: a cookie carrying
+ * it is refused unless it is `Secure`, has `Path=/`, and has NO `Domain`
+ * attribute. That last part is the one that matters here. Without it, a
+ * compromised or hostile sibling host under the registrable domain can set a
+ * `Domain=.pull.fm` cookie of the same name and shadow ours, which is a session
+ * fixation vector that no amount of server-side care detects.
+ *
+ * It cannot be used over plain HTTP, so local development gets the unprefixed
+ * name. The prefix is therefore derived from the deployment rather than
+ * configured, so a staging or production node cannot be talked out of it.
+ */
+export function sessionCookieNameFor(secure: boolean): string {
+  return secure ? "__Host-pullfm_session" : "pullfm_session";
 }
 
 /** The only host WorkOS identity material may ever be fetched from. */
@@ -380,6 +447,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
   }
 
+  // Derived, never configured: see sessionCookieNameFor. A deployment that is
+  // not local is reached over TLS, so the cookie gets `Secure` and therefore
+  // can carry the `__Host-` prefix.
+  const sessionCookieSecure = cfg.DEPLOY_ENV !== "local";
+
   return {
     ...cfg,
     isProduction,
@@ -387,5 +459,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workosApiBaseUrl,
     apiTokenPrefix: cfg.DEPLOY_ENV === "production" ? "pfm_live" : "pfm_test",
     eventsEnabled: cfg.SEATGEEK_ENABLED && cfg.SEATGEEK_CLIENT_ID !== undefined,
+    sessionCookieSecure,
+    sessionCookieName: sessionCookieNameFor(sessionCookieSecure),
   };
 }

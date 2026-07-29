@@ -17,6 +17,8 @@ import { AuditLog } from "./lib/audit.js";
 import { Database } from "./lib/db.js";
 import { SigningKeys } from "./lib/keys.js";
 import { createRedis } from "./lib/redis.js";
+import { SessionCookieCipher } from "./lib/session-cookie.js";
+import { MagicAuthService } from "./services/magic-auth.js";
 import {
   ConnectionService,
   type ProviderRegistry,
@@ -93,6 +95,10 @@ export function buildServices(
     throw new Error("active KEK missing after validation");
   }
   const keys = new SigningKeys(activeKek);
+  // Derived from the same root under its own HKDF label, for the reasons in
+  // lib/keys.ts: one secret to escrow, domain-separated outputs, and a KEK
+  // rotation that costs a re-sign-in rather than a failed rotation.
+  const sessionCookies = new SessionCookieCipher(activeKek);
 
   const workos = new WorkOsClient({
     baseUrl: cfg.workosApiBaseUrl,
@@ -131,9 +137,20 @@ export function buildServices(
     cacheRedis,
     quotaRedis,
     keys,
+    sessionCookies,
     audit: new AuditLog(db, log as never),
     users,
     tokens,
+    // Every counter goes to the quota instance, never the cache: on an
+    // `allkeys-lru` instance a cache-fill event would silently disable the
+    // send and verify budgets, which on this route means an open mail relay.
+    magicAuth: new MagicAuthService(workos, quotaRedis, {
+      perIpMax: cfg.AUTH_MAGIC_AUTH_PER_IP_MAX,
+      perEmailMax: cfg.AUTH_MAGIC_AUTH_PER_EMAIL_MAX,
+      verifyMax: cfg.AUTH_MAGIC_AUTH_VERIFY_MAX,
+      windowSeconds: cfg.AUTH_MAGIC_AUTH_WINDOW_S,
+      floorMs: cfg.AUTH_START_FLOOR_MS,
+    }),
     connections,
     wishlist: new WishlistService(db, keys),
     deletion: new DeletionService({ db, workos, cacheRedis, quotaRedis }),

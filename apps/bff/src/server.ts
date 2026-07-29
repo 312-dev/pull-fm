@@ -157,6 +157,11 @@ export async function buildServer(
       "Authorization",
       "Idempotency-Key",
       "X-Request-Id",
+      // The cookie transport's CSRF control (plugins/auth.ts). It must be
+      // allowlisted here or a legitimate browser client's preflight fails, and
+      // it must NOT be allowlisted for a wildcard origin, which loadConfig
+      // already refuses outside local development.
+      "X-Pullfm-Session",
     ],
     exposedHeaders: [
       "X-Request-Id",
@@ -295,6 +300,10 @@ export async function buildServer(
     users: opts.services.users,
     tokens: opts.services.tokens,
     quotaRedis: opts.services.quotaRedis,
+    sessionCookie: {
+      cipher: opts.services.sessionCookies,
+      name: cfg.sessionCookieName,
+    },
   });
 
   await app.register(registerHealthRoutes, {

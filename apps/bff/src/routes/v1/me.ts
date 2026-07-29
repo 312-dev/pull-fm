@@ -1,7 +1,7 @@
 /**
- * Identity, erasure, and portability.
+ * Identity, profile, erasure, and portability.
  *
- * Three routes, two of them legally mandated and one of them irreversible.
+ * Five routes, two of them legally mandated and one of them irreversible.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -38,10 +38,17 @@ export function registerMeRoutes(
               displayName: { type: ["string", "null"] },
               createdAt: { type: "string", format: "date-time" },
               authMethod: { type: "string", enum: ["session", "token"] },
+              signInMethod: {
+                type: "string",
+                description:
+                  "How this account signs in. Magic link only; see the constraint on users.auth_method in migration 0005 and the reasoning in routes/v1/auth.ts.",
+              },
+              emailVerifiedAt: { type: ["string", "null"] },
+              lastAuthenticatedAt: { type: ["string", "null"] },
               connectionCount: { type: "integer" },
               wishlistCount: { type: "integer" },
             },
-            required: ["id", "createdAt", "authMethod"],
+            required: ["id", "createdAt", "authMethod", "signInMethod"],
           },
           ...problemResponses(400, 401, 403, 429),
         },
@@ -78,8 +85,134 @@ export function registerMeRoutes(
         displayName: user.displayName,
         createdAt: user.createdAt,
         authMethod: subject.method,
+        signInMethod: user.authMethod,
+        emailVerifiedAt: user.emailVerifiedAt,
+        lastAuthenticatedAt: user.lastAuthenticatedAt,
         connectionCount: Number(counts?.connections ?? 0),
         wishlistCount: Number(counts?.wishlist ?? 0),
+      };
+    },
+  );
+
+  /**
+   * Updates the profile.
+   *
+   * Session only, like every other write. A personal API token is read-only,
+   * and letting one rename the account would break the asymmetry that makes a
+   * leaked token bounded: the display name is what a user recognises their own
+   * account by, so an attacker who can change it can disguise the compromise.
+   *
+   * The write is ordered identity-provider first, local row second, because
+   * WorkOS owns the profile and the local row is the read model rendered from
+   * it. Failing after the upstream write leaves the local row briefly stale,
+   * which the next sign-in repairs; failing in the other order would leave us
+   * displaying a name the identity provider rejected, permanently.
+   *
+   * Ownership is a predicate in the same UPDATE as the id (services/users.ts),
+   * so there is no window between deciding the caller owns the row and writing
+   * to it, and no id is ever taken from the request.
+   */
+  app.patch(
+    "/me",
+    {
+      preValidation: app.requireAuth({ allow: ["session"] }),
+      schema: {
+        operationId: "updateMe",
+        summary: "Update the account profile",
+        description:
+          "Session only; personal API tokens are read-only and cannot rename the account they can read. The name is written to the WorkOS User Management API first and mirrored locally only once that succeeds. An empty body is valid and changes nothing, which makes the route safe to call idempotently.",
+        tags: ["me"],
+        body: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            firstName: { type: ["string", "null"], maxLength: 128 },
+            lastName: { type: ["string", "null"], maxLength: 128 },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            properties: {
+              id: { type: "string", format: "uuid" },
+              email: { type: ["string", "null"] },
+              displayName: { type: ["string", "null"] },
+              createdAt: { type: "string", format: "date-time" },
+            },
+            required: ["id", "createdAt"],
+          },
+          ...problemResponses(400, 401, 403, 404, 422, 429, 503),
+        },
+        ...annotate({
+          authz: "user-scoped",
+          dast: "exclude",
+          bola: {
+            strategy: "implicit-subject",
+            objectType: "subject",
+            deny: [401],
+          },
+        }),
+      },
+    },
+    async (request) => {
+      const subject = subjectOf(request);
+      const patch = request.body as {
+        firstName?: string | null;
+        lastName?: string | null;
+      };
+
+      const touchesName =
+        Object.hasOwn(patch, "firstName") || Object.hasOwn(patch, "lastName");
+
+      // Nothing to write. Returning the current profile rather than 400 keeps
+      // the route idempotent for a client that retries a no-op patch, which is
+      // the mobile-on-a-flaky-network case the whole API is designed around.
+      if (!touchesName) {
+        const current = await services.users.findActiveById(subject.userId);
+        if (current === null) throw errors.notFound();
+        return {
+          id: current.id,
+          email: current.email,
+          displayName: current.displayName,
+          createdAt: current.createdAt,
+        };
+      }
+
+      const updated = await services.workos.updateUser(subject.workosUserId, {
+        ...(Object.hasOwn(patch, "firstName")
+          ? { firstName: normalizeName(patch.firstName) }
+          : {}),
+        ...(Object.hasOwn(patch, "lastName")
+          ? { lastName: normalizeName(patch.lastName) }
+          : {}),
+      });
+
+      const displayName =
+        [updated.firstName, updated.lastName]
+          .filter((p): p is string => p !== null && p.length > 0)
+          .join(" ") || null;
+
+      const user = await services.users.updateProfile(
+        subject.userId,
+        displayName,
+      );
+      // 404, not 403. The row is gone (a deletion that raced this request), and
+      // the two are deliberately indistinguishable everywhere in this API so a
+      // response cannot be used to learn which ids exist.
+      if (user === null) throw errors.notFound();
+
+      await services.audit.record({
+        userId: user.id,
+        action: "account.profile_updated",
+        outcome: "ok",
+        ip: request.ip,
+      });
+
+      return {
+        id: user.id,
+        email: user.email,
+        displayName: user.displayName,
+        createdAt: user.createdAt,
       };
     },
   );
@@ -353,6 +486,18 @@ export function registerMeRoutes(
       );
     },
   );
+}
+
+/**
+ * Trims a supplied name, mapping "cleared" and "blank" onto the same null.
+ *
+ * A name of spaces is not a name, and storing one produces an account that
+ * renders as empty while claiming to have a display name.
+ */
+function normalizeName(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 const BACKUP_NOTICE =

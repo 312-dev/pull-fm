@@ -29,7 +29,16 @@ import type { Database } from "./db.js";
  */
 export type AuditAction =
   | "auth.callback"
+  // Magic-link sign-in. `subjectRef` on these carries a TRUNCATED SHA-256 of
+  // the address, never the address: these rows deliberately outlive the user
+  // (there is no foreign key, see migration 0002), so putting an email here
+  // would create a record of a person that survives their own erasure request.
+  | "auth.magic_auth.requested"
+  | "auth.magic_auth.verified"
+  | "auth.magic_auth.failed"
+  | "auth.session.refreshed"
   | "auth.session.revoked"
+  | "account.profile_updated"
   | "connection.created"
   | "connection.deleted"
   | "connection.connect_started"

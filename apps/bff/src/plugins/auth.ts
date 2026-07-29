@@ -9,6 +9,29 @@
  *   Token     A personal API token (`pfm_live_...`), verified by digest against
  *             `api_tokens`. Read-only, scoped, rate limited per token.
  *
+ * A session arrives over one of TWO TRANSPORTS, which is not the same as being
+ * a third credential type and must not be allowed to become one:
+ *
+ *   Authorization: Bearer <jwt>   what a mobile client sends.
+ *   the sealed session cookie     what a browser client sends, because anything
+ *                                 JavaScript can read an XSS can exfiltrate.
+ *
+ * The cookie is opened, the access token is taken OUT of it, and that token
+ * goes through exactly the same `fromSession` verification a bearer token goes
+ * through: same JWKS, same issuer and audience checks, same revocation deny
+ * list, same active-subject lookup. Nothing is trusted because it came from a
+ * cookie. See lib/session-cookie.ts for why the cookie is encrypted rather
+ * than signed.
+ *
+ * Cookies bring CSRF, which bearer tokens structurally cannot have, so two
+ * independent controls apply and both are needed. `SameSite=Strict` on the
+ * cookie itself is the first. The second is here: a cookie-borne session is
+ * only honoured when the request also carries the `X-Pullfm-Session` header.
+ * A cross-site form post cannot set a custom header at all, and a cross-origin
+ * XHR that tries triggers a CORS preflight, which this API answers only for the
+ * exact origins in CORS_ORIGINS. Relying on SameSite alone would put the whole
+ * control in browser behaviour we do not own and cannot test here.
+ *
  * The asymmetry is the point. A personal token cannot mint another token,
  * cannot start or delete a connection, and cannot delete the account. If it
  * could, a leaked read-only token would be a persistence mechanism: the
@@ -33,8 +56,19 @@ import type { Redis } from "ioredis";
 
 import { errors } from "../lib/errors.js";
 import { incrementWindow } from "../lib/redis.js";
+import { readCookie, type SessionCookieCipher } from "../lib/session-cookie.js";
 import type { TokenService } from "../services/tokens.js";
 import type { UserService } from "../services/users.js";
+
+/**
+ * The header a cookie-authenticated request must carry.
+ *
+ * Its VALUE is irrelevant and is deliberately not checked: the security
+ * property is that a cross-site attacker cannot cause the header to be sent at
+ * all, not that they cannot guess a value. Checking a value would imply a
+ * secret that this is not, and would invite someone to treat it as one.
+ */
+export const SESSION_TRANSPORT_HEADER = "x-pullfm-session";
 
 /** WorkOS signs access tokens with RS256. Anything else is a downgrade. */
 const ALLOWED_ALGORITHMS = ["RS256"] as const;
@@ -88,6 +122,14 @@ export interface AuthPluginOptions {
   readonly quotaRedis: Redis;
   /** Fails closed when the quota store is unreachable. */
   readonly failClosed?: boolean;
+  /**
+   * Opens the sealed session cookie. Absent disables the cookie transport
+   * entirely, which is a valid deployment: bearer-only is the stricter mode.
+   */
+  readonly sessionCookie?: {
+    readonly cipher: SessionCookieCipher;
+    readonly name: string;
+  };
 }
 
 /** Prefix under which locally revoked session ids are held. */
@@ -336,18 +378,59 @@ async function authPlugin(
         );
       }
 
+      // Transport resolution. The Authorization header wins outright when it
+      // is present: a request that sends both is a client with a stale cookie
+      // and a fresh token, and honouring the explicit credential is the least
+      // surprising answer. It also means the cookie can never silently upgrade
+      // a request whose bearer token was rejected.
       const header = request.headers.authorization;
-      if (typeof header !== "string" || !header.startsWith("Bearer ")) {
+      let credential: string | null = null;
+      let viaCookie = false;
+
+      if (typeof header === "string") {
+        if (!header.startsWith("Bearer ")) throw errors.unauthorized();
+        credential = header.slice("Bearer ".length).trim();
+      } else if (opts.sessionCookie !== undefined) {
+        const sealed = readCookie(
+          request.headers.cookie,
+          opts.sessionCookie.name,
+        );
+        if (sealed !== null) {
+          // CSRF control 2 of 2. See the header note at the top of this file:
+          // the absence of the header is what a cross-site request cannot fix.
+          if (request.headers[SESSION_TRANSPORT_HEADER] === undefined) {
+            throw errors.forbidden(
+              `A cookie session requires the ${SESSION_TRANSPORT_HEADER} header. ` +
+                "This is the cross-site request forgery control; add the header to your client.",
+            );
+          }
+          const opened = opts.sessionCookie.cipher.open(sealed);
+          // A cookie that does not open is treated exactly like no cookie at
+          // all. It has been tampered with, sealed under a rotated key, or has
+          // passed its outer expiry, and the caller must not be able to tell
+          // which.
+          if (opened === null) throw errors.unauthorized();
+          credential = opened.accessToken;
+          viaCookie = true;
+        }
+      }
+
+      if (credential === null || credential.length === 0) {
         throw errors.unauthorized();
       }
-      const credential = header.slice("Bearer ".length).trim();
-      if (credential.length === 0) throw errors.unauthorized();
 
       // The prefix decides which verifier runs. A personal token is never fed
       // to the JWT verifier and a JWT is never hashed against api_tokens, so
       // there is no path where one credential type is accepted where the other
       // was required.
       const looksLikeApiToken = credential.startsWith("pfm_");
+
+      // A personal API token has no business inside a session cookie. It could
+      // only get there by our own code sealing one, which nothing does, so this
+      // is a structural assertion rather than an expected case: without it, a
+      // future bug that sealed the wrong value would silently grant a read-only
+      // credential the cookie transport's CSRF surface.
+      if (viaCookie && looksLikeApiToken) throw errors.unauthorized();
 
       if (looksLikeApiToken) {
         if (!allow.includes("token")) {

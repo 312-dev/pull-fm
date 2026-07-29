@@ -14,11 +14,13 @@ import type { Config } from "../config.js";
 import type { AuditLog } from "../lib/audit.js";
 import type { Database } from "../lib/db.js";
 import type { SigningKeys } from "../lib/keys.js";
+import type { SessionCookieCipher } from "../lib/session-cookie.js";
 import type { ConnectionService } from "../services/connections.js";
 import type { DeletionService } from "../services/deletion.js";
 import type { DiscoveryService } from "../services/discovery.js";
 import type { EventsService } from "../services/events.js";
 import type { ExportService } from "../services/export.js";
+import type { MagicAuthService } from "../services/magic-auth.js";
 import type { TokenService } from "../services/tokens.js";
 import type { UserService } from "../services/users.js";
 import type { UpstreamBundle } from "../services/upstream.js";
@@ -31,8 +33,12 @@ export interface Services {
   readonly cacheRedis: Redis;
   readonly quotaRedis: Redis;
   readonly keys: SigningKeys;
+  /** Seals and opens the session cookie. The browser transport for a session. */
+  readonly sessionCookies: SessionCookieCipher;
   readonly audit: AuditLog;
   readonly users: UserService;
+  /** Magic-link sign-in: the send and verify budgets, and the timing floor. */
+  readonly magicAuth: MagicAuthService;
   readonly tokens: TokenService;
   readonly connections: ConnectionService;
   readonly wishlist: WishlistService;
