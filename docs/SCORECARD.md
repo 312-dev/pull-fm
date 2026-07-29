@@ -3,31 +3,113 @@
 The plan is measured against this, not against intent. A gate is green only when
 a machine checks it and the command to re-run it is written down.
 
-**Last updated:** 2026-07-28
+**Last updated:** 2026-07-28 (Gate 0 closed)
 
 ---
 
 ## Status
 
-| Gate  | Criterion                                                           | Status          | Evidence                                                                                                              |
-| ----- | ------------------------------------------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------- |
-| **0** | TLS hello-world reachable, IaC applies with zero drift              | **blocked**     | Plans clean vs live APIs (22 add/0 change/0 destroy); blocked on a Hetzner project + R2 enablement, both console-only |
-| **1** | Migrations reversible, cascade transactional, constraints fire      | **GREEN**       | `node packages/db/scripts/verify-migrations.mjs` (12 checks)                                                          |
-| **2** | All endpoints correct vs upstreams, contract tests, cache hit >=90% | **not started** | Contract locked; handlers stubbed at 501                                                                              |
-| **3** | Auth flow, BOLA isolation, tokens encrypted, no plaintext in logs   | **partial**     | Crypto and redaction proven; authz suite pending                                                                      |
-| **4** | Restore from scratch <30 min, RPO <=5 min                           | **not started** | R2 bucket defined in Terraform                                                                                        |
-| **5** | Synthetic failure alerts <60s, runbook links resolve                | **not started** |                                                                                                                       |
-| **6** | Maintenance window, zero non-2xx rolling deploy, replica promotion  | **partial**     | Maintenance mode verified; deploy pipeline pending                                                                    |
-| **7** | Capacity model + SLOs under mocked upstreams                        | **partial**     | Harness proven in both directions against the mock; needs a real BFF                                                  |
-| **8** | Zero high/critical, pinned tools, accepted risks unexpired          | **partial**     | Scanners clean, tools pinned, register enforced; ZAP DAST needs a live host                                           |
-| **L** | Privacy policy, ToS, DPAs, deletion + export end to end             | **not started** | Endpoints exist; policies and cascade pending                                                                         |
-| **S** | ~~Store accounts, privacy labels, web deletion URL~~                | **RETIRED**     | Distribution is GitHub Releases, not app stores. See PLAN.md section 11.6                                             |
-| **$** | Billing alerts on every vendor                                      | **not started** | Must precede provisioning                                                                                             |
-| **D** | Commit to main reaches prod with a verified rollback                | **not started** |                                                                                                                       |
+| Gate  | Criterion                                                           | Status          | Evidence                                                                                         |
+| ----- | ------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------ |
+| **0** | TLS hello-world reachable, IaC applies with zero drift              | **GREEN**       | All four criteria met and re-runnable. See "Gate 0" below                                        |
+| **1** | Migrations reversible, cascade transactional, constraints fire      | **GREEN**       | `node packages/db/scripts/verify-migrations.mjs` (12 checks)                                     |
+| **2** | All endpoints correct vs upstreams, contract tests, cache hit >=90% | **not started** | Contract locked; handlers stubbed at 501                                                         |
+| **3** | Auth flow, BOLA isolation, tokens encrypted, no plaintext in logs   | **partial**     | Crypto and redaction proven; authz suite pending                                                 |
+| **4** | Restore from scratch <30 min, RPO <=5 min                           | **not started** | R2 bucket defined in Terraform                                                                   |
+| **5** | Synthetic failure alerts <60s, runbook links resolve                | **not started** |                                                                                                  |
+| **6** | Maintenance window, zero non-2xx rolling deploy, replica promotion  | **partial**     | Maintenance mode verified; deploy pipeline pending                                               |
+| **7** | Capacity model + SLOs under mocked upstreams                        | **partial**     | Harness proven in both directions against the mock; needs a real BFF                             |
+| **8** | Zero high/critical, pinned tools, accepted risks unexpired          | **partial**     | Scanners clean, tools pinned, register enforced; ZAP DAST needs a live host                      |
+| **L** | Privacy policy, ToS, DPAs, deletion + export end to end             | **not started** | Endpoints exist; policies and cascade pending                                                    |
+| **S** | ~~Store accounts, privacy labels, web deletion URL~~                | **RETIRED**     | Distribution is GitHub Releases, not app stores. See PLAN.md section 11.6                        |
+| **$** | Billing alerts on every vendor                                      | **not started** | Must precede provisioning                                                                        |
+| **D** | Commit to main reaches prod with a verified rollback                | **partial**     | main -> staging is automatic and externally verified; prod and the executed rollback are Phase 6 |     |
 
 ---
 
 ## Green gates in detail
+
+### Gate 0: staging is live and serving TLS
+
+All four criteria, each with the command that re-checks it.
+
+**1. `terraform plan` exits 0 with zero drift on a clean checkout.**
+
+```bash
+cd infra/terraform/envs/staging && terraform plan -detailed-exitcode   # exit 0
+cd infra/terraform/envs/shared  && terraform plan -detailed-exitcode   # exit 0
+```
+
+Both report "No changes. Your infrastructure matches the configuration"
+(2026-07-28), including after the break-glass SSH rule was added and removed.
+
+**2. `curl -sf https://api-staging.pull.fm/healthz` returns 200 with a valid
+certificate.**
+
+```
+$ curl -sf https://api-staging.pull.fm/healthz
+{"status":"ok","uptimeSeconds":285,"version":"ced4ef92483454c2ede5b7e43b926530f1a386cf"}
+```
+
+The hostname is `api-staging.pull.fm`, **not** `api.staging.pull.fm`.
+Cloudflare's free Universal SSL certificate covers `pull.fm` and `*.pull.fm`
+and nothing deeper, so a two-label hostname has no edge certificate at all and
+fails the TLS handshake before reaching the origin. The only fix Cloudflare
+sells is Advanced Certificate Manager at 10 USD/month per zone. Production is
+unaffected because `api.pull.fm` is a single label. Recorded as a deviation in
+PLAN.md section 1b.
+
+**3. testssl.sh grade.**
+
+```bash
+testssl.sh --quiet api-staging.pull.fm
+```
+
+| Component         | Score  |
+| ----------------- | ------ |
+| Protocol support  | 100    |
+| Key exchange      | 100    |
+| Cipher strength   | 90     |
+| **Final**         | 96     |
+| **Overall grade** | **A+** |
+
+Measured on both edge addresses (104.21.49.227 and 172.67.153.3), TLS 1.2 and
+1.3 only, no weak ciphers, forward secrecy on every simulated client that
+connects at all.
+
+The first run scored **A-**, and the single reason was `HSTS max-age is too
+short`: the zone shipped with 86400 as a deliberately cautious starting value.
+It was not cautious, it was failing. It is now 15552000 (180 days) with
+`includeSubDomains` and `preload` both off, which is where the irreversible
+risk actually lives.
+
+**4. A commit to `main` auto-deploys to staging in under ten minutes with no
+human step.**
+
+`.github/workflows/deploy-staging.yml` builds and publishes the image, then
+polls `https://api-staging.pull.fm/healthz` until `.version` equals the commit
+SHA it just built. It fails the job if that does not happen inside the budget.
+
+This is deliberately not a self-report. The workflow never connects to the
+node; the node pulls. What the green check means is that the commit is serving
+real traffic through Cloudflare, the load balancer, nginx and the container -
+not that a deploy script exited zero. Evidence is the `version` field above
+matching `git rev-parse HEAD`.
+
+Measured end to end: image build about 2 minutes warm, registry poll up to 60
+seconds, container start about 15 seconds.
+
+### What Gate 0 does NOT cover, stated plainly
+
+- **Gate $ is still open.** Billing alerts are configured on no vendor, so
+  staging was applied ahead of its own stated precondition.
+- **Terraform state is local**, not in R2. Losing the laptop orphans the
+  environment.
+- **Tailscale is not installed on the nodes.** The break-glass firewall rule
+  was used once to bootstrap and removed; it is currently the only interactive
+  path in. Routine operation needs none, because the deploy loop pulls.
+- **A deploy is a container recreate**, so there is a brief connection refusal.
+  Zero-non-2xx rolling deploys are Gate 6 and need the second application node.
 
 ### Gate 1: migrations
 
@@ -166,11 +248,18 @@ been reviewed by anyone other than its author.
 
 ## Honest notes
 
-- **Nothing is provisioned.** The Terraform is validated against live Hetzner
-  and Cloudflare APIs and plans clean, but two prerequisites are console-only:
-  a `pull-fm` Hetzner project (the Cloud API has no project endpoint, confirmed
-  by a 404) and R2 enablement (confirmed by a 403, code 10042). `pull.fm`
-  itself is delegated and active.
+- **Staging is provisioned and running; prod is not.** Both console-only
+  prerequisites were cleared: the `pull-fm` Hetzner project exists and R2 is
+  enabled. `envs/prod` has never been applied.
+- **A control can be correct and still be in the wrong place.** The "only
+  Cloudflare may reach the origin" firewall rule does not cover load-balanced
+  traffic at all: it arrives on the private interface and Hetzner Cloud
+  Firewalls filter only the public one. The rule was not wrong, it was
+  incomplete, and nothing in a plan or a scanner would have said so. The
+  enforcement that actually covers that path is the nginx allowlist on
+  `$proxy_protocol_addr` plus Authenticated Origin Pulls. Both were verified by
+  trying the bypass: a request to the load balancer IP with the right SNI fails
+  the TLS handshake, and a request straight to the origin IP times out.
 - **`burst-50k` is deliberately deferred** to post-launch. Load-testing against
   an invented traffic model produces false confidence; the pre-launch
   substitute is a written capacity model with the arithmetic shown.
