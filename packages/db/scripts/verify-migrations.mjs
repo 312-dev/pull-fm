@@ -225,6 +225,43 @@ try {
       expect: null,
     },
     {
+      // docs/compliance/data-retention-policy.md section 8.1. The constraint is
+      // the structural guarantee that a half-applied anonymization cannot
+      // exist: a row carrying BOTH a real user_id and a pseudonym would hand
+      // whoever reads the table the mapping the whole design exists to
+      // destroy. No bug in the purge job, no interrupted batch and no hand-run
+      // SQL can produce one, because the database refuses to store it.
+      name: "an anonymized audit row cannot keep its user_id",
+      sql: `INSERT INTO audit_log (user_id, action, outcome, anonymized_at)
+            VALUES (gen_random_uuid(), 'account.deleted', 'ok', now())`,
+      expect: "audit_log_identity_chk",
+    },
+    {
+      // The other direction: a pseudonym may only exist on a row that has
+      // actually been through the sweep. Otherwise a bug could mint pseudonyms
+      // alongside live user ids and the correlation would be reconstructable.
+      name: "a pseudonym cannot appear on a row that was never anonymized",
+      sql: `INSERT INTO audit_log (action, outcome, subject_pseudonym)
+            VALUES ('account.deleted', 'ok', gen_random_uuid())`,
+      expect: "audit_log_identity_chk",
+    },
+    {
+      name: "a fully anonymized audit row is accepted",
+      sql: `INSERT INTO audit_log (action, outcome, anonymized_at, subject_pseudonym)
+            VALUES ('account.deleted', 'ok', now(), gen_random_uuid())`,
+      expect: null,
+    },
+    {
+      // An event that never had a subject - a rejected webhook, a reaped
+      // directory record - is anonymized with NO pseudonym, because there is no
+      // actor to correlate and minting one would fabricate a subject rather
+      // than protect one. It still carries an `ip`, so it still needs the sweep.
+      name: "an anonymized audit row with no subject needs no pseudonym",
+      sql: `INSERT INTO audit_log (action, outcome, anonymized_at)
+            VALUES ('webhook.rejected', 'denied', now())`,
+      expect: null,
+    },
+    {
       name: "duplicate wishlist entry for the same recording is rejected",
       sql: `INSERT INTO users (workos_user_id) VALUES ('u_dup');
             INSERT INTO wishlist_items (user_id, artist_name, title, recording_mbid)
@@ -256,7 +293,63 @@ try {
     }
   }
 
-  // --- 4. Cache accounting (Last.fm 100 MB licence cap) ---------------------
+  // --- 4. Audit-log retention (docs/compliance/data-retention-policy.md) ----
+  //
+  // Section 8 of that document asks for five assertions. Two of them are
+  // schema-level and live here; the other three run the job itself and live in
+  // apps/bff/test/integration/audit-retention.test.ts.
+  console.log("\nAudit-log retention");
+
+  // 8.1: the constraint EXISTS, by name, so a later migration cannot quietly
+  // drop the structural guarantee while the CHECK-fires tests above keep
+  // passing against nothing. The tests above prove it works; this proves it is
+  // still the thing that is working.
+  const constraint = psql(
+    SCRATCH_DB,
+    `SELECT count(*) FROM pg_constraint
+      WHERE conname = 'audit_log_identity_chk'
+        AND conrelid = 'audit_log'::regclass
+        AND contype = 'c'`,
+  );
+  if (constraint === "1") {
+    pass("audit_log_identity_chk is present on audit_log");
+  } else {
+    fail(
+      "audit_log_identity_chk is missing: a half-applied anonymization is representable again",
+    );
+  }
+
+  // 8.5: the standing invariant. Asserted twice, because "0" on a scratch
+  // database proves nothing on its own - a query with a typo in the predicate
+  // also returns 0. So: it must be 0 with only fresh rows present, and it must
+  // find a seeded violation. A CI check that cannot fail is not a check.
+  const invariant = `SELECT count(*) FROM audit_log
+                      WHERE anonymized_at IS NULL
+                        AND created_at < now() - interval '91 days'`;
+
+  if (psql(SCRATCH_DB, invariant) === "0") {
+    pass("the retention invariant holds when every row is inside the window");
+  } else {
+    fail("the retention invariant reported a violation on fresh rows only");
+  }
+
+  psql(
+    SCRATCH_DB,
+    `INSERT INTO audit_log (user_id, action, outcome, ip, created_at)
+     VALUES (gen_random_uuid(), 'auth.callback', 'ok', '203.0.113.7',
+             now() - interval '120 days')`,
+  );
+  if (psql(SCRATCH_DB, invariant) === "1") {
+    pass(
+      "the retention invariant detects a row past the window (query is not vacuous)",
+    );
+  } else {
+    fail(
+      "the retention invariant missed a row 120 days old and never anonymized",
+    );
+  }
+
+  // --- 5. Cache accounting (Last.fm 100 MB licence cap) ---------------------
   console.log("\nLicence compliance support");
   const view = psql(
     SCRATCH_DB,
