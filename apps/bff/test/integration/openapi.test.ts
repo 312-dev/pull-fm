@@ -87,6 +87,59 @@ describe("the document", () => {
 });
 
 describe("the document is the inventory", () => {
+  /**
+   * Routes permitted to be absent from the document.
+   *
+   * AUDIT 2026-07-29, and this list exists because of what it found.
+   * `schema: { hide: true }` is the one unguarded exit from the entire Gate 3
+   * chain. `collectAnnotations` (src/lib/openapi.ts) returns early on it, so
+   * the route is never classified; being absent from the swagger document it
+   * is also never added to `unclassified`, so `applyAnnotations` does not
+   * throw; and the filter below removes it from this inventory test. The
+   * consequence is that a route added with `hide: true` produces zero BOLA
+   * tests and a green build, which is precisely the outcome Gate 3 is written
+   * to make impossible ("failing CI if any route lacks a test").
+   *
+   * That escape is not closed here, because a hidden route is sometimes
+   * correct: `GET /openapi.json` cannot describe itself. It is made LOUD
+   * instead. Adding a hidden route now fails this test, and the reviewer has
+   * to state, in this file, why that route needs no authorization coverage.
+   *
+   * Adding an entry is a security decision, not a formality. It belongs here
+   * only if the route is genuinely public and object-free.
+   */
+  const HIDDEN_ROUTE_ALLOWLIST = new Set([
+    // The spec document itself. Public, static, and holds no user object.
+    "GET /openapi.json",
+  ]);
+
+  test("no route hides itself out of the BOLA enumeration without review", () => {
+    const hidden = ctx.routes
+      .filter((r) => r.hidden && r.method !== "HEAD" && r.method !== "OPTIONS")
+      .map((r) => `${r.method} ${toOpenApiPath(r.url)}`);
+
+    const unreviewed = hidden.filter((r) => !HIDDEN_ROUTE_ALLOWLIST.has(r));
+    expect(
+      unreviewed,
+      "route(s) use `schema: { hide: true }`, which removes them from the " +
+        "OpenAPI document, from the route matrix, and from the BOLA suite, " +
+        "with no error anywhere. If the route is genuinely public and holds " +
+        "no user-owned object, add it to HIDDEN_ROUTE_ALLOWLIST with a reason. " +
+        "Otherwise remove `hide` and annotate it: " +
+        unreviewed.join(", "),
+    ).toEqual([]);
+
+    // And the allowlist itself must not rot: an entry for a route that no
+    // longer exists is a standing permission nobody is looking at.
+    const stale = [...HIDDEN_ROUTE_ALLOWLIST].filter(
+      (r) => !hidden.includes(r),
+    );
+    expect(
+      stale,
+      `HIDDEN_ROUTE_ALLOWLIST names route(s) that no longer exist: ${stale.join(", ")}`,
+    ).toEqual([]);
+  });
+
   test("every route in the router appears in the document", () => {
     // Fastify's own route table is the ground truth. Anything the emitter
     // dropped would be invisible to the BOLA enumerator.
