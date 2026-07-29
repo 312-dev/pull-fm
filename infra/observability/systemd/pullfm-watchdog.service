@@ -20,7 +20,28 @@ ExecStart=/usr/local/bin/pullfm-watchdog
 # unconditionally and a watchdog that stopped watching shows up as a stale
 # `last elapse` in `systemctl list-timers`, plus the absence of the heartbeat
 # line in the journal.
-RuntimeMaxSec=50
+
+# TimeoutStartSec=, NOT RuntimeMaxSec=, and this unit had the wrong one until
+# 2026-07-29 - the same defect that was fixed in the four job units under
+# infra/staging/app/systemd and left here. systemd says so on every
+# daemon-reload, where nobody was reading:
+#
+#   RuntimeMaxSec= has no effect in combination with Type=oneshot. Ignoring.
+#
+# RuntimeMaxSec= bounds a service that has REACHED the running state. A
+# Type=oneshot service never does: it sits in "activating" from ExecStart until
+# ExecStart returns, so the directive matched nothing and the watchdog was
+# UNBOUNDED. TimeoutStartSec= is the one that bounds that window.
+#
+# It matters more here than on the job units, because this unit is what notices
+# that anything else is wrong. The timer fires OnUnitActiveSec=1min and systemd
+# will not start a second copy of a oneshot that is still activating, so a
+# watchdog wedged on a hung /metrics read did not just miss one minute: it
+# suppressed every subsequent run forever, silently, while `systemctl
+# list-timers` showed the timer as armed. 50 seconds keeps a full run strictly
+# inside the minute, so a wedged scrape is killed and the next minute is
+# watched.
+TimeoutStartSec=50
 
 # It reads /metrics over loopback and writes two small state files. Nothing
 # else, so nothing else is permitted.

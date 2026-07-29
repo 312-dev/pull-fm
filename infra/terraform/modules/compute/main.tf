@@ -204,12 +204,40 @@ resource "hcloud_server" "cache" {
   }
 
   lifecycle {
-    # user_data is NOT ignored here any more, and that is the substantive change
-    # rather than an oversight. It was ignored while this was the database node,
-    # because replacing the database to pick up a cloud-init edit is never the
-    # right move. A cache node holds nothing, so it is as replaceable as a BFF
-    # node and should pick up config the same way they do.
-    ignore_changes = [image]
+    # user_data IS ignored again, matching hcloud_server.app above, and the
+    # argument that removed it was right about the wrong thing. It said: this
+    # was ignored while the node ran Postgres, because replacing a database to
+    # pick up a cloud-init edit is never the right move; a cache node holds
+    # nothing, so it is as replaceable as a BFF node and should pick up config
+    # the same way. Every clause of that is true and none of it is the reason
+    # the app node ignores user_data.
+    #
+    # THE REASON IS THE TAILSCALE KEY, NOT THE DATA. `staging-env.sh up` mints a
+    # fresh single-use auth key on every run and interpolates it into this
+    # template, so user_data differs on every plan whatever else changed. The
+    # consequences do not depend on the node holding state:
+    #
+    #   * any later apply - a firewall rule, a DNS record, a label - silently
+    #     becomes a rebuild of a running node.
+    #   * a plain `terraform apply` outside the wrapper carries NO key, so the
+    #     replacement joins no tailnet.
+    #
+    # The second one is strictly worse here than on the app node. The app node
+    # at least keeps a public address you can look at. This node is deliberately
+    # built with no public IPv4 at all and the cache firewall opens nothing
+    # inbound but Tailscale and ICMP, so a keyless replacement is not degraded,
+    # it is UNREACHABLE BY EVERY PATH and the only remedy is to destroy it.
+    #
+    # Ignoring is safe for the same reason it is safe above: the key is spent
+    # when the node joins, so the value held in state authorises nothing and
+    # re-rendering it changes nothing about a node that has already booted.
+    # Changing cloud-init for real stays an explicit act, exactly like the
+    # image: edit the template, then `terraform apply -replace`.
+    #
+    # This node does not currently exist (enable_cache_node = false at one app
+    # node), so nothing here has been exercised against a live server. It is
+    # written to be correct on the day the second app node makes it mandatory.
+    ignore_changes = [image, user_data]
   }
 }
 

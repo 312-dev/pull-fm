@@ -64,7 +64,7 @@ const JOBS = [
     script: "warm-cache",
     onCalendar: "*-*-* *:10/30:00",
     intervalSec: 30 * 60,
-    runtimeMaxSec: 1320,
+    timeoutStartSec: 1320,
     persistent: false,
     why: "The warmer's own whole-run deadline is 20 minutes and the MusicBrainz budget is per IP and global, so two overlapping runs on one egress address would double the observed rate against a limit that does not care they are separate jobs.",
   },
@@ -75,7 +75,7 @@ const JOBS = [
     script: "sweep-expired",
     onCalendar: "*-*-* *:05:00",
     intervalSec: 60 * 60,
-    runtimeMaxSec: 600,
+    timeoutStartSec: 600,
     persistent: true,
     why: "idempotency_keys.expires_at is 24 hours and the privacy policy says so. Daily would make the worst case 48 hours against a 24-hour promise; hourly makes it 25, which is the schema's number plus the hour of clock-skew slack.",
   },
@@ -86,7 +86,7 @@ const JOBS = [
     script: "reap-unverified",
     onCalendar: "*-*-* *:35:00",
     intervalSec: 60 * 60,
-    runtimeMaxSec: 900,
+    timeoutStartSec: 900,
     persistent: true,
     why: "AUTH_UNVERIFIED_REAP_AFTER_S is 24 hours. Running daily would make the true upper bound on an unconsented record's life 48 hours, and the stated window would bound nothing.",
   },
@@ -97,7 +97,7 @@ const JOBS = [
     script: "purge-audit",
     onCalendar: "*-*-* 06:17:00 UTC",
     intervalSec: 24 * 60 * 60,
-    runtimeMaxSec: 1800,
+    timeoutStartSec: 1800,
     persistent: true,
     why: "Every window this job enforces is measured in tens of days, so a day is the finest granularity that means anything. Weekly would falsify the published sentence 'normally within 24 hours'.",
   },
@@ -237,9 +237,18 @@ for (const j of JOBS) {
     one(service, "Service", "SuccessExitStatus") === "2",
     `${j.unit}.service: SuccessExitStatus=2 is missing. Without it, exit 2 (ran, something to look at) alerts exactly like exit 1 (could not run, nothing changed), and an operator who is paged for both stops reading either.`,
   );
+  // [Unit], not [Service]. OnFailure= is a Unit directive; in [Service] systemd
+  // parses it, logs "Unknown key name 'OnFailure' in section 'Service',
+  // ignoring", and wires nothing. This check asserted the broken placement
+  // until 2026-07-29, so it passed for as long as the units were wrong and
+  // started failing the moment they were fixed. The section is the assertion.
   check(
-    one(service, "Service", "OnFailure") === "pullfm-job-alert@%n.service",
-    `${j.unit}.service: OnFailure=pullfm-job-alert@%n.service is missing. Exit 1 would then be a silent failed unit, which is indistinguishable from a healthy job that had nothing to do.`,
+    one(service, "Unit", "OnFailure") === "pullfm-job-alert@%n.service",
+    `${j.unit}.service: OnFailure=pullfm-job-alert@%n.service is missing from the [Unit] section. Exit 1 would then be a silent failed unit, which is indistinguishable from a healthy job that had nothing to do. In [Service] it is ignored with a log line and buys nothing.`,
+  );
+  check(
+    one(service, "Service", "OnFailure") === undefined,
+    `${j.unit}.service: OnFailure= is in [Service], where systemd ignores it. Move it to [Unit].`,
   );
 
   check(
@@ -247,14 +256,29 @@ for (const j of JOBS) {
     `${j.unit}.service: ConditionPathExists=/etc/pullfm/deploy.env is missing. A node in its first minute has no image pinned, and every timer would fire an alert about it.`,
   );
 
-  const runtimeMax = Number(one(service, "Service", "RuntimeMaxSec"));
+  // TimeoutStartSec=, not RuntimeMaxSec=, and for these units the difference is
+  // between a bound and no bound at all. RuntimeMaxSec= applies to a service
+  // that has REACHED the running state; a Type=oneshot service never does, so
+  // systemd discards it with "RuntimeMaxSec= has no effect in combination with
+  // Type=oneshot. Ignoring." on every daemon-reload. The window a oneshot
+  // actually spends in "activating" is bounded by TimeoutStartSec=.
+  //
+  // The second assertion is the one that makes this check mean something: a
+  // wedged run must be KILLED before the timer is due again, because systemd
+  // refuses to start a second copy of a oneshot that is still activating. An
+  // unbounded job does not miss one run, it suppresses every later run.
+  const timeoutStart = Number(one(service, "Service", "TimeoutStartSec"));
   check(
-    runtimeMax === j.runtimeMaxSec,
-    `${j.unit}.service: RuntimeMaxSec should be ${j.runtimeMaxSec}, found ${one(service, "Service", "RuntimeMaxSec")}.`,
+    timeoutStart === j.timeoutStartSec,
+    `${j.unit}.service: TimeoutStartSec should be ${j.timeoutStartSec}, found ${one(service, "Service", "TimeoutStartSec")}.`,
   );
   check(
-    runtimeMax < j.intervalSec,
-    `${j.unit}.service: RuntimeMaxSec (${runtimeMax}s) is not shorter than the firing interval (${j.intervalSec}s), so a wedged run can still be running when the next one is due. ${j.why}`,
+    one(service, "Service", "RuntimeMaxSec") === undefined,
+    `${j.unit}.service: RuntimeMaxSec= is set on a Type=oneshot unit, where systemd ignores it. The bound that works is TimeoutStartSec=.`,
+  );
+  check(
+    timeoutStart < j.intervalSec,
+    `${j.unit}.service: TimeoutStartSec (${timeoutStart}s) is not shorter than the firing interval (${j.intervalSec}s), so a wedged run can still be running when the next one is due. ${j.why}`,
   );
 
   check(
@@ -488,7 +512,7 @@ console.log("scheduled background jobs\n");
 const width = Math.max(...JOBS.map((j) => j.unit.length));
 for (const j of JOBS) {
   console.log(
-    `  ${j.unit.padEnd(width)}  ${j.onCalendar.padEnd(22)}  runs <= ${String(j.runtimeMaxSec).padStart(4)}s of ${j.intervalSec}s`,
+    `  ${j.unit.padEnd(width)}  ${j.onCalendar.padEnd(22)}  runs <= ${String(j.timeoutStartSec).padStart(4)}s of ${j.intervalSec}s`,
   );
 }
 console.log();
