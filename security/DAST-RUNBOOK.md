@@ -243,29 +243,33 @@ stronger control than a kill switch nobody can reach. It is still the weaker foo
 
 ---
 
-## 7. What the first real run found
+## 7. Lessons this tooling encodes
 
-The first execution of this configuration, on 2026-07-29, found four defects **in the scan
-configuration itself** before it found anything in the application. All four are recorded in the
-files they affect. They are listed here because they are the reason to distrust a scan that has
-never been run:
+Findings from individual scan runs are **not** kept in this file. Dated results live in
+`security/DAST-FINDINGS-<date>.md` alongside the other dated audit reports, and follow the same
+publication rule they do: a finding is published once it is closed and once infrastructure
+identifiers have been stripped.
 
-1. **The credential was never injected.** ZAP's Automation Framework substitutes `${VAR}` into a
-   job's `parameters` but **not** into the `replacer` job's `rules` list, neither for `url` nor for
-   `replacementString`. Verified against a local echo server: a literal value arrives, a variable
-   arrives verbatim. The plan aborted on an invalid URL before authenticating, and had it not
-   aborted it would have scanned the whole API unauthenticated and reported clean.
-2. **Three invalid technology tags.** `C` is not a ZAP tech tag, and the correct names are
-   `IBM DB2` and `Microsoft SQL Server`, not `Db2` and `MsSQL`. ZAP ignores an unrecognised name
-   rather than rejecting it, so the rules those entries were meant to disable had been enabled all
-   along. The file's own comment warned about exactly this failure mode.
-3. **The auth sanity check could never have passed.** A `url` test can assert presence of a URL in
-   the sites tree, but every response-content regex against a requestor-issued message fails,
-   including a trivial `(?s).*"id".*`. That assertion now lives in the runner, which parses the JSON.
-4. **The SARIF file had a different name than the plan claimed.** ZAP appends the template extension,
-   so `zap-baseline.sarif` is written as `zap-baseline.sarif.json` — which the root `.gitignore`'s
-   `*.sarif` rule does not match.
+This document is the method, and the method stays public whatever the current findings are. Keeping
+the two apart is deliberate. A runbook that interleaves "how to run the scanner" with "what is
+currently wrong with production" cannot be published at all, and a runbook nobody can read is a scan
+nobody runs.
 
-And in the application, one true positive: **no `Cache-Control` header on any user-scoped response.**
-Fixed by a default in `server.ts`, with regression tests in
-`apps/bff/test/security/cache-control.test.ts` that were confirmed to fail without it.
+What belongs here is only what changed the tooling permanently. The first real execution of this
+configuration found four defects **in the scan configuration itself** before it found anything in
+the application, and each is now recorded as a comment in the file it affects rather than as a
+finding:
+
+- ZAP does not substitute `${VAR}` inside a `replacer` job's `rules` list, so the credential was
+  never injected (`plans/*.yaml`).
+- An unrecognised technology tag is ignored rather than rejected, so a typo silently re-enables the
+  rules it was meant to disable (`context/pullfm-api.context.yaml`).
+- A `url` test cannot read a requestor-issued response body, so content assertions belong in the
+  runner (`plans/*.yaml`).
+- ZAP appends the report template's extension to `reportFile`, and the root `.gitignore`'s `*.sarif`
+  does not match the resulting name (`plans/*.yaml`, `security/.gitignore`).
+
+The general lesson, which is the one worth carrying: **a scan configuration that has never been
+executed should be treated as broken until proved otherwise.** Every one of those four would have
+produced a green result over an empty or unauthenticated scan, and three of them are invisible to
+code review because they are ZAP behaving differently from how the file assumed.
