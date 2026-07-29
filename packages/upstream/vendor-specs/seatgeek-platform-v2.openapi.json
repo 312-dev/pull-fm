@@ -1,0 +1,822 @@
+{
+  "components": {
+    "schemas": {
+      "Event": {
+        "properties": {
+          "announce_date": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "date_tbd": {
+            "default": false,
+            "type": "boolean"
+          },
+          "datetime_local": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "datetime_tbd": {
+            "default": false,
+            "type": "boolean"
+          },
+          "datetime_utc": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "integrated": {
+            "properties": {
+              "provider_id": {
+                "default": "883:EBOB24:EFIC0724",
+                "type": "string"
+              },
+              "provider_name": {
+                "default": "PACIOLAN",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "performers": {
+            "items": {
+              "$ref": "#/components/schemas/Performer"
+            },
+            "type": "array"
+          },
+          "score": {
+            "type": "number"
+          },
+          "short_title": {
+            "default": "Young The Giant with Grouplove",
+            "type": "string"
+          },
+          "taxonomies": {
+            "items": {
+              "$ref": "#/components/schemas/Taxonomy"
+            },
+            "type": "array"
+          },
+          "time_tbd": {
+            "default": false,
+            "type": "boolean"
+          },
+          "title": {
+            "default": "Young The Giant with Grouplove",
+            "type": "string"
+          },
+          "type": {
+            "default": "concert",
+            "type": "string"
+          },
+          "url": {
+            "default": "Young The Giant with Grouplove",
+            "type": "string"
+          },
+          "venue": {
+            "$ref": "#/components/schemas/Venue"
+          },
+          "visible_until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Performer": {
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "image": {
+            "type": "string"
+          },
+          "images": {
+            "properties": {
+              "huge": {
+                "default": "https://chairnerd.global.ssl.fastly.net/images/performers/8741/555bce1815140ad65ab0b1066467ae7d/huge.jpg",
+                "type": "string"
+              },
+              "large": {
+                "default": "https://chairnerd.global.ssl.fastly.net/images/performers/8741/eec61caec82950448b257c5e539147bc/large.jpg",
+                "type": "string"
+              },
+              "medium": {
+                "default": "https://chairnerd.global.ssl.fastly.net/images/performers/8741/686f925886504610936135abd240235c/medium.jpg",
+                "type": "string"
+              },
+              "small": {
+                "default": "https://chairnerd.global.ssl.fastly.net/images/performers/8741/af7a8925e50bb74315337a9450206a39/small.jpg",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": {
+            "default": "Grouplove",
+            "type": "string"
+          },
+          "primary": {
+            "default": true,
+            "type": "boolean"
+          },
+          "score": {
+            "type": "integer"
+          },
+          "short_name": {
+            "default": "Grouplove",
+            "type": "string"
+          },
+          "slug": {
+            "default": "grouplove",
+            "type": "string"
+          },
+          "type": {
+            "default": "band",
+            "type": "string"
+          },
+          "url": {
+            "default": "https://seatgeek.com/grouplove-tickets/",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Recommendation": {
+        "properties": {
+          "performer": {
+            "$ref": "#/components/schemas/Performer"
+          },
+          "score": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "Taxonomy": {
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "default": "sports",
+            "type": "string"
+          },
+          "parent_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Venue": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "city": {
+            "default": "New York",
+            "type": "string"
+          },
+          "country": {
+            "default": "US",
+            "type": "string"
+          },
+          "extended_address": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "location": {
+            "properties": {
+              "lat": {
+                "type": "number"
+              },
+              "lon": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "name": {
+            "default": "Terminal 5",
+            "type": "string"
+          },
+          "postal_code": {
+            "default": "10019",
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          },
+          "state": {
+            "default": "NY",
+            "type": "string"
+          },
+          "url": {
+            "default": "https://seatgeek.com/terminal-5-tickets/",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "The SeatGeek Platform API allows your application to access information about the events, venues and performers, and other entities in the SeatGeek catalog.",
+    "termsOfService": "https://seatgeek.com/api-terms",
+    "title": "The SeatGeek Platform API Documentation",
+    "version": "v2"
+  },
+  "openapi": "3.0.1",
+  "paths": {
+    "/events": {
+      "get": {
+        "description": "Use the Events endpoint to get a list of publicly available events on SeatGeek.com.",
+        "parameters": [
+          {
+            "description": "The performers parameter is used to scope the result set to specific performers. The performers parameter may be used several times in the same query. To make an OR query, a list of performer ids separated by commas can be passed to `performers.id`.",
+            "in": "query",
+            "name": "performers.{FIELD}",
+            "schema": {
+              "enum": ["id", "slug"],
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. There are currently two fields available to specify how to look up performers. These are id and slug. These fields can be used interchangeably in the same query.",
+            "in": "query",
+            "name": "performers.id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. The simplest query to the performers parameter looks like this: */events?performers.slug=new-york-mets*. This will return all events where the New York Mets are participating.",
+            "in": "query",
+            "name": "performers.slug",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is 'any' if the performers parameter is present. 'primary' can be useful when searching concerts for a headlining performer.",
+            "in": "query",
+            "name": "performers[{SPECIFICITY}].{FIELD}",
+            "schema": {
+              "enum": ["home_team", "away_team", "primary", "or any"],
+              "type": "string"
+            }
+          },
+          {
+            "description": "The venue parameter is used to scope the result set to a specific venue or to venues with specific properties. Any of the fields for searching for venues may be used with the venue parameter (e.g. `venue.city`, `venue.id`, or `venue.state`), except for `venue.name`, which is not supported.",
+            "in": "query",
+            "name": "venue.{FIELD}",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The datetime parameter is used to scope the result set to events occurring within a certain date and time range. The datetime parameter may be used zero, one, or two times in a query. You can scope the date to a range using operators. There are two distinct datetime parameters that both offer identical options. You can scope the search to datetime_local or datetime_utc. All of the examples will use datetime_utc, however datetime_local can be replaced in all instances.",
+            "in": "query",
+            "name": "datetime_{ARGUMENT}",
+            "schema": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. Returns all events with an exact matching utc date. There are currently two allowed date/time formats. The first is a full ISO 8601 string (YYYY-MM-DDTHH:MM:SS). The other is a simple date string of the format of YYYY-MM-DD, which gets treated as YY-MM-DDT00:00:00.",
+            "in": "query",
+            "name": "datetime_utc",
+            "schema": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. Returns all events with an exact matching local date. There are currently two allowed date/time formats. The first is a full ISO 8601 string (YYYY-MM-DDTHH:MM:SS). The other is a simple date string of the format of YYYY-MM-DD, which gets treated as YY-MM-DDT00:00:00.",
+            "in": "query",
+            "name": "datetime_local",
+            "schema": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. Defines a date comparison operator. Valid operators are `gt`, `gte`, `lt`, and `lte`.",
+            "in": "query",
+            "name": "datetime_{ARGUMENT}.{OPERATOR}",
+            "schema": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. This is a very broad search, and will possibly return unexpected results. For example, a query for 'madison', will return all events at any venue in Madison, WI, venues with Madison in their name (Madison Square Garden), and any performer with 'Madison' in their title. The q parameter also allows for some natural language queries such as 'yankees march', or 'skrillex on june 4th'.",
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "format": "query",
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. This parameter has two purposes. You can use it to force a single response document into the bulk response document. Alternatively you can use it to bulk retrieve events with known unique ids. This parameter also has an alternate syntax. You can pass a comma separated list of unique ids. **Note: Using this parameter will override all other query parameters.**",
+            "in": "query",
+            "name": "id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. {FIELD} can be `name`, `id`, or `parent_id`. Accepts one of several types. The taxonomies parameter is used to scope the result set to events matching a specific type. You can find the list of currently available taxonomies at the taxonomies endpoint. You can search across multiple taxonomies by adding multiple taxonomies parameters to your query.",
+            "in": "query",
+            "name": "taxonomies.{FIELD}",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is false. By default the API only returns top-level events, and excludes 'add-on' events such as parking events. Pass `1` or `true` for this parameter to include these events in the response.",
+            "in": "query",
+            "name": "addons_visible",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "optional, default is null. Used in conjunction with addons_visible. Pass `parking` to return only parking events.",
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Event"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation."
+          }
+        },
+        "summary": "List events",
+        "tags": ["Events"]
+      }
+    },
+    "/events/section_info/{eventId}": {
+      "get": {
+        "description": "Returns detailed information about the sections and rows available for a specific event. This is useful for understanding the venue layout and available seating options.",
+        "parameters": [
+          {
+            "description": "ID of the event to retrieve section information for",
+            "in": "path",
+            "name": "eventId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "sections": {
+                      "additionalProperties": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "description": "Map of section names to arrays of row identifiers. Section names can be numeric (e.g. '101'), descriptive (e.g. 'orchestra-center'), or special areas (e.g. 'suite-83'). Row identifiers can be numbers, letters, or special codes. Some sections may have empty row arrays.",
+                      "type": "object"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "successful operation"
+          },
+          "404": {
+            "description": "Event not found"
+          }
+        },
+        "summary": "Get section and row information for an event",
+        "tags": ["Events"]
+      }
+    },
+    "/events/{eventId}": {
+      "get": {
+        "description": "To get a single event document, simply add the ID of the event to the URL.",
+        "parameters": [
+          {
+            "description": "required. The `eventId` query parameter is used to scope the result set to a specific event.",
+            "in": "path",
+            "name": "eventId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            },
+            "description": "successful operation."
+          }
+        },
+        "summary": "Get an event by ID",
+        "tags": ["Events"]
+      }
+    },
+    "/performers": {
+      "get": {
+        "description": "To find a performer matching your search criteria you will send a request to the `/performers` endpoint. Sending a request to `/performers` will return a paginated list of all performers. All parameters can be used with each other with the exception of the ID parameter. ID can only be used with API-wide parameters, such as those for pagination and sorting.",
+        "parameters": [
+          {
+            "description": "optional, default is null. The slug parameter is used to scope the result to a performer matching a slug. A query to the slug parameter looks like this: `/performers?slug=new-york-mets`. This will return a performer document matching the New York Mets.",
+            "in": "query",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. The q parameter is used to search across all possible parts of a response document. This is a very broad search, and will possibly return unexpected results. For example, a query for 'madison', will return all events at any venue in Madison, WI, venues with Madison in their name (Madison Square Garden), and any performer with 'Madison' in their title. The q parameter also allows for some natural language queries such as 'yankees march', or 'skrillex on june 4th'.",
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "format": "query",
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. This parameter has two purposes. You can use it to force a single response document into the bulk response document. Alternatively, you can use it to bulk retrieve performers with known unique IDs. This parameter also has an alternate syntax. You can pass a comma separated list of unique IDs. **Note: Using this parameter will override all other query parameters.**",
+            "in": "query",
+            "name": "id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. {FIELD} can be `name`, `id`, or `parent_id`. Accepts one of several types. The taxonomies parameter is used to scope the result set to performers matching a specific type. You can find the list of currently available taxonomies at the taxonomies endpoint.",
+            "in": "query",
+            "name": "taxonomies.{FIELD}",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Performer"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation."
+          }
+        },
+        "summary": "List performers",
+        "tags": ["Performers"]
+      }
+    },
+    "/performers/{performerId}": {
+      "get": {
+        "description": "To get a single performer document, simply add the ID of the performer to the URL.",
+        "parameters": [
+          {
+            "description": "required. ID of the performer to retrieve.",
+            "in": "path",
+            "name": "performerId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Performer"
+                }
+              }
+            },
+            "description": "successful operation."
+          }
+        },
+        "summary": "Get a performer by ID",
+        "tags": ["Performers"]
+      }
+    },
+    "/recommendations": {
+      "get": {
+        "description": "To retrieve a paginated list of recommendation documents, each of which contains a single event and a affinity score. Recommendations are returned sorted by score, highest to lowest.  Note: If a performer is used as a seed, that performer will be excluded from the response set. However if an event is used as a seed, the performers associated with that event may (and likely will) be returned.",
+        "parameters": [
+          {
+            "description": "One or more performer IDs.",
+            "in": "query",
+            "name": "performers.id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "one or more event IDs",
+            "in": "query",
+            "name": "events.id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is false. Accepts a valid IP address (useful when making a request server-side on behalf of a client); or true, to attempt to geolocate by the requesting client's IP (useful when calling directly from a browser).",
+            "in": "query",
+            "name": "geoip",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. Latitude of the location to use for recommendations. Required if `lon` is provided.",
+            "in": "query",
+            "name": "lat",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "description": "optional, default is null. Longitude of the location to use for recommendations. Required if `lat` is provided.",
+            "in": "query",
+            "name": "lon",
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "description": "optional, default is null. Postal code of the location to use for recommendations.",
+            "in": "query",
+            "name": "postal_code",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is 200mi. Only return events within the given radius of the geolocation point.",
+            "in": "query",
+            "name": "range",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Recommendation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation."
+          }
+        },
+        "summary": "List recommended events",
+        "tags": ["Recommendations"]
+      }
+    },
+    "/recommendations/performers": {
+      "get": {
+        "description": "Retrieve a paginated list of recommendation documents, each of which contains a single performer and an affinity score. Recommendations are returned sorted by score, highest to lowest. If a performer is used as a seed, that performer will be excluded from the response set. However if an event is used as a seed, the performers associated with that event may (and likely will) be returned.",
+        "parameters": [
+          {
+            "description": "one or more performer IDs.",
+            "in": "query",
+            "name": "performers.id",
+            "schema": {
+              "enum": ["performers.id", "events.id"],
+              "type": "string"
+            }
+          },
+          {
+            "description": "one or more event IDs",
+            "in": "query",
+            "name": "events.id",
+            "schema": {
+              "enum": ["performers.id", "events.id"],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Recommendation"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation."
+          }
+        },
+        "summary": "List recommended performers",
+        "tags": ["Recommended Performers"]
+      }
+    },
+    "/taxonomies": {
+      "get": {
+        "description": "Use the Taxonomies endpoint to get a list of taxonomies used on SeatGeek.com. Taxonomies are used to categorize events, performers, and venues. The taxonomy endpoint will return a paginated list of all available taxonomies.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Taxonomy"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation."
+          }
+        },
+        "summary": "List taxonomies",
+        "tags": ["Taxonomies"]
+      }
+    },
+    "/venues": {
+      "get": {
+        "description": "To find a venue matching your search criteria you will send a request to the `/venues` endpoint. Sending a request to `/venues` will return a paginated list of all venues. All parameters can be used with each other, with the exception of the ID parameter. ID can only be used with the API-wide parameters, such as those for pagination and sorting.",
+        "parameters": [
+          {
+            "description": "optional, default is null. The city parameter is used to scope the result to a specified city. A query to the city parameter looks like this: `/venues?city=rockford`. This will return documents for venues located in \"Rockford\".",
+            "in": "query",
+            "name": "city",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. The state parameter is used to scope the result to a specified state. A query to the state parameter looks like this: `/venues?state=IL`. This will return documents for venues located in Illinois. The two letter state abbreviation should be used for this query.",
+            "in": "query",
+            "name": "state",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. The country parameter is used to scope the result to a specified country. A query to the country parameter looks like this: `/venues?country=US`. This will return documents for venues located in the United States. The two letter country code should be used for this query.",
+            "in": "query",
+            "name": "country",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. The postal_code parameter is used to scope the result to a specified postal/zip code. A query to the postal_code parameter looks like this: `/venues?postal_code=90210`. This will return documents for venues located in 90210.",
+            "in": "query",
+            "name": "postal_code",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. The q parameter is used to search across all possible parts of a response document. This is a very broad search, and, like events and performers, will possibly return unexpected results.",
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "format": "query",
+              "type": "string"
+            }
+          },
+          {
+            "description": "optional, default is null. This parameter has two purposes. You can use it to force a single venue response document into the bulk response document. Alternatively you can use it to bulk retrieve venues with known unique IDs. This parameter also has an alternate syntax. You can pass a comma separated list of unique IDs. **Note: Using this parameter will override all other query parameters.**",
+            "in": "query",
+            "name": "id",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Venue"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "successful operation."
+          }
+        },
+        "summary": "List venues",
+        "tags": ["Venues"]
+      }
+    },
+    "/venues/{venueId}": {
+      "get": {
+        "description": "To get a single venue document, simply add the ID of the venue to the URL.",
+        "parameters": [
+          {
+            "description": "required. The ID of the venue to retrieve.",
+            "in": "path",
+            "name": "venueId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Venue"
+                }
+              }
+            },
+            "description": "successful operation."
+          }
+        },
+        "summary": "Get a venue by ID",
+        "tags": ["Venues"]
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.seatgeek.com/2"
+    },
+    {
+      "description": "Production",
+      "url": "https://api.seatgeek.com/2"
+    }
+  ],
+  "tags": [
+    {
+      "description": "Use the Events endpoints to retrieve information about events publicly available on SeatGeek. All parameters can be used with each other with the exception of the `id` parameter. `id` can only be used with API-wide parameters, such as those for pagination and sorting.",
+      "name": "Events"
+    },
+    {
+      "description": "Use the Performers endpoints to retrieve information about performers on SeatGeek. Every event has one or more performers. All parameters can be used with each other with the exception of the `id` parameter. `id` can only be used with API-wide parameters, such as those for pagination and sorting.",
+      "name": "Performers"
+    },
+    {
+      "description": "Use the Venues endpoints to retrieve information about venues on SeatGeek. All parameters can be used with each other with the exception of the `id` parameter. `id` can only be used with API-wide parameters, such as those for pagination and sorting.",
+      "name": "Venues"
+    },
+    {
+      "description": "To retrieve a list of all available taxonomies available for taxonomy filtering simply call the `/taxonomies` endpoint.",
+      "name": "Taxonomies"
+    },
+    {
+      "description": "The SeatGeek API supports retrieval of recommended events based on one of several different 'seed' types. A seed can be thought of as 'X in the request', 'give me events similar to X'. Use the Recommendations endpoint to get a list of recommended events sorted by affinity score.",
+      "name": "Recommendations"
+    },
+    {
+      "description": "The SeatGeek API supports retrieval of recommended performers based on one of several different 'seed' types. A seed can be thought of as 'X in the request', 'give me performers similar to X'. The semantics are very similar to those for recommended events (see above).",
+      "name": "Recommended Performers"
+    }
+  ]
+}
