@@ -29,6 +29,8 @@ module "network" {
   ip_range        = var.network_ip_range
   subnet_ip_range = var.subnet_ip_range
   labels          = local.labels
+
+  delete_protection = var.network_delete_protection
 }
 
 module "firewall" {
@@ -66,6 +68,9 @@ module "compute" {
   db_data_volume_size = var.db_data_volume_size
 
   enable_proxy_protocol = var.enable_proxy_protocol
+
+  db_delete_protection = var.db_delete_protection
+  lb_delete_protection = var.lb_delete_protection
 
   # Servers cannot join a network before its subnet exists, and the subnet is
   # not in the servers' own dependency chain.

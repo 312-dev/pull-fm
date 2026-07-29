@@ -35,18 +35,34 @@ register:
 
   - id: PULLFM-RISK-005
     title: "Cloudflare automation still depends on the account-wide global API key"
-    status: accepted
+    status: retired
     severity: high
     threat_ids:
       - T27
       - T30
-    description: "Terraform's Cloudflare provider runs with CLOUDFLARE_API_KEY, the legacy global key. That credential cannot be scoped: it grants full control of all 13 zones on the personal account, plus R2, plus billing, and it cannot be restricted to pull.fm. It is not isolated by environment either, so the same key serves staging and would serve production. A scoped token exists (1Password: Cloudflare API - fast.fm) and correctly sees only the pull.fm zone, but it holds read-only DNS and no R2 permission, so terraform plan fails against it with 'failed to make http request' on every dns_record and on the r2_bucket."
-    justification: "The scoped token needs two permissions it was not granted: Zone -> DNS -> Edit, and Workers R2 Storage -> Edit. Until those are added the global key is the only credential that can apply. Exposure is bounded by the key never being committed, never reaching CI, and living only in a local shell resolved from 1Password at call time. The R2 state backend already uses a properly scoped, R2-only token, so the highest-value target no longer depends on the global key."
-    compensating_controls: "Key is read from 1Password per invocation and never persisted, never written to a file, and never passed to a provider argument that would render it into a plan file. gitleaks blocks it at commit and in CI. Terraform state lives in R2 under a separate scoped credential. No workflow in this repository has access to it."
+    description: "Terraform's Cloudflare provider ran with CLOUDFLARE_API_KEY, the legacy global key. That credential cannot be scoped: it granted full control of every zone on the personal account, plus R2, plus billing, and could not be restricted to pull.fm. It was not isolated by environment either, so the same key served staging and would have served production. The scoped token that existed at the time held read-only DNS and no R2 permission, so terraform plan failed against it with 'failed to make http request' on the r2_bucket."
+    justification: "Retired on 2026-07-29, not renewed. While it was open the justification was that the scoped token lacked two permissions it had not been granted, so the global key was the only credential that could apply, with exposure bounded by the key never being committed, never reaching CI, and living only in a local shell resolved from 1Password at call time."
+    compensating_controls: "Now structural rather than procedural: infra/lib/credentials.sh refuses to run when CLOUDFLARE_API_KEY or CLOUDFLARE_EMAIL are present, so the failure mode where the provider silently prefers the global key over the scoped token cannot recur unnoticed. Both env tokens are also checked at load time against the zones they can actually enumerate, and the Hetzner token against the servers it can see."
     owner: "ope@312.dev"
     accepted_on: 2026-07-29
     expires_on: 2026-09-12
-    review_notes: "Close by re-issuing the pull.fm-scoped token with Zone -> DNS -> Edit and Workers R2 Storage -> Edit, then switching the provider to CLOUDFLARE_API_TOKEN and unsetting CLOUDFLARE_EMAIL and CLOUDFLARE_API_KEY. Verify by running terraform plan with the global key absent from the environment. Related: PULLFM-RISK-001 covers the shared account itself, which is a separate and larger change."
+    review_notes: "CLOSED 2026-07-29 with evidence, not renewed. Permission group bf7481a1826f439697cb59a20b22293e (Workers R2 Storage Write) was added at account scope to both per-environment tokens (staging 70c4836b01fa594b01922103debfe3bd, prod 2bec8e1d09c9f5f3eaf5dbb8c83a4cac) using the global key purely as bootstrap. Proof: terraform plan in envs/staging and envs/shared both report 'No changes' at exit code 0 with CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL absent from the environment entirely, and the staging token enumerates exactly one zone (pull.fm). The superseded 1Password item 'Cloudflare API - fast.fm' held a token that no longer verifies and has been archived. What remains is narrower and is tracked separately as PULLFM-RISK-006."
+    example: false
+
+  - id: PULLFM-RISK-006
+    title: "Environment Cloudflare tokens hold account-scoped R2 write"
+    status: accepted
+    severity: medium
+    threat_ids:
+      - T27
+      - T30
+    description: "Each per-environment Cloudflare token is zone-scoped for DNS and TLS but holds Workers R2 Storage Write at ACCOUNT scope, because cloudflare_r2_bucket is an account-scoped resource. The consequence is that the staging token can create, modify and delete any R2 bucket on the account, including pull-fm-tfstate (Terraform state) and any future production backup bucket, and the production token can do the same to staging's. R2 write is therefore the one dimension in which staging and production are not isolated from each other, and it reaches the backup repository that Gate 4's restore drill depends on."
+    justification: "Cloudflare publishes no narrower permission that covers bucket create and delete. The two bucket-scoped groups (Workers R2 Storage Bucket Item Read and Write, scope com.cloudflare.edge.r2.bucket) grant object operations only, so a token holding them cannot manage the bucket resource itself and terraform plan fails with 'failed to make http request'. The alternatives are worse: taking R2 out of Terraform means the backup bucket stops being described by IaC and Gate 0's zero-drift assertion no longer covers it, and a separate bucket-only token per environment cannot create the bucket in the first place, so it does not remove the account-scoped credential, only adds a second one."
+    compensating_controls: "The account currently holds exactly two R2 buckets, both Pull.fm's, so the reachable blast radius today is Pull.fm's own data rather than the personal fleet's. Terraform state is a separate credential (pull-fm/infra/R2_TFSTATE) so a revoked environment token does not lock the operator out of state. Object versioning is enabled on the state bucket, so a destructive write is recoverable. No workflow in this repository holds either token; both live in 1Password and are resolved per invocation."
+    owner: "ope@312.dev"
+    accepted_on: 2026-07-29
+    expires_on: 2027-01-20
+    review_notes: "At review, first re-check whether Cloudflare has shipped a bucket-scoped permission group covering bucket create and delete; if it has, split the R2 policy per environment and close this. Otherwise confirm the account still holds no unrelated R2 buckets, since this acceptance rests on that being true, and it is a fact about the account rather than a property the token enforces. Escalate to high before production carries real user backups if nothing has changed. Related: PULLFM-RISK-001 covers the shared account itself."
     example: false
 
   - id: PULLFM-RISK-003
@@ -181,17 +197,18 @@ parser, and the subset is comfortably expressive enough for this schema.
 
 ## Current entries
 
-The four entries above are **seeded examples**, marked `example: true`. Each describes a condition
-that is genuinely true of this repository today, so they are usable as-is, but the owner and the
-dates need operator confirmation before they should be treated as real accepted risks rather than
-templates.
+Three of the entries below are **seeded examples**, marked `example: true`. Each describes a
+condition that is genuinely true of this repository today, so they are usable as-is, but the owner
+and the dates need operator confirmation before they should be treated as real accepted risks
+rather than templates. `PULLFM-RISK-006` is not an example: it is a live acceptance created when
+`PULLFM-RISK-005` was closed.
 
-| ID              | Title                                             | Severity | Expires    |
-| --------------- | ------------------------------------------------- | -------- | ---------- |
-| PULLFM-RISK-001 | Shared Cloudflare account                         | high     | 2026-10-26 |
-| PULLFM-RISK-005 | Cloudflare automation uses the global API key     | high     | 2026-09-12 |
-| PULLFM-RISK-003 | KEK escrow has no second holder                   | high     | 2026-10-15 |
-| PULLFM-RISK-004 | DAST active scan is nightly, not per-pull-request | low      | 2026-10-31 |
+| ID              | Title                                              | Severity | Expires    |
+| --------------- | -------------------------------------------------- | -------- | ---------- |
+| PULLFM-RISK-001 | Shared Cloudflare account                          | high     | 2026-10-26 |
+| PULLFM-RISK-006 | Env Cloudflare tokens hold account-scoped R2 write | medium   | 2027-01-20 |
+| PULLFM-RISK-003 | KEK escrow has no second holder                    | high     | 2026-10-15 |
+| PULLFM-RISK-004 | DAST active scan is nightly, not per-pull-request  | low      | 2026-10-31 |
 
 ### Retired
 
@@ -206,3 +223,31 @@ whoever controls the upstream namespace; a SHA cannot.
 
 A CI lint rejecting any unpinned `uses:` reference guards against regression, so the risk cannot
 silently return.
+
+`PULLFM-RISK-005` (Cloudflare automation depends on the global API key) was **closed on
+2026-07-29**, one day after it was opened, and it is worth saying why it took a day rather than
+the six weeks its expiry allowed.
+
+The register entry claimed the scoped token needed `Zone -> DNS -> Edit` and
+`Workers R2 Storage -> Edit`. The first half was already true of the replacement tokens. The
+second half was the whole blocker, and the reason it looked like something else is that
+Cloudflare answers a missing account-scoped permission with `failed to make http request` - an
+error that reads like a network fault, not an authorization one. Adding permission group
+`bf7481a1826f439697cb59a20b22293e` to both per-environment tokens, using the global key purely to
+make that one edit, was the entire fix.
+
+**The evidence that closed it** is `terraform plan` reporting `No changes` at exit code 0 in both
+`envs/staging` and `envs/shared` with `CLOUDFLARE_API_KEY` and `CLOUDFLARE_EMAIL` absent from the
+environment entirely, plus the staging token enumerating exactly one zone when asked for all of
+them.
+
+**What did not close** is recorded as `PULLFM-RISK-006` rather than folded into the closure
+notice. The R2 permission is account-scoped because Cloudflare offers nothing narrower for bucket
+lifecycle, so staging and production are still not isolated from each other on that one axis.
+Retiring 005 without opening 006 would have turned a real residual into a green tick.
+
+The lasting control is not the token edit, which a future shell profile could undo by exporting
+the global key again. It is that `infra/lib/credentials.sh` **refuses to run** when
+`CLOUDFLARE_API_KEY` or `CLOUDFLARE_EMAIL` are set. The Cloudflare provider prefers the global key
+when both are present, so without that guard the regression would be silent and every artifact in
+the repository would still look correct.

@@ -1,20 +1,37 @@
 # Pull.fm - Infrastructure as Code
 
-> ## STAGING IS APPLIED. PROD IS NOT.
+> ## STAGING IS TORN DOWN. PROD HAS NEVER BEEN APPLIED.
 >
-> `envs/staging` and `envs/shared` are live as of **2026-07-28** and both plan
-> with zero drift. `envs/prod` has never been applied and stays that way until
-> Phase 6.
+> As of **2026-07-29** staging is deliberately **DOWN** and the Hetzner run rate
+> is **EUR 0.00/mo**. It is ephemeral by design (`docs/PLAN.md` section 10c);
+> bring it up for a gate run with `./infra/staging-env.sh up` and take it back
+> down afterwards. `envs/shared` (zone TLS posture) stays applied because a zone
+> setting has no hourly cost. `envs/prod` stays unapplied until Phase 6.
 >
-> State is still **local**, not in R2. Migrating it is the first task of the
-> next infrastructure change; until then a lost laptop means an orphaned
-> environment, and that is the single largest operational risk in this
-> directory.
+> **The rebuild does not come back healthy, and that is a real gap, not a
+> teething problem.** Terraform recreates the whole environment in 45 seconds,
+> but the node then serves nothing: config management is a manual SSH runbook,
+> so `/healthz` returns Cloudflare 525 and both load balancer targets report
+> unhealthy. Measured by doing it. See
+> [`../staging/README.md`](../staging/README.md).
 >
-> **Gate $ is still open.** Billing alerts are not configured on any vendor,
-> which means staging was applied ahead of its own precondition. Recorded here
-> rather than quietly skipped: a solo operator with an attached card and no
-> spend cap is a documented failure mode, and it currently applies.
+> **`envs/staging` state lives in R2** (`pull-fm-tfstate`) since 2026-07-29.
+> Backend wiring is per-root `backend.hcl` (gitignored); the credentials come
+> from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+>
+> **`envs/shared` and `envs/prod` still have the backend block commented out, so
+> their state is local.** That matters most for `shared`, which is the root that
+> is actually applied: losing this laptop orphans the zone TLS posture. Migrating
+> both is the next infrastructure task.
+>
+> **Applies run on a per-environment scoped Cloudflare token.** The account-wide
+> global API key is bootstrap-only and `infra/lib/credentials.sh` refuses to run
+> when it is present. See [Environment variables](#environment-variables).
+>
+> **Gate $ is partially closed.** Cloudflare billing alerts are armed and
+> machine-verified by `make cost`; the Hetzner cost limit has no API and remains
+> a manual console step. Full detail and the click path:
+> [`docs/RUNBOOK-COST.md`](../../docs/RUNBOOK-COST.md).
 
 Terraform for the Pull.fm backend: Hetzner Cloud compute and networking,
 Cloudflare DNS and TLS posture, and the Cloudflare R2 bucket that holds the
@@ -64,20 +81,44 @@ records stay in the environment roots.
 | Cloudflare zone `pull.fm`       | Already on the account. See the open decision in `docs/PLAN.md` section 10 about the shared Cloudflare account.     |
 | An R2 state bucket              | Created once by hand; see [Remote state](#remote-state).                                                            |
 | Tailscale tailnet               | The only path to SSH. See [Ingress posture](#ingress-posture).                                                      |
-| Billing alerts                  | Gate $. Blocking.                                                                                                   |
+| Billing alerts                  | Gate $. Cloudflare armed, Hetzner manual. [`docs/RUNBOOK-COST.md`](../../docs/RUNBOOK-COST.md).                     |
 
 ### Environment variables
 
 Credentials are **never** Terraform variables. They are read from the
-environment by the providers themselves:
+environment by the providers themselves, and loaded from 1Password by one
+helper rather than by hand:
 
 ```bash
-export HCLOUD_TOKEN="$(op read 'op://MCP/hetzner/pull-fm/API_TOKEN')"
-export CLOUDFLARE_API_TOKEN="$(op read 'op://MCP/cloudflare/pull-fm/API_TOKEN')"
+source infra/lib/credentials.sh
+pullfm_load_credentials staging     # or prod, or shared
+```
 
-# Only needed once the R2 remote state backend is enabled:
-export AWS_ACCESS_KEY_ID="$(op read 'op://MCP/r2/pull-fm-tfstate/ACCESS_KEY_ID')"
-export AWS_SECRET_ACCESS_KEY="$(op read 'op://MCP/r2/pull-fm-tfstate/SECRET_ACCESS_KEY')"
+That exports exactly four values:
+
+| Variable                | Source (1Password vault `MCP`)       | Consumed by           |
+| ----------------------- | ------------------------------------ | --------------------- |
+| `HCLOUD_TOKEN`          | `Hetzner pull.fm API Token`          | `hcloud` provider     |
+| `CLOUDFLARE_API_TOKEN`  | `pull-fm/<env>/CLOUDFLARE_API_TOKEN` | `cloudflare` provider |
+| `AWS_ACCESS_KEY_ID`     | `pull-fm/infra/R2_TFSTATE`           | S3 state backend      |
+| `AWS_SECRET_ACCESS_KEY` | `pull-fm/infra/R2_TFSTATE`           | S3 state backend      |
+
+Note the item titles contain `/`, which is also the `op://` secret-reference
+separator, so `op read` cannot address them. The helper uses
+`op item get <title> --fields label=<field> --reveal` instead.
+
+**`CLOUDFLARE_API_TOKEN` is the documented and only supported auth path.**
+
+**The global API key is bootstrap-only.** `CLOUDFLARE_API_KEY` +
+`CLOUDFLARE_EMAIL` are the legacy account-wide credential. The Cloudflare
+provider accepts them and **prefers them when both are set**, which means a
+stray export in a shell profile silently returns every apply to an unscoped
+credential while the code still looks correct. The key exists for exactly one
+purpose - minting and editing the scoped tokens - and
+`pullfm_load_credentials` **refuses to run** when either variable is present:
+
+```
+REFUSING TO RUN: CLOUDFLARE_API_KEY/CLOUDFLARE_EMAIL are set.
 ```
 
 **Why no `token` argument on the provider blocks.** Any value assigned to a
@@ -88,9 +129,26 @@ value at all is the only version of this that cannot leak. The provider blocks
 in `envs/*/providers.tf` are deliberately empty.
 
 **Token scopes.** The Hetzner token needs Read & Write on the `pull-fm` project
-only. The Cloudflare token needs `Zone:DNS:Edit` and `Zone:Zone Settings:Edit`
-on `pull.fm`, plus `Account:Workers R2 Storage:Edit`. Do not reuse the personal
-fleet's global API key.
+only. Each Cloudflare environment token holds:
+
+| Resource       | Permission groups                                                     |
+| -------------- | --------------------------------------------------------------------- |
+| zone `pull.fm` | DNS Write, Zone Read, Zone Settings Write, SSL and Certificates Write |
+| account        | Workers R2 Storage Write                                              |
+
+The account-level R2 grant is the one place the scope is wider than a zone, and
+it is not avoidable: R2 buckets are account-scoped resources, and Cloudflare
+publishes no zone-level or per-bucket permission group covering bucket
+create/delete (`Workers R2 Storage Bucket Item Read/Write` scope to objects,
+not to buckets). Without it, `terraform plan` fails with `failed to make http
+request` on `cloudflare_r2_bucket`. The residual exposure is every R2 bucket on
+the account; today that set is exactly the two Pull.fm buckets, but that is a
+fact about the account, not a property enforced by the token.
+
+**The helper verifies scope rather than trusting it.** Before any apply,
+`pullfm_assert_cloudflare_scope` lists zones with the token and aborts if
+anything other than `pull.fm` comes back, and `pullfm_assert_hetzner_project`
+aborts if the Hetzner token can see the operator's personal fleet.
 
 ### Non-secret variables
 
@@ -109,12 +167,14 @@ placeholders.** There must never be a secret in either.
 
 ## Remote state
 
-The `backend "s3"` block in each `envs/*/versions.tf` is **commented out and
-carries no hardcoded bucket, endpoint or credential.** R2 is S3-compatible, so
-the stock S3 backend drives it.
+**Enabled since 2026-07-29.** The `backend "s3"` block in `envs/*/versions.tf`
+carries only the state key; the bucket, endpoint and credentials are supplied at
+`init` time and **none of them are hardcoded**. R2 is S3-compatible, so the
+stock S3 backend drives it.
 
-Bootstrapping is a chicken-and-egg problem: the config that creates the state
-bucket cannot store its state in that bucket. Order:
+Bootstrapping was a chicken-and-egg problem: the config that creates the state
+bucket cannot store its state in that bucket. The order that was followed, and
+that a fresh environment would repeat:
 
 1. Create the state bucket once, by hand:
    ```bash
@@ -122,12 +182,14 @@ bucket cannot store its state in that bucket. Order:
    ```
    Turn on **object versioning**. State is the only artifact in this project that
    cannot be rebuilt from this repository.
-2. Create an R2 API token scoped to **Object Read & Write on that bucket only**,
-   and record it in 1Password.
+2. Create an R2 API token for the state bucket and record it in 1Password as
+   `pull-fm/infra/R2_TFSTATE`. Kept separate from the environment tokens on
+   purpose: state must stay readable even if an environment credential is
+   revoked mid-incident.
 3. Copy `backend.hcl.example` to `backend.hcl` (gitignored) and fill in the
    account-specific endpoint.
-4. Run the first apply on **local state**, then uncomment the `backend "s3"`
-   block and run `terraform init -backend-config=backend.hcl -migrate-state`.
+4. Run the first apply on **local state**, then add the `backend "s3"` block and
+   run `terraform init -backend-config=backend.hcl -migrate-state`.
 
 R2 has no DynamoDB equivalent, so locking uses Terraform's native S3 lockfile
 (`use_lockfile = true`) rather than `dynamodb_table`. The `skip_*` flags in
@@ -141,8 +203,10 @@ calls that fail against R2 before `init` ever reaches the bucket.
 ```bash
 cd infra/terraform/envs/staging
 
+source ../../../lib/credentials.sh && pullfm_load_credentials staging
+
 cp terraform.tfvars.example terraform.tfvars   # then edit
-terraform init                                  # add -backend-config=backend.hcl once enabled
+terraform init -backend-config=backend.hcl
 terraform fmt -recursive -check
 terraform validate
 terraform plan -out=tfplan                      # READ THE PLAN
@@ -376,26 +440,50 @@ Not gaps to fill silently - other tracks own them:
 
 Run from a clean checkout on `darwin_arm64`, Terraform v1.15.8:
 
-| Check                                             | Result                                     |
-| ------------------------------------------------- | ------------------------------------------ |
-| `terraform fmt -recursive -check`                 | pass                                       |
-| `terraform validate` (`envs/staging`)             | pass                                       |
-| `terraform validate` (`envs/prod`)                | pass                                       |
-| `terraform validate` (`envs/shared`)              | pass                                       |
-| `trivy config --severity HIGH,CRITICAL`           | 0 misconfigurations across all three roots |
-| `semgrep --config=p/terraform --config=p/secrets` | 0 findings                                 |
-| `gitleaks dir --config .gitleaks.toml`            | no leaks found                             |
-| `terraform plan` (`envs/staging`)                 | **exit 0, no changes** (2026-07-28)        |
-| `terraform plan` (`envs/shared`)                  | **exit 0, no changes** (2026-07-28)        |
-| `terraform apply` (`envs/prod`)                   | **NOT RUN.** Phase 6.                      |
+| Check                                             | Result                                                                                   |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `terraform fmt -recursive -check`                 | pass                                                                                     |
+| `terraform validate` (`envs/staging`)             | pass                                                                                     |
+| `terraform validate` (`envs/prod`)                | pass                                                                                     |
+| `terraform validate` (`envs/shared`)              | pass                                                                                     |
+| `trivy config --severity HIGH,CRITICAL`           | 0 misconfigurations across all three roots                                               |
+| `semgrep --config=p/terraform --config=p/secrets` | 0 findings                                                                               |
+| `gitleaks dir --config .gitleaks.toml`            | no leaks found                                                                           |
+| `terraform plan` (`envs/staging`)                 | **exit 0, no changes** (2026-07-29), with the global API key absent from the environment |
+| `terraform plan` (`envs/shared`)                  | **exit 0, no changes** (2026-07-29), same                                                |
+| `terraform destroy` (staging, keep-list)          | **19 destroyed, run rate EUR 0.00/mo** (2026-07-29)                                      |
+| `terraform apply` (staging, from nothing)         | **19 created in 45 seconds** (2026-07-29)                                                |
+| staging serving after that rebuild                | **NO.** HTTP 525, both LB targets unhealthy. See `../staging/README.md`.                 |
+| `terraform apply` (`envs/prod`)                   | **NOT RUN.** Phase 6.                                                                    |
 
 What the first real applies settled, none of which `validate` could have:
 
 - **CAX is unavailable**, and so is CX, in every EU location. The allowlist now
   admits the `cpx_1_` series; see the validation block in
   `modules/compute/variables.tf`.
-- The Cloudflare **global API key** works for every call made here. A scoped
-  token was not tested.
+- **A keep-list cannot save a dependent.** `terraform destroy -target` destroys
+  the targets and everything downstream of them, so the DNS records went with
+  the load balancer whose address they publish, no matter that
+  `staging-env.sh`'s `KEEP` array named `module.dns`. The header promised
+  something the mechanism could not deliver. DNS is now documented as rebuilt by
+  `up`, and only the R2 bucket - which depends on nothing - is kept.
+- **`delete_protection` defaulted to true everywhere and nothing overrode it.**
+  `docs/PLAN.md` section 10c says "Production sets it true; staging false", but
+  the env roots never passed the variable at all, so the module defaults applied
+  to both. The first teardown failed **halfway**: the app node, firewalls and
+  DNS were gone while the database node and load balancer stayed up and kept
+  billing, which is the worst of both states. The roots now set it explicitly
+  (staging false, prod true), and `staging-env.sh` clears the flag over the
+  Hetzner API before destroying, because by the time a targeted destroy reaches
+  a protected resource the graph that would flip it is already half gone. A
+  documented decision that is not wired to anything is indistinguishable from
+  not having made it.
+- **A zone-scoped Cloudflare token is not sufficient on its own**, and the way
+  it fails is unhelpful. `cloudflare_r2_bucket` is an account-scoped resource,
+  so a token holding only zone permissions returns `failed to make http
+request` - a transport-shaped error for what is actually an authorization
+  problem. Adding `Workers R2 Storage Write` at the account level fixes it. The
+  global API key masked this because it holds everything.
 - Hetzner **load balancer health checks carry the PROXY protocol header** when
   `proxyprotocol` is enabled on the service. This is not documented by Hetzner
   and is the difference between a working origin and every target being marked
