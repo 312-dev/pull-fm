@@ -15,7 +15,9 @@ gate, not designed on paper.
 **Scale target (restated honestly) [R]:** engineered for **10,000 users**, with a _documented and
 costed_ path to 50,000. v1 claimed 50k needed "no data migration, no re-platform." That is false:
 the binding constraint at 50k is **upstream API quota**, not our infrastructure, and relieving it
-requires a local MusicBrainz mirror. See §3.
+requires a local MusicBrainz data layer. **Corrected 2026-07-29:** this read "a local MusicBrainz
+mirror", which meant the CC BY-NC-SA Live Data Feed. It is a local load of the **CC0 canonical
+dump** instead, and the difference is a permanent licence change, not a technique. See §3a.
 
 ---
 
@@ -293,10 +295,64 @@ IPs, **cold-cache resolution against iTunes is arithmetically impossible.**
 **Therefore the architecture is cache-first, not fetch-first:**
 
 1. Every MBID-keyed fact is written to Postgres on first resolution and served from there forever.
-2. A **local MusicBrainz mirror** is the documented 50k unlock, budgeted (~50 GB + replication)
-   and explicitly _not_ pretended away.
+2. A **local load of the CC0 MusicBrainz canonical dump** is the documented MusicBrainz unlock.
+   **Corrected 2026-07-29** - this item previously read "a local MusicBrainz mirror", which meant
+   the Live Data Feed. See §3a.
 3. Preview resolution is a **background job**, never a synchronous request path.
 4. Every provider sits behind a **circuit breaker + quota counter + runtime kill switch**.
+
+### 3a. MusicBrainz discovery is local-first over CC0 data, with the API as fallback
+
+**Corrected 2026-07-29.** The v2 plan named a "local MusicBrainz mirror" as the 50k unlock and
+budgeted it at ~50 GB plus replication. A mirror means the **Live Data Feed**, and the Live Data
+Feed replication packets are **CC BY-NC-SA 3.0**, not CC0. Loading them would attach attribution,
+NonCommercial and ShareAlike obligations to the entire local database and to everything derived
+from it, **permanently and irreversibly**. That would take §1a - a reversible operator decision -
+and convert it into an irreversible technical one made by whoever ran the import. Full evidence in
+[`compliance/metabrainz-terms-review.md` F5](./compliance/metabrainz-terms-review.md#f5-a-mirror-is-not-cc0)
+and the licence split in [`UPSTREAM-TERMS.md` M1-M3](./UPSTREAM-TERMS.md).
+
+**The shape now being built:**
+
+```
+resolve(name) ->  1. mbid_crosswalk            (already resolved once, permanent)
+                  2. mb.canonical              (local CC0 dump, refreshed fortnightly)
+                  3. MusicBrainz web service   (1 req/s, global, the residue only)
+```
+
+Layers 1 and 3 exist. **Layer 2 is being built, not running.** As of 2026-07-29 the schema
+migration and the lookup-key reproduction are in the tree and the loader is not finished; the
+layer ships behind a **feature flag that defaults OFF**, and with the flag off the resolver
+behaves exactly as it does today. Do not describe this as a live capability, and do not count its
+hit rate in any gate until the flag is on in staging with a loaded table behind it.
+
+**Why the canonical dump specifically, and not the full export:**
+
+| Property          | Canonical dump                                     | Live Data Feed / `mbdump-derived`                        |
+| ----------------- | -------------------------------------------------- | -------------------------------------------------------- |
+| Licence           | **CC0 1.0**, verified from the archive's `COPYING` | **CC BY-NC-SA 3.0**                                      |
+| MetaBrainz signup | **None.** Anonymous HTTPS, `HTTP 200`              | Access token required for the Feed                       |
+| Size              | 2.32 GB compressed, one CSV                        | 6.88 GB core + 0.47 GB derived, or streaming replication |
+| Refresh           | Fortnightly file, re-load and swap                 | Continuous replication to keep running                   |
+| Encumbrance       | None. CC0 attaches nothing downstream              | Permanent, irreversible, forecloses commercial use       |
+
+The CC0 status is **verified, not assumed** - the 2026-07-28 review asserted it without a source,
+and that gap was closed on 2026-07-29 by extracting the `COPYING` file from inside the published
+archive (`sha256 75f3c90d...`, verbatim "Creative Commons Legal Code / CC0 1.0 Universal") and
+corroborating it against `metabrainz.org/datasets/derived-dumps`.
+
+**Two consequences to design around rather than discover:**
+
+- **Freshness is bounded at about 14 days.** The dump is published twice a month and only two are
+  retained; on 2026-07-29 the newest was 12 days old. This is tolerable **because MBIDs are
+  permanent** - a stale dump yields a miss, never a wrong answer - **and because every miss falls
+  through to layer 3**, which is live. The residue is that music released in the last fortnight
+  resolves against the 1 req/s API, which is the worst possible distribution for a discovery
+  product and should be watched as a hit-rate metric, not assumed away.
+- **No genre data.** `mbdump-derived.tar.bz2` is where genre associations live and it is BY-NC-SA,
+  so it is not taken. **Any roadmap item that ranks, filters or clusters by MusicBrainz genre is
+  foreclosed** unless this decision is reopened explicitly, dated, by the operator, the way §1a was.
+  It is not foreclosed by accident and it must not be un-foreclosed by accident either.
 
 ---
 
@@ -807,7 +863,14 @@ These cannot be resolved by engineering judgment.
 3. ~~**Apple Developer D-U-N-S**~~ **Moot under item 6.** Required only for store distribution,
    which is no longer the plan. Reopen only if the store channel is ever reconsidered.
 4. **Cloudflare account separation** - separate account for Pull.fm, or accept shared blast radius?
-5. **MusicBrainz mirror** - commit to it for 50k, or cap the service at ~10k and say so?
+5. ~~**MusicBrainz mirror** - commit to it for 50k, or cap the service at ~10k and say so?~~
+   **RESOLVED 2026-07-29: neither. No Live Data Feed mirror, ever, at any scale.** The mirror was
+   never only a cost question - it is a permanent licence change from CC0 to CC BY-NC-SA on the
+   whole local database. The scaling answer is a local load of the **CC0 canonical dump** with the
+   1 req/s API as fallback; see §3a. **What remains open is narrower and is a product question, not
+   an infrastructure one: genre.** A licence-clean import carries no genre associations, so if a
+   genre-driven feature is ever wanted, the operator must either source genre from another provider
+   or reopen this decision and accept BY-NC-SA in writing.
 6. ~~**Distribution target**~~ **RESOLVED 2026-07-28: GitHub Releases.** Ship signed APK and
    desktop artifacts as GitHub Release assets rather than through app stores. **Gate S is
    retired**, along with the D-U-N-S wait and the $99 + $25 developer fees.

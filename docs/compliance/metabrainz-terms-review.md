@@ -5,6 +5,15 @@ server source at `metabrainz/listenbrainz-server@master` where the live page cou
 (see [Source retrieval log](#source-retrieval-log) - two pages could not be read and are
 disclosed rather than reconstructed).
 
+**Amended 2026-07-29.** The original [F5](#f5-a-mirror-is-not-cc0) was right about the Live Data
+Feed and wrong to state its alternative as if it were sourced: it offered "the CC0 canonical data
+dumps" with no citation, because at the time there was none - the MusicBrainz Data License page
+does not mention canonical dumps at all. That gap has now been closed by direct inspection of the
+published artifacts and by a MetaBrainz page the original review never read. **The CC0 status of
+the canonical dump is now verified, not assumed**, and the finding is closed as a decision rather
+than left open. The amendment also records the part of the answer nobody wanted: the
+licence-clean import carries no genre data. Everything added on 2026-07-29 is marked as such.
+
 **This is not legal advice.** It is the operator's reading of published terms. Clause and page
 content move; re-audit before launch and quarterly after.
 
@@ -40,30 +49,30 @@ compliance win available and it should be taken before there are users.
 
 ## Findings, prioritised
 
-| #   | Finding                                                                         | Severity          | Status            |
-| --- | ------------------------------------------------------------------------------- | ----------------- | ----------------- |
-| F1  | `inc=tags` pulls CC BY-NC-SA 3.0 data into a CC0-only design                    | **P0**            | Needs changing    |
-| F2  | No MusicBrainz attribution is emitted in the response envelope                  | **P0** (given F1) | Needs changing    |
-| F3  | ListenBrainz rate limit is hard-coded, not header-driven                        | **P1**            | Needs changing    |
-| F4  | `legal/attribution.md` section 6 is wrong about MetaBrainz                      | **P1**            | Needs changing    |
-| F5  | A MusicBrainz mirror would be CC BY-NC-SA, not CC0                              | **P1**            | Design decision   |
-| F6  | LB and MB responses are not actually cached yet                                 | **P1**            | Needs changing    |
-| F7  | Non-commercial status holds today but the tier test is not purely revenue-based | **P2**            | Ask MetaBrainz    |
-| F8  | MusicBrainz User-Agent format deviates from the suggested form                  | **P3**            | Acceptable, noted |
-| F9  | ListenBrainz terms are defined by five external documents that can change       | **P2**            | Process change    |
-| F10 | Cover Art Archive is a separate, unaudited provider                             | **P2**            | Watch item        |
+| #   | Finding                                                                         | Severity          | Status                  |
+| --- | ------------------------------------------------------------------------------- | ----------------- | ----------------------- |
+| F1  | `inc=tags` pulls CC BY-NC-SA 3.0 data into a CC0-only design                    | **P0**            | Needs changing          |
+| F2  | No MusicBrainz attribution is emitted in the response envelope                  | **P0** (given F1) | Needs changing          |
+| F3  | ListenBrainz rate limit is hard-coded, not header-driven                        | **P1**            | Needs changing          |
+| F4  | `legal/attribution.md` section 6 is wrong about MetaBrainz                      | **P1**            | Needs changing          |
+| F5  | A MusicBrainz mirror would be CC BY-NC-SA, not CC0                              | **P1**            | **Resolved 2026-07-29** |
+| F6  | LB and MB responses are not actually cached yet                                 | **P1**            | Needs changing          |
+| F7  | Non-commercial status holds today but the tier test is not purely revenue-based | **P2**            | Ask MetaBrainz          |
+| F8  | MusicBrainz User-Agent format deviates from the suggested form                  | **P3**            | Acceptable, noted       |
+| F9  | ListenBrainz terms are defined by five external documents that can change       | **P2**            | Process change          |
+| F10 | Cover Art Archive is a separate, unaudited provider                             | **P2**            | Watch item              |
 
 ### Already compliant - do not change these
 
-| Area                                                | Why it is compliant                                                                                                                                                                           |
-| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MusicBrainz 1 req/s process-wide limiter            | Matches the published per-IP rule exactly. See [Q5](#q5-rate-limits). The 10,000-concurrent-request test is the right evidence to have kept.                                                  |
-| Descriptive User-Agent, enforced at construction    | `USER_AGENT_RE` refusing to build a client without one satisfies the stated purpose of the requirement. See [F8](#f8-user-agent-format) for a cosmetic deviation.                             |
-| Per-user ListenBrainz tokens                        | Each user supplies their own credential. Pull.fm acts as the user's agent, never as a bulk consumer of other people's data. This is what makes [Q4](#q4-the-personal-api-token-feature) easy. |
-| No mirror, no bulk download, no dumps at runtime    | Keeps Pull.fm entirely outside the Live Data Feed licence, which is the stricter one. See [F5](#f5-a-mirror-is-not-cc0).                                                                      |
-| Permanent MBID crosswalk                            | Explicitly permitted. MBIDs, artist names, recording and release titles are all core CC0 data. See [Q2](#q2-caching-and-storage).                                                             |
-| No affiliate, subscription, ad or data-sale revenue | This is the single fact that keeps the non-commercial reading defensible. See [Q1](#q1-non-commercial-status).                                                                                |
-| No cover art                                        | Verified by grep: nothing in `packages/upstream/src` or `apps/bff/src` touches cover art. Keeps the Cover Art Archive out of scope. See [F10](#f10-cover-art-archive).                        |
+| Area                                                  | Why it is compliant                                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MusicBrainz 1 req/s process-wide limiter              | Matches the published per-IP rule exactly. See [Q5](#q5-rate-limits). The 10,000-concurrent-request test is the right evidence to have kept.                                                                                                                                                                                             |
+| Descriptive User-Agent, enforced at construction      | `USER_AGENT_RE` refusing to build a client without one satisfies the stated purpose of the requirement. See [F8](#f8-user-agent-format) for a cosmetic deviation.                                                                                                                                                                        |
+| Per-user ListenBrainz tokens                          | Each user supplies their own credential. Pull.fm acts as the user's agent, never as a bulk consumer of other people's data. This is what makes [Q4](#q4-the-personal-api-token-feature) easy.                                                                                                                                            |
+| No Live Data Feed, no replication, no dump at runtime | Keeps Pull.fm entirely outside the Live Data Feed licence, which is the stricter one. **Amended 2026-07-29:** an offline load of the CC0 canonical dump is now a deliberate exception and does not disturb this, because that dump is separately licensed CC0 and is never fetched on a request path. See [F5](#f5-a-mirror-is-not-cc0). |
+| Permanent MBID crosswalk                              | Explicitly permitted. MBIDs, artist names, recording and release titles are all core CC0 data. See [Q2](#q2-caching-and-storage).                                                                                                                                                                                                        |
+| No affiliate, subscription, ad or data-sale revenue   | This is the single fact that keeps the non-commercial reading defensible. See [Q1](#q1-non-commercial-status).                                                                                                                                                                                                                           |
+| No cover art                                          | Verified by grep: nothing in `packages/upstream/src` or `apps/bff/src` touches cover art. Keeps the Cover Art Archive out of scope. See [F10](#f10-cover-art-archive).                                                                                                                                                                   |
 
 ---
 
@@ -122,14 +131,21 @@ revenue test. **This is the ambiguity to put to MetaBrainz directly** - see
 **The threshold at which one becomes required**, as best the reviewer can read it, is one of:
 
 1. Revenue, current or expected, appears. Then a paid commercial tier is required.
-2. The Live Data Feed or database dumps are used - i.e. the mirror. Then an access token is
+2. The **Live Data Feed** is used - i.e. the replicated mirror. Then an access token is
    required even for free non-commercial use:
    > **VERBATIM** (musicbrainz.org/doc/Live_Data_Feed): "Non-commercial / personal users may sign
    > up and obtain a free access token for Live Data Feed"
 
-Note what this means for the roadmap: **the mirror, not the user count, is what forces the
-MetaBrainz signup.** `docs/UPSTREAM-TERMS.md` already flags the mirror as required at scale; this
-is the administrative consequence of that, and it is free at the non-commercial tier.
+**Corrected 2026-07-29.** This item previously read "the Live Data Feed **or database dumps**",
+which merged two things that are not the same. The token requirement quoted above is stated for
+the Live Data Feed. It is **not** stated for the published dump files, and on 2026-07-29 the
+reviewer downloaded 2.3 GB of `data.metabrainz.org` over anonymous HTTPS with no credential of
+any kind and received `HTTP 200` (see [F5](#f5-a-mirror-is-not-cc0)). **Taking the canonical dump
+therefore forces no MetaBrainz signup**, and the earlier sentence claiming it did was wrong.
+
+Note what this leaves for the roadmap: **the Live Data Feed, not the user count and not the dumps,
+is what would force the MetaBrainz signup.** `docs/UPSTREAM-TERMS.md` previously flagged "mirror
+required at scale" as the reason; that entry was corrected on 2026-07-29 in the same pass.
 
 ### Q2. Caching and storage
 
@@ -495,24 +511,259 @@ it were.
 
 #### F5. A mirror is not CC0
 
-**Severity: P1. This changes the mirror decision already recorded in `docs/UPSTREAM-TERMS.md`.**
+**Severity: P1. Status: resolved 2026-07-29.** This changed the mirror decision recorded in
+`docs/UPSTREAM-TERMS.md`, and that correction has now been made.
+
+##### F5.1 The original finding, unchanged
 
 > **VERBATIM** (musicbrainz.org/doc/About/Data_License, "Live Data Feed"): "The Live Data Feed
 > replication packets are licensed under the Creative Commons Attribution-NonCommercial-ShareAlike
 > 3.0 license."
 
-`docs/UPSTREAM-TERMS.md` records "Mirror required at scale" as a scaling and cost issue. It is
-also a **licensing** issue, and a much larger one than the summary table implies: taking the Live
+`docs/UPSTREAM-TERMS.md` recorded "Mirror required at scale" as a scaling and cost issue. It is
+also a **licensing** issue, and a much larger one than the summary table implied: taking the Live
 Data Feed brings the whole replicated database in under BY-NC-SA rather than CC0, because the
 packets themselves carry that licence regardless of the CC0 status of the core rows they contain.
 A mirror therefore converts Pull.fm's cleanest licence position into its most encumbered one, and
 would foreclose commercial use of the local database permanently.
 
-**Design consequence:** the mirror is not the obvious win the current doc implies. If the goal is
-purely to escape 1 req/s, the alternatives (a deeper crosswalk, the CC0 canonical data dumps,
-higher cache hit rates) preserve the CC0 position and the mirror does not. Whoever owns the
-scaling decision should read this before choosing. This warrants a correction to
-`docs/UPSTREAM-TERMS.md` - not made here, since that file is owned by another work stream.
+**This part of the finding stands and was not disturbed by the 2026-07-29 work.**
+
+##### F5.2 What the original finding got wrong, and why it matters
+
+The original text closed by offering alternatives that "preserve the CC0 position", listing among
+them **"the CC0 canonical data dumps"**. That phrase asserted a licence. It had **no source**. The
+MusicBrainz Data License page, which the review quotes four times elsewhere, does not mention
+canonical dumps at all, and nothing else cited in the 2026-07-28 retrieval log did either. It was
+a plausible inference presented in the same typography as the quoted rules around it, which is
+precisely the failure mode this document's own conventions section exists to prevent.
+
+It is recorded here rather than silently overwritten because the correction is the useful artifact:
+**an unsourced licence claim survived a review whose stated convention is that unsourced claims are
+labelled.** A reader who acted on the 2026-07-28 text would have been right by luck.
+
+##### F5.3 Verification performed 2026-07-29, and the method
+
+Two independent lines of evidence now support the CC0 status, and they were obtained in that
+order deliberately: the artifact first, the documentation second, so that the documentation could
+not prime the reading of the artifact.
+
+**Line 1 - the licence inside the archive.** This is the stronger of the two, because a COPYING
+file shipped inside the distributed tarball is the publisher's licence statement attached to the
+exact bytes being taken, whereas a web page is a statement about an abstraction that may or may
+not describe the file you downloaded. Reproducible in about thirty seconds without downloading
+2.3 GB, because the licence sits in the second tar member:
+
+```bash
+BASE=https://data.metabrainz.org/pub/musicbrainz/canonical_data
+DUMP=musicbrainz-canonical-dump-20260717-080003
+# Range-fetch only the head of the archive, then stream-decompress it.
+curl -sS -r 0-2000000 -o head.tar.zst "$BASE/$DUMP/$DUMP.tar.zst"
+zstd -dc head.tar.zst 2>/dev/null | head -c 3000000 > head.tar
+tar -tvf head.tar          # member list, sizes and mtimes
+tar -xOf head.tar "$DUMP/COPYING"
+```
+
+`tar -tvf` returns exactly three members plus their uncompressed sizes:
+
+| Member                                     | Uncompressed bytes | Note                                  |
+| ------------------------------------------ | ------------------ | ------------------------------------- |
+| `TIMESTAMP`                                | 26                 | contains `2026-07-17 08:00:03.172114` |
+| `COPYING`                                  | 6,390              | the licence, see below                |
+| `canonical/canonical_musicbrainz_data.csv` | 7,519,259,059      | the entire payload, one CSV           |
+
+`tar -xOf ... COPYING` yields, verbatim, first three non-blank lines:
+
+> **VERBATIM** (`musicbrainz-canonical-dump-20260717-080003/COPYING`, extracted from inside the
+> archive on 2026-07-29): "Creative Commons Legal Code / CC0 1.0 Universal / Statement of Purpose"
+
+The file is 6,390 bytes, `sha256 75f3c90d6fa833817f19d019b35807687c3ed1c0b858b5f274625e96dda24bea`,
+and a case-insensitive grep for `noncommercial`, `non-commercial` and `ShareAlike` across it
+returns **zero** matches. Recording the digest matters: it is what lets a future reader assert
+that a re-verification found the _same_ licence text rather than merely a file with the same name.
+
+**The same digest appears in a second place, and that is the load-bearing cross-check.** The
+`COPYING` shipped inside `mbdump.tar.bz2` (the core full export, a completely separate build
+pipeline) is byte-identical: 6,390 bytes, same `75f3c90d...` digest. Meanwhile the `COPYING`
+inside `mbdump-derived.tar.bz2` is a different file entirely - 15,818 bytes,
+`sha256 011e1a16ae3d864a91c8e6b93a18f7f144d2dfaec6066c21d91e13767a7d133c`, opening
+"Attribution-NonCommercial-ShareAlike 3.0 US". **MetaBrainz is not stamping one boilerplate
+licence onto every artifact; the two licences are applied selectively, per archive, by whatever
+builds them.** That is what makes the CC0 stamp on the canonical dump evidence rather than noise.
+
+**Line 2 - a MetaBrainz page the 2026-07-28 review never read.** `metabrainz.org/datasets/derived-dumps`
+is the dataset catalogue, and it is where the canonical dump's terms actually live. This is the
+citation F5 originally lacked:
+
+> **VERBATIM** (metabrainz.org/datasets/derived-dumps, "MusicBrainz Canonical Data Dumps" dataset
+> summary): "Commercial use: Allowed, but financial support strongly urged, even for CC0 data.
+> Update frequency: Twice a month, on the 1st and 15th. Licenses: Creative Commons Zero (CC0)
+> Format: zstd compressed CSV files"
+
+> **VERBATIM** (same page, preamble): "even when a specific dataset is available under the
+> Creative Commons Zero (CC0) license (public domain), we still need commercial supporters of the
+> data to support us, on a moral basis rather than a legal one!"
+
+That second quote is worth keeping in front of whoever revisits §1a. MetaBrainz say in their own
+words that the support expectation on CC0 data is **moral, not legal**. Taking the canonical dump
+creates no obligation. It does create a reason to donate, which is a different kind of claim and
+should not be laundered into a compliance requirement, nor dismissed because it is not one.
+
+**Access control: none.** Every fetch above was anonymous HTTPS with no token, no account, no
+`Authorization` header and no `User-Agent` requirement, and returned `HTTP 200`, including a
+`Content-Length: 2320377487` ranged read of the 2.3 GB archive. **No MetaBrainz signup is needed
+to take this dump.** Contrast the Live Data Feed, which states a token requirement even for free
+non-commercial use ([Q1](#q1-non-commercial-status)).
+
+##### F5.4 Publication cadence and the staleness ceiling
+
+The directory retains exactly two dumps at any time:
+
+> **VERBATIM** (directory index at `data.metabrainz.org/pub/musicbrainz/canonical_data/`, read
+> 2026-07-29): "musicbrainz-canonical-dump-20260703-080003/ 03-Jul-2026 08:13" and
+> "musicbrainz-canonical-dump-20260717-080003/ 17-Jul-2026 08:03"
+
+Fourteen days apart, both generated at 08:00 UTC, and the published cadence quoted above says
+"Twice a month". The two agree on the **rate**; they disagree on the **dates**. The page says the
+1st and the 15th; the retained dumps are dated the 3rd and the 17th, a consistent two-day offset.
+
+**Do not schedule a fetch against the published dates.** The runbook should discover the latest
+directory by listing, not compute it from the calendar, or the loader will fetch a 404 on the 1st
+of every month and only succeed by accident when someone retries. This is inference from two data
+points and one sentence, so it is stated as a design instruction rather than as a fact about
+MetaBrainz's cron.
+
+**Staleness ceiling: about 14 days**, plus whatever lag the loader adds. On 2026-07-29 the newest
+dump was `20260717`, i.e. **12 days old**. Two properties make that acceptable here, and both are
+properties of this specific use rather than general tolerance for stale data:
+
+1. **MBIDs are permanent.** The dump is used as a name-to-MBID lookup, and a correct MBID does not
+   become incorrect because a fortnight passed. The failure mode of a stale dump is a **miss**, not
+   a **wrong answer** - and misses are exactly what the fallback path exists to absorb. If the dump
+   could go subtly wrong rather than merely incomplete, 14 days would not be acceptable.
+2. **Every miss falls through to the existing rate-limited API**, which is live and current. The
+   local layer therefore changes the _cost_ of a lookup, never its _availability_. A dump that is
+   14 days stale degrades hit rate slightly; it degrades nothing else.
+
+The residue this leaves is bounded and nameable: **music released in the last fortnight resolves
+against the 1 req/s API rather than locally**, which is the worst possible distribution for a
+discovery product, because new releases are disproportionately what users search for. That is a
+real cost. It is not a licence problem and it is not solved by taking more data, only by holding a
+higher cache hit rate on the residue.
+
+##### F5.5 The decision, and what it costs
+
+**Decision, recorded 2026-07-29:** Pull.fm loads the **CC0 canonical data dump** offline and
+serves lookups from it locally, falling through to the existing rate-limited MusicBrainz API on a
+miss. Pull.fm takes **neither the Live Data Feed nor `mbdump-derived.tar.bz2`.**
+
+The reason both are excluded is the same reason, and it is stronger than "we would rather not":
+
+- **The encumbrance is permanent and irreversible.** BY-NC-SA attaches to the database and to
+  everything derived from it. There is no later cleanup that removes it, because you cannot prove
+  a negative about what a ranking was computed from once the data was present. A reversible
+  business decision (whether Pull.fm is ever commercial, §1a) would become an irreversible
+  technical one, decided by whoever ran the import.
+- **It is the same argument as [F1](#f1-inctags-pulls-cc-by-nc-sa-30-data-into-a-cc0-only-design)
+  at a different scale.** F1 is one query parameter pulling tags for no consumer. A derived import
+  is the same mistake measured in gigabytes.
+
+The dump inventory, all measured 2026-07-29 against export `20260729-002209` (confirmed current by
+`data.metabrainz.org/pub/musicbrainz/data/fullexport/LATEST`, which returns `20260729-002209`):
+
+| Artifact                           | Size     | Licence, per its own `COPYING`      | Contents                                                                | Taken?                                |
+| ---------------------------------- | -------- | ----------------------------------- | ----------------------------------------------------------------------- | ------------------------------------- |
+| `canonical dump .tar.zst`          | 2.32 GB  | **CC0 1.0** (`75f3c90d...`)         | one CSV, core fields only                                               | **Yes**                               |
+| `mbdump.tar.bz2`                   | 6.88 GB  | **CC0 1.0** (`75f3c90d...`)         | core entity tables                                                      | No, not needed                        |
+| `mbdump-derived.tar.bz2`           | 0.47 GB  | **BY-NC-SA 3.0 US** (`011e1a16...`) | annotations, ratings, **tags incl. genre associations**, search indexes | **No**                                |
+| `mbdump-cover-art-archive.tar.bz2` | 0.15 GB  | BY-NC-SA 3.0                        | CAA links, no images                                                    | No, see [F10](#f10-cover-art-archive) |
+| `mbdump-edit.tar.bz2`              | 15.19 GB | BY-NC-SA 3.0                        | edit history                                                            | No, useless to us                     |
+| Live Data Feed replication packets | n/a      | BY-NC-SA 3.0                        | the whole replicated database                                           | **No**                                |
+
+The per-file licence split is also published, which is a second source for the row above:
+
+> **VERBATIM** (musicbrainz.org/doc/MusicBrainz_Database/Download, as extracted 2026-07-29): "The
+> derived data consists of annotations, user ratings, user tags, and search indexes."
+
+The same page assigns CC0 to `mbdump.tar.bz2` and `mbdump-cdstubs.tar.bz2`, and CC BY-NC-SA 3.0 to
+`mbdump-derived`, `mbdump-edit`, `mbdump-editor`, `mbdump-cover-art-archive`,
+`mbdump-event-art-archive` and `mbdump-stats`.
+
+**Note for anyone reading a shorter summary of this:** it is **not** true that "the full export is
+BY-NC-SA". `mbdump.tar.bz2` is CC0, verified by digest above. The BY-NC-SA licence attaches to the
+_supplementary_ tarballs shipped alongside it. The distinction matters because the useful sentence
+is "do not take `mbdump-derived`", not "do not take dumps".
+
+##### F5.6 Why the canonical dump can be CC0, and the product cost
+
+The CSV header, read from the archive on 2026-07-29, is:
+
+```
+id,artist_credit_id,artist_mbids,artist_credit_name,release_mbid,release_name,recording_mbid,recording_name,combined_lookup,score
+```
+
+Ten columns spanning three entity types - artist, release, recording - and **every one of them is
+either a core field or MetaBrainz's own computation**. There is no tag column, no rating column, no
+annotation column and no genre column. Those are exactly the "remaining portions" that the Data
+License page places under BY-NC-SA, and their absence is the structural reason the CC0 stamp on
+this archive is coherent rather than a mistake someone will later correct. **This is the part that
+should reassure a future reader most:** the licence is not merely asserted, it is consistent with
+the schema.
+
+One precision the shorter version of this argument loses. Genre is split across both licences and
+the split is not intuitive:
+
+> **VERBATIM** (musicbrainz.org/doc/MusicBrainz_Database), core data: "Areas, Artists, Events,
+> **Genres**, Instruments, Labels, Mediums, Places, Recordings, Release Groups, Releases, Series,
+> Works, Relationships & URLs, CD Stubs"
+
+> **VERBATIM** (same page): "Supplementary data includes: user submitted annotations, **tags
+> (including genre associations)** and ratings, derived statistics, search indexes, edit history,
+> non-personal user data"
+
+So the **genre vocabulary** is core CC0, and the **artist-to-genre and recording-to-genre
+associations** are supplementary BY-NC-SA. The vocabulary is the useless half: knowing that
+"shoegaze" is a genre tells a discovery product nothing. What a discovery product wants is which
+artists are shoegaze, and that is the encumbered half. Verified directly: the members of
+`mbdump-derived.tar.bz2` include `annotation`, `area_tag`, `artist_annotation`, `artist_meta`,
+`artist_tag`, `event_tag`, `instrument_tag` and `label_tag` - the `*_tag` tables are where genre
+associations live, and they are inside the BY-NC-SA archive.
+
+**The product cost, stated plainly rather than buried:**
+
+**A licence-clean full-export or canonical import gives Pull.fm no genre data at all.** Not
+degraded genre data, not delayed genre data - none. Any feature that would rank, filter, cluster or
+label by genre using MusicBrainz as the source is foreclosed by this decision, permanently, unless
+the decision is reopened with the BY-NC-SA consequences accepted in writing.
+
+This is a real loss and it should not be smoothed over in a summary. Three honest responses exist,
+and choosing between them is a product decision this review does not make:
+
+1. **Accept it.** Genre is not currently consumed anywhere (the same grep that supports F1 finds no
+   consumer of `.tags`), so the cost today is zero and the cost is only to a hypothetical feature.
+2. **Source genre elsewhere.** Last.fm tags are the obvious candidate and carry their own,
+   different problems, already documented as L1 in `docs/UPSTREAM-TERMS.md` (non-commercial only,
+   100 MB cache cap). Trading one non-commercial dependency for another is not obviously progress.
+3. **Reopen the decision deliberately.** Take `mbdump-derived`, accept BY-NC-SA on the database,
+   and write down that commercial use is thereby foreclosed. **If this is ever chosen, it must be
+   chosen the way §1a was chosen - explicitly, dated, by the operator - and not by an engineer
+   adding a tarball to a loader script.**
+
+##### F5.7 Downstream corrections made
+
+- `docs/UPSTREAM-TERMS.md`: the MusicBrainz row's verdict changed from "Mirror required at scale"
+  to the local CC0 layer, and a new section records the licence split. Made 2026-07-29; the
+  original F5 flagged this as owed but out of its ownership.
+- `docs/PLAN.md` §3: the "local MusicBrainz mirror is the documented 50k unlock" line has been
+  corrected, because as written it pointed at the Live Data Feed.
+
+**Not corrected here, flagged for the owning work stream:** the header comment in
+`packages/db/migrations/0007_mb_canonical.sql` states "The FULL DATABASE EXPORT and the LIVE DATA
+FEED are NOT CC0". The Live Data Feed half is right. The full-export half is **wrong**:
+`mbdump.tar.bz2` ships the same byte-identical CC0 `COPYING` as the canonical dump. The migration's
+_conclusion_ (use the canonical dump) is unaffected and its instruction not to "upgrade this to the
+full export" remains correct on size and shape grounds, so this is a comment accuracy fix, not a
+defect. Code is owned by another work stream and was not touched.
 
 #### F6. LB and MB responses are not actually cached
 
@@ -618,7 +869,12 @@ separately before any client renders an image.
 
 ## Questions to ask MetaBrainz
 
-Two are worth an actual email; the rest of this review is settled enough not to need one.
+**Amended 2026-07-29: neither item below blocks anything, and question 2 has stopped being a
+question.** The original review drafted these as a single email to `support@metabrainz.org` and
+listed sending it as action 10. It is now a **courtesy notification, not a dependency.** Nothing
+in the build waits on a reply, and nothing should be scheduled behind one. Read
+[F5.7](#f57-downstream-corrections-made) before treating any part of this section as blocking.
+
 MetaBrainz are responsive and the contact route is the supporters signup or `support@metabrainz.org`.
 
 **1. Tier classification (F7).** The material question. Suggested framing:
@@ -636,16 +892,30 @@ MetaBrainz are responsive and the contact route is the supporters signup or `sup
 > (we are an LLC). Which tier applies to us, and does the answer change if the app becomes
 > popular while remaining revenue-free?
 
-**2. Live Data Feed licence scope (F5).** Worth asking before the mirror is built, not after:
+**2. ~~Live Data Feed licence scope (F5).~~ WITHDRAWN 2026-07-29. Do not send it.**
 
-> The data licence page states the Live Data Feed replication packets are CC BY-NC-SA 3.0. If we
-> run a mirror from the Live Data Feed, does the BY-NC-SA licence attach to the whole replicated
-> database, or do the core-data rows within it retain their CC0 status once loaded? This
-> determines whether running a mirror is compatible with our CC0-only data posture.
+The original question asked whether BY-NC-SA attaches to a whole Live Data Feed mirror or whether
+core rows retain CC0 once loaded, "because this determines whether running a mirror is compatible
+with our CC0-only data posture". **It no longer determines anything, because Pull.fm is not running
+a Live Data Feed mirror.** The answer would be interesting and would change nothing, and asking a
+volunteer-run foundation to adjudicate a hypothetical is a poor use of their time. The decision was
+made on the conservative reading and on evidence obtained without needing them: see
+[F5.3](#f53-verification-performed-2026-07-29-and-the-method).
+
+**Replaced by a courtesy notification, which nothing waits on.** Suggested framing, to be sent
+whenever convenient and folded into the tier email above rather than sent separately:
+
+> We load the MusicBrainz canonical data dump (`canonical_data/`, CC0 per its own COPYING and per
+> your derived-dumps page) into a local Postgres schema, refreshed each fortnight, purely to answer
+> name-to-MBID lookups without spending your 1 req/s budget. Misses fall through to the web service
+> at 1 req/s with our existing User-Agent. We take no Live Data Feed and no supplementary dumps,
+> and we run no replicated mirror. We are telling you rather than asking, since we do not believe
+> this needs your permission; correct us if we have that wrong.
 
 **Not worth asking:** whether AI/ML use is permitted (CC0 answers it, and the foundation has no
 policy to cite); whether caching is capped (no cap exists in any published source); whether
-attribution is required for core data (CC0 answers it).
+attribution is required for core data (CC0 answers it); **whether the canonical dump is CC0**
+(verified directly on 2026-07-29 from two independent sources - do not re-litigate this by email).
 
 ---
 
@@ -654,18 +924,18 @@ attribution is required for core data (CC0 answers it).
 Ordered by ratio of risk removed to effort. None are made by this review - it is a read-only
 audit and `apps/`, `packages/`, `infra/`, `docs/` and `security/` are owned by other work streams.
 
-| #   | Action                                                                                                                                                                                                                                                                      | Owner                | Removes                                                 |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------- |
-| 1   | Delete `inc=tags` from `getArtist` and the `tags` field from `MusicBrainzArtist` (`packages/upstream/src/musicbrainz/client.ts:224`, `:50`, `:102`). No consumer exists.                                                                                                    | upstream             | F1, and the only parts of F2, Q4 and Q6 that have teeth |
-| 2   | After (1): relabel MB-2/MB-3 in `legal/attribution.md` as courtesy, matching how section 6 treats ListenBrainz. If (1) is rejected, instead add a `MUSICBRAINZ_ATTRIBUTION` constant **including the CC BY-NC-SA 3.0 licence URI** and emit it from `collectAttribution()`. | legal + discovery    | F2                                                      |
-| 3   | Drive the ListenBrainz quota from `X-RateLimit-Remaining` / `X-RateLimit-Reset-In`, keeping 30/10s as the pre-first-response default only.                                                                                                                                  | upstream             | F3                                                      |
-| 4   | Correct `legal/attribution.md` section 6: ListenBrainz **does** have terms, by reference to five MetaBrainz documents. Add those five to the quarterly re-audit list.                                                                                                       | legal                | F4, F9                                                  |
-| 5   | Add to `docs/UPSTREAM-TERMS.md` that Live Data Feed packets are CC BY-NC-SA 3.0, so the mirror decision is made with the licence consequence visible.                                                                                                                       | docs                 | F5                                                      |
-| 6   | Wire `CachedUpstream` into the MusicBrainz and ListenBrainz clients before either is exposed to real traffic.                                                                                                                                                               | upstream             | F6                                                      |
-| 7   | Confirm `ope@312.dev` is a monitored mailbox and record it in the runbook as the MusicBrainz escalation contact.                                                                                                                                                            | ops                  | F8 operational risk                                     |
-| 8   | Confirm the production egress IP is not shared with another MusicBrainz consumer; add a runbook note that MusicBrainz 503s may originate off-box.                                                                                                                           | infra                | Q5 consequence 2                                        |
-| 9   | Confirm no `read:recommendations` route can return SeatGeek material through a personal API token.                                                                                                                                                                          | bff + SeatGeek owner | Q4 residual                                             |
-| 10  | Email MetaBrainz with the two questions above.                                                                                                                                                                                                                              | operator             | F7, F5                                                  |
+| #   | Action                                                                                                                                                                                                                                                                          | Owner                | Removes                                                 |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------- |
+| 1   | Delete `inc=tags` from `getArtist` and the `tags` field from `MusicBrainzArtist` (`packages/upstream/src/musicbrainz/client.ts:224`, `:50`, `:102`). No consumer exists.                                                                                                        | upstream             | F1, and the only parts of F2, Q4 and Q6 that have teeth |
+| 2   | After (1): relabel MB-2/MB-3 in `legal/attribution.md` as courtesy, matching how section 6 treats ListenBrainz. If (1) is rejected, instead add a `MUSICBRAINZ_ATTRIBUTION` constant **including the CC BY-NC-SA 3.0 licence URI** and emit it from `collectAttribution()`.     | legal + discovery    | F2                                                      |
+| 3   | Drive the ListenBrainz quota from `X-RateLimit-Remaining` / `X-RateLimit-Reset-In`, keeping 30/10s as the pre-first-response default only.                                                                                                                                      | upstream             | F3                                                      |
+| 4   | Correct `legal/attribution.md` section 6: ListenBrainz **does** have terms, by reference to five MetaBrainz documents. Add those five to the quarterly re-audit list.                                                                                                           | legal                | F4, F9                                                  |
+| 5   | ~~Add to `docs/UPSTREAM-TERMS.md` that Live Data Feed packets are CC BY-NC-SA 3.0.~~ **DONE 2026-07-29.** The MusicBrainz row now reads "Local CC0 dump + API fallback" and a new section records the per-artifact licence split. See [F5.7](#f57-downstream-corrections-made). | docs                 | F5                                                      |
+| 6   | Wire `CachedUpstream` into the MusicBrainz and ListenBrainz clients before either is exposed to real traffic.                                                                                                                                                                   | upstream             | F6                                                      |
+| 7   | Confirm `ope@312.dev` is a monitored mailbox and record it in the runbook as the MusicBrainz escalation contact.                                                                                                                                                                | ops                  | F8 operational risk                                     |
+| 8   | Confirm the production egress IP is not shared with another MusicBrainz consumer; add a runbook note that MusicBrainz 503s may originate off-box.                                                                                                                               | infra                | Q5 consequence 2                                        |
+| 9   | Confirm no `read:recommendations` route can return SeatGeek material through a personal API token.                                                                                                                                                                              | bff + SeatGeek owner | Q4 residual                                             |
+| 10  | Email MetaBrainz. **Downgraded 2026-07-29 to a courtesy, not a dependency.** One question remains (tier classification, F7); the F5 question is withdrawn. **Nothing waits on a reply** - no token is needed for the canonical dump and its CC0 status is verified.             | operator             | F7                                                      |
 
 ---
 
@@ -689,6 +959,40 @@ could not be retrieved and were not reconstructed from memory.**
 | `community.metabrainz.org/t/.../635782`                          | WebFetch                                  | HTTP 200. Forum thread, **not a term**; used only for the AI-policy status in Q6                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | **`listenbrainz.org/terms-of-service/`**                         | WebFetch, then curl, then r.jina.ai proxy | **COULD NOT READ THE RENDERED PAGE.** HTTP 200 but the response is a 3,777-byte React shell; `page-react-props` is empty and the ToS component is a lazy-loaded chunk not present in `indexPage.js` (grepped, zero matches). The r.jina.ai text proxy returned **HTTP 401** ("blocked from performing anonymous queries due to bad network reputation"). **Substituted:** `frontend/js/src/about/terms-of-service/TermsOfService.tsx` from `metabrainz/listenbrainz-server@master` via raw.githubusercontent.com, HTTP 200. **Caveat: this is the master branch, not verified to match what is deployed.** The F9 conclusion rests on this file. If it matters to a decision, open the page in a real browser and confirm. |
 | **`listenbrainz.readthedocs.io/en/latest/users/api/index.html`** | WebFetch, then curl with browser UA       | **HTTP 429 both times**, hard rate-limited. **Substituted:** `docs/users/api/index.rst` from `metabrainz/listenbrainz-server@master`, HTTP 200 - the reStructuredText source the published docs are built from. Same master-branch caveat.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+### Additional retrieval, 2026-07-29 (F5 amendment)
+
+All of the following were retrieved anonymously over HTTPS with no credential, no token and no
+account. Every one returned `HTTP 200`.
+
+| Source                                                           | Method                                                                | Result                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data.metabrainz.org/pub/musicbrainz/canonical_data/`            | curl, nginx autoindex                                                 | **200.** Exactly two dumps retained: `20260703-080003`, `20260717-080003`. Both generated 08:00 UTC, 14 days apart                                                                                                          |
+| `.../canonical_data/musicbrainz-canonical-dump-20260717-080003/` | curl, nginx autoindex                                                 | **200.** `.tar.zst` plus `.md5` and `.sha256` siblings                                                                                                                                                                      |
+| `.../musicbrainz-canonical-dump-20260717-080003.tar.zst`         | `curl -I`, then `curl -r 0-2000000` ranged GET, `zstd -dc`, `tar -xO` | **200.** `Content-Length: 2320377487` (2.32 GB), `Last-Modified: Fri, 17 Jul 2026 08:03:30 GMT`. Three members extracted; `COPYING` = **CC0 1.0**, sha256 `75f3c90d...`                                                     |
+| `.../fullexport/LATEST`                                          | curl                                                                  | **200.** Returns `20260729-002209`, confirming the export inventoried below is current                                                                                                                                      |
+| `.../fullexport/20260729-002209/`                                | curl, nginx autoindex                                                 | **200.** Sizes read from the index: `mbdump` 7G, `mbdump-derived` 483M, `mbdump-cover-art-archive` 157M, `mbdump-edit` 15G                                                                                                  |
+| `.../fullexport/20260729-002209/mbdump.tar.bz2`                  | `curl -r 0-6000000` ranged GET, `bzip2 -dc`, `tar -xO`                | **200.** `COPYING` = **CC0 1.0**, 6,390 bytes, sha256 `75f3c90d...` - **byte-identical to the canonical dump's**                                                                                                            |
+| `.../fullexport/20260729-002209/mbdump-derived.tar.bz2`          | `curl -r 0-120000000` ranged GET, `bzip2 -dc`, `tar -t`/`tar -xO`     | **200.** `COPYING` = **Attribution-NonCommercial-ShareAlike 3.0 US**, 15,818 bytes, sha256 `011e1a16...`. Members include `annotation`, `area_tag`, `artist_tag`, `artist_meta`, `event_tag`, `instrument_tag`, `label_tag` |
+| `metabrainz.org/datasets/derived-dumps`                          | WebFetch, then curl for the verbatim string                           | **200.** The citation F5 originally lacked: canonical dumps, "Licenses: Creative Commons Zero (CC0)", "Update frequency: Twice a month, on the 1st and 15th"                                                                |
+| `musicbrainz.org/doc/MusicBrainz_Database/Download`              | WebFetch                                                              | **200.** Per-file licence assignment and the verbatim description of derived data                                                                                                                                           |
+| `musicbrainz.org/doc/About/Data_License`                         | WebFetch (re-read 2026-07-29)                                         | **200.** Re-confirmed: **still does not mention canonical dumps.** This is why F5's original claim was unsourced, and it is recorded as a negative result                                                                   |
+
+**Caveats on the 2026-07-29 evidence, stated so they are not discovered later:**
+
+- The `mbdump` and `mbdump-derived` archives were read by **ranged GET plus truncated
+  decompression**, not downloaded in full. The `COPYING` and `TIMESTAMP` members were fully
+  extracted and their digests are exact. The **member lists are partial** - tar members appear in
+  alphabetical order and the reads stopped mid-archive - so "members include `artist_tag`" is a
+  verified positive, while any claim of the form "archive X does **not** contain table Y" is **not**
+  established by these reads and is not asserted anywhere above.
+- **The fortnightly cadence is inferred**, from two retained directories 14 days apart plus one
+  published sentence saying "Twice a month". No changelog, cron definition or retention policy was
+  found. The two-day offset between the published dates (1st, 15th) and the observed dates (3rd,
+  17th) is unexplained.
+- The published `.md5` and `.sha256` siblings of the canonical archive were **not** verified,
+  because the archive was never downloaded in full. A loader that does download it should check
+  them, and that is a runbook item rather than a compliance one.
 
 **Not reviewed, out of scope:** Cover Art Archive terms (F10); MusicBrainz Copyright and DMCA
 Compliance; MetaBrainz GDPR, Code of Conduct and Conflict Resolution policies (referenced by the

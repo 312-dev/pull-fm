@@ -3,6 +3,15 @@
 **Audited 2026-07-28.** Every claim here was verified against a live API call or the provider's
 own published terms on that date, not from memory. Re-audit before launch and quarterly after.
 
+**Amended 2026-07-29: the MusicBrainz row was wrong, and it was wrong in the expensive direction.**
+It recorded "Mirror required at scale" as a pure scaling and cost item. A Live Data Feed mirror is
+also a **licence change to the entire local database**, from CC0 to CC BY-NC-SA, permanently. The
+scaling answer is a local load of the separately licensed **CC0 canonical dump** instead, verified
+CC0 by extracting the `COPYING` file from inside the published archive on 2026-07-29. Full evidence,
+method and digests in
+[`compliance/metabrainz-terms-review.md` F5](./compliance/metabrainz-terms-review.md#f5-a-mirror-is-not-cc0).
+See [M1](#m1-the-scaling-answer-is-the-cc0-canonical-dump-not-a-mirror) below.
+
 This document exists because **the binding constraints on this product are legal and
 rate-limit-shaped, not technical.** The infrastructure can serve 50,000 users long before the
 upstream licences permit it.
@@ -11,16 +20,16 @@ upstream licences permit it.
 
 ## Summary
 
-| Provider       | Technical status       | Commercial use            | Hard limit          | Verdict                   |
-| -------------- | ---------------------- | ------------------------- | ------------------- | ------------------------- |
-| ListenBrainz   | ALIVE                  | Supporter tier if revenue | 30 req / 10s        | **Primary pillar**        |
-| MusicBrainz    | ALIVE                  | Contact for commercial    | **1 req/s global**  | Mirror required at scale  |
-| Last.fm        | ALIVE                  | **Non-commercial only**   | Undocumented (~5/s) | **At risk, see L1**       |
-| iTunes Search  | ALIVE                  | Promotional use only      | **~20 calls/min**   | **At risk, see L2**       |
-| Deezer         | ALIVE                  | **Non-commercial only**   | ~50 req / 5s        | **At risk, see L3**       |
-| ReccoBeats     | ALIVE                  | Unstated                  | Undocumented        | Cache-behind only         |
-| AcousticBrainz | **DEAD** (frozen 2022) | CC0                       | n/a                 | Dumps only, never runtime |
-| Spotify        | **DEAD** for discovery | n/a                       | n/a                 | Not usable as backend     |
+| Provider       | Technical status       | Commercial use            | Hard limit          | Verdict                                   |
+| -------------- | ---------------------- | ------------------------- | ------------------- | ----------------------------------------- |
+| ListenBrainz   | ALIVE                  | Supporter tier if revenue | 30 req / 10s        | **Primary pillar**                        |
+| MusicBrainz    | ALIVE                  | Contact for commercial    | **1 req/s global**  | **Local CC0 dump + API fallback, see M1** |
+| Last.fm        | ALIVE                  | **Non-commercial only**   | Undocumented (~5/s) | **At risk, see L1**                       |
+| iTunes Search  | ALIVE                  | Promotional use only      | **~20 calls/min**   | **At risk, see L2**                       |
+| Deezer         | ALIVE                  | **Non-commercial only**   | ~50 req / 5s        | **At risk, see L3**                       |
+| ReccoBeats     | ALIVE                  | Unstated                  | Undocumented        | Cache-behind only                         |
+| AcousticBrainz | **DEAD** (frozen 2022) | CC0                       | n/a                 | Dumps only, never runtime                 |
+| Spotify        | **DEAD** for discovery | n/a                       | n/a                 | Not usable as backend                     |
 
 ---
 
@@ -115,9 +124,97 @@ caps the entire service at ~86,400 lookups/day.
 `User-Agent` is mandatory and must identify the app and a contact:
 `PullFM/0.1.0 (ope@312.dev)`. Generic agents are throttled harder.
 
-**At scale a local mirror via the Live Data Feed is required**, which itself requires choosing a
-MetaBrainz supporter account tier. This contradicts the original plan's claim that no data-layer
-change is needed between 10k and 50k users.
+#### M1. The scaling answer is the CC0 canonical dump, not a mirror
+
+**Corrected 2026-07-29.** This section previously read: "At scale a local mirror via the Live Data
+Feed is required, which itself requires choosing a MetaBrainz supporter account tier." Both halves
+were wrong, and the first was wrong in a way that would have cost the product something it cannot
+get back.
+
+**Why a Live Data Feed mirror is not the answer.** The replication packets carry their own licence:
+
+> **VERBATIM** (musicbrainz.org/doc/About/Data_License, "Live Data Feed"): "The Live Data Feed
+> replication packets are licensed under the Creative Commons Attribution-NonCommercial-ShareAlike
+> 3.0 license."
+
+That attaches BY-NC-SA to the whole replicated database and to everything derived from it, and the
+attachment is **permanent and irreversible** - there is no later cleanup that removes it. Running a
+mirror to escape a rate limit would convert Pull.fm's cleanest licence position into its most
+encumbered one and foreclose commercial use of the local database forever. §1a of `PLAN.md` records
+non-commercial as an operator decision, which is reversible by the operator; a Live Data Feed import
+would make it irreversible by an engineer.
+
+**What is taken instead.** The MusicBrainz **canonical data dump** at
+`data.metabrainz.org/pub/musicbrainz/canonical_data/`, loaded offline into a local Postgres schema,
+with the 1 req/s web service retained as the fallback on a local miss. Verified 2026-07-29:
+
+- **CC0, from the artifact itself.** Extracting `COPYING` from inside
+  `musicbrainz-canonical-dump-20260717-080003.tar.zst` yields verbatim "Creative Commons Legal Code
+  / CC0 1.0 Universal" - 6,390 bytes, `sha256 75f3c90d6fa833817f19d019b35807687c3ed1c0b858b5f274625e96dda24bea`,
+  zero occurrences of "NonCommercial" or "ShareAlike". A licence shipped inside the tarball is a
+  statement about the exact bytes being taken, which is stronger than a statement on a web page.
+- **CC0, from MetaBrainz's own catalogue**, which is the citation this doc previously lacked:
+  > **VERBATIM** (metabrainz.org/datasets/derived-dumps): "Commercial use: Allowed, but financial
+  > support strongly urged, even for CC0 data. Update frequency: Twice a month, on the 1st and
+  > 15th. Licenses: Creative Commons Zero (CC0) Format: zstd compressed CSV files"
+- **No supporter tier and no token required.** 2.32 GB fetched anonymously over HTTPS, `HTTP 200`,
+  no credential of any kind. The token requirement quoted on `doc/Live_Data_Feed` is stated for the
+  Live Data Feed, **not** for the published dump files. The earlier claim that dumps force a
+  MetaBrainz signup was wrong.
+
+#### M2. The per-artifact licence split, and the genre cost
+
+**Do not reason about "MusicBrainz dumps" as one thing.** The licence is applied per archive, and
+each archive states its own in its own `COPYING`:
+
+| Artifact                           | Size (export `20260729-002209`) | Licence per its own `COPYING`          | Taken?           |
+| ---------------------------------- | ------------------------------- | -------------------------------------- | ---------------- |
+| canonical dump `.tar.zst`          | 2.32 GB                         | **CC0 1.0** (`75f3c90d...`)            | **Yes**          |
+| `mbdump.tar.bz2`                   | 6.88 GB                         | **CC0 1.0** (`75f3c90d...`, identical) | No, not needed   |
+| `mbdump-derived.tar.bz2`           | 0.47 GB                         | **BY-NC-SA 3.0 US** (`011e1a16...`)    | **No**           |
+| `mbdump-cover-art-archive.tar.bz2` | 0.15 GB                         | BY-NC-SA 3.0                           | No               |
+| `mbdump-edit.tar.bz2`              | 15.19 GB                        | BY-NC-SA 3.0                           | No, edit history |
+| Live Data Feed packets             | n/a                             | BY-NC-SA 3.0                           | **No**           |
+
+Note that `mbdump.tar.bz2` **is** CC0 - byte-identical `COPYING` to the canonical dump. The common
+shorthand "the full export is BY-NC-SA" is false. The accurate instruction is **do not take
+`mbdump-derived`**.
+
+**The cost, stated rather than buried: no genre data.** `mbdump-derived.tar.bz2` is the file that
+holds genres, and it is BY-NC-SA:
+
+> **VERBATIM** (musicbrainz.org/doc/MusicBrainz_Database/Download): "The derived data consists of
+> annotations, user ratings, user tags, and search indexes."
+
+> **VERBATIM** (musicbrainz.org/doc/MusicBrainz_Database): "Supplementary data includes: user
+> submitted annotations, tags (including genre associations) and ratings, derived statistics,
+> search indexes, edit history, non-personal user data"
+
+The genre **vocabulary** is core CC0; the artist-to-genre and recording-to-genre **associations**
+are supplementary. The vocabulary is the useless half. So **a licence-clean MusicBrainz import
+carries no usable genre data at all**, and any genre-driven feature must either source genre
+elsewhere (Last.fm tags, which carry [L1](#l1-lastfm-is-non-commercial-only-with-a-100-mb-cache-cap)'s
+own non-commercial problem and 100 MB cap) or reopen this decision explicitly.
+
+#### M3. Freshness, and why 14 days is tolerable here
+
+The canonical directory retains exactly two dumps. On 2026-07-29 those were `20260703-080003` and
+`20260717-080003` - 14 days apart, newest **12 days old**. So the staleness ceiling is about a
+fortnight plus loader lag.
+
+That is acceptable for **this** use and the reasoning does not generalise:
+
+1. **MBIDs are permanent.** A stale dump produces a **miss**, never a **wrong answer**. If it could
+   go subtly wrong rather than merely incomplete, 14 days would not be acceptable.
+2. **Every miss falls through to the rate-limited API**, which is live. The local layer changes the
+   cost of a lookup, never its availability.
+
+The residue is real and should be named: **releases from the last fortnight resolve against the
+1 req/s API**, and new releases are disproportionately what a discovery product gets asked for.
+
+**Operational note:** discover the latest dump by listing the directory, never by computing the
+date. The published cadence says the 1st and 15th; the observed generation dates are the 3rd and
+17th. Computing the date produces a 404 on the 1st of every month.
 
 ### ReccoBeats - works, but unaccountable
 
