@@ -35,7 +35,9 @@ something is running that should not be.
 
 ## Current run rate
 
-Measured live by `make cost`, not transcribed. As of 2026-07-29:
+Measured live by `make cost`, not transcribed. As of 2026-07-29 **staging is
+torn down and the Hetzner run rate is EUR 0.00/mo.** The per-resource figures
+below were measured while it was up, and are what a gate run costs.
 
 | Vendor        | Line                                          | Cost                            |
 | ------------- | --------------------------------------------- | ------------------------------- |
@@ -51,6 +53,15 @@ Measured live by `make cost`, not transcribed. As of 2026-07-29:
 Staging is ephemeral (`docs/PLAN.md` section 10c). Hetzner bills hourly, so the
 figure that matters is **EUR 0.0523/hour while up**: a three hour gate session
 costs about EUR 0.16, and realistic usage lands near EUR 1-2/mo.
+
+**The teardown had to be fixed before it worked.** Hetzner `delete_protection`
+defaulted to true on the database node, load balancer and private network, and
+no environment root overrode it, so the first `down` stopped halfway and left
+the two most expensive resources running at **EUR 21.98/mo** with everything
+around them destroyed. A cost control that fails halfway is worse than none,
+because the run rate looks like a partial saving rather than a broken teardown.
+Fixed in `infra/terraform/envs/*/variables.tf` and `infra/staging-env.sh`; a
+full `down` now reaches EUR 0.00 in one pass.
 
 Prod is not provisioned. Section 2 of the plan models it at ~$60/mo floor.
 

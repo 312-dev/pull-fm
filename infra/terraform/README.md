@@ -1,10 +1,19 @@
 # Pull.fm - Infrastructure as Code
 
-> ## STAGING IS APPLIED. PROD IS NOT.
+> ## STAGING IS TORN DOWN. PROD HAS NEVER BEEN APPLIED.
 >
-> `envs/staging` and `envs/shared` are live as of **2026-07-28** and both plan
-> with zero drift. `envs/prod` has never been applied and stays that way until
-> Phase 6.
+> As of **2026-07-29** staging is deliberately **DOWN** and the Hetzner run rate
+> is **EUR 0.00/mo**. It is ephemeral by design (`docs/PLAN.md` section 10c);
+> bring it up for a gate run with `./infra/staging-env.sh up` and take it back
+> down afterwards. `envs/shared` (zone TLS posture) stays applied because a zone
+> setting has no hourly cost. `envs/prod` stays unapplied until Phase 6.
+>
+> **The rebuild does not come back healthy, and that is a real gap, not a
+> teething problem.** Terraform recreates the whole environment in 45 seconds,
+> but the node then serves nothing: config management is a manual SSH runbook,
+> so `/healthz` returns Cloudflare 525 and both load balancer targets report
+> unhealthy. Measured by doing it. See
+> [`../staging/README.md`](../staging/README.md).
 >
 > State lives in **R2** (`pull-fm-tfstate`), not on the laptop, since
 > 2026-07-29. Backend wiring is per-root `backend.hcl` (gitignored); the
@@ -426,24 +435,44 @@ Not gaps to fill silently - other tracks own them:
 
 Run from a clean checkout on `darwin_arm64`, Terraform v1.15.8:
 
-| Check                                             | Result                                     |
-| ------------------------------------------------- | ------------------------------------------ |
-| `terraform fmt -recursive -check`                 | pass                                       |
-| `terraform validate` (`envs/staging`)             | pass                                       |
-| `terraform validate` (`envs/prod`)                | pass                                       |
-| `terraform validate` (`envs/shared`)              | pass                                       |
-| `trivy config --severity HIGH,CRITICAL`           | 0 misconfigurations across all three roots |
-| `semgrep --config=p/terraform --config=p/secrets` | 0 findings                                 |
-| `gitleaks dir --config .gitleaks.toml`            | no leaks found                             |
-| `terraform plan` (`envs/staging`)                 | **exit 0, no changes** (2026-07-28)        |
-| `terraform plan` (`envs/shared`)                  | **exit 0, no changes** (2026-07-28)        |
-| `terraform apply` (`envs/prod`)                   | **NOT RUN.** Phase 6.                      |
+| Check                                             | Result                                                                                   |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `terraform fmt -recursive -check`                 | pass                                                                                     |
+| `terraform validate` (`envs/staging`)             | pass                                                                                     |
+| `terraform validate` (`envs/prod`)                | pass                                                                                     |
+| `terraform validate` (`envs/shared`)              | pass                                                                                     |
+| `trivy config --severity HIGH,CRITICAL`           | 0 misconfigurations across all three roots                                               |
+| `semgrep --config=p/terraform --config=p/secrets` | 0 findings                                                                               |
+| `gitleaks dir --config .gitleaks.toml`            | no leaks found                                                                           |
+| `terraform plan` (`envs/staging`)                 | **exit 0, no changes** (2026-07-29), with the global API key absent from the environment |
+| `terraform plan` (`envs/shared`)                  | **exit 0, no changes** (2026-07-29), same                                                |
+| `terraform destroy` (staging, keep-list)          | **19 destroyed, run rate EUR 0.00/mo** (2026-07-29)                                      |
+| `terraform apply` (staging, from nothing)         | **19 created in 45 seconds** (2026-07-29)                                                |
+| staging serving after that rebuild                | **NO.** HTTP 525, both LB targets unhealthy. See `../staging/README.md`.                 |
+| `terraform apply` (`envs/prod`)                   | **NOT RUN.** Phase 6.                                                                    |
 
 What the first real applies settled, none of which `validate` could have:
 
 - **CAX is unavailable**, and so is CX, in every EU location. The allowlist now
   admits the `cpx_1_` series; see the validation block in
   `modules/compute/variables.tf`.
+- **A keep-list cannot save a dependent.** `terraform destroy -target` destroys
+  the targets and everything downstream of them, so the DNS records went with
+  the load balancer whose address they publish, no matter that
+  `staging-env.sh`'s `KEEP` array named `module.dns`. The header promised
+  something the mechanism could not deliver. DNS is now documented as rebuilt by
+  `up`, and only the R2 bucket - which depends on nothing - is kept.
+- **`delete_protection` defaulted to true everywhere and nothing overrode it.**
+  `docs/PLAN.md` section 10c says "Production sets it true; staging false", but
+  the env roots never passed the variable at all, so the module defaults applied
+  to both. The first teardown failed **halfway**: the app node, firewalls and
+  DNS were gone while the database node and load balancer stayed up and kept
+  billing, which is the worst of both states. The roots now set it explicitly
+  (staging false, prod true), and `staging-env.sh` clears the flag over the
+  Hetzner API before destroying, because by the time a targeted destroy reaches
+  a protected resource the graph that would flip it is already half gone. A
+  documented decision that is not wired to anything is indistinguishable from
+  not having made it.
 - **A zone-scoped Cloudflare token is not sufficient on its own**, and the way
   it fails is unhelpful. `cloudflare_r2_bucket` is an account-scoped resource,
   so a token holding only zone permissions returns `failed to make http

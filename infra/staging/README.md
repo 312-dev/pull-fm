@@ -166,6 +166,59 @@ redis-cli -h 10.20.1.21 -p 6380 -a "$QUOTA_PW" config get maxmemory-policy  # no
 
 ---
 
+## CRITICAL: `staging-env.sh up` does not produce a working environment
+
+**Measured 2026-07-29, by actually doing it.** Staging was torn down, rebuilt
+from IaC, and did not come back healthy. It is currently left **DOWN**, which is
+the correct end state for an environment that cannot rebuild itself: up and
+broken is worse than down.
+
+What happened, in order:
+
+| Step                                       | Result                                                                                                            |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `./infra/staging-env.sh down`              | destroyed 19 resources, run rate to **EUR 0.00/mo**. R2 backup bucket survived. Out-of-band TXT records survived. |
+| `./infra/staging-env.sh up`                | **45 seconds**, 19 resources created, load balancer even reclaimed the same IPv4                                  |
+| `curl https://api-staging.pull.fm/healthz` | **HTTP 525 for five straight minutes** (Cloudflare could not complete a TLS handshake with the origin)            |
+| Hetzner load balancer target health        | **unhealthy on both 80 and 443**                                                                                  |
+
+**Why.** Terraform's job ends at a booted node. Everything in this directory -
+nginx, the origin certificate, the BFF container, the deploy timer, the Redis
+and Postgres services - is applied by a **human over SSH**, per
+[Bootstrapping a node](#bootstrapping-a-node). cloud-init deliberately installs
+none of it, because doing so would put `/etc/pullfm/bff.env` (the KEK, the
+WorkOS key, `DATABASE_URL`) into `user_data`, which is persisted in Terraform
+state and readable from the Hetzner API for the life of the server. That
+decision is right. What is missing is the automated, secret-free path that
+should have replaced it.
+
+**And there is no way in.** The rebuilt node has no public SSH: the firewall
+carries no rule for port 22, and Tailscale is not installed, because
+`tailscale_auth_key` is empty in every committed configuration. Bootstrapping
+the rebuilt environment requires putting an operator `/32` into
+`ssh_allowlist_cidrs` in a local `terraform.tfvars`, applying, bootstrapping by
+hand, and taking it back out. That is the documented break-glass procedure, and
+it is currently the **only** procedure.
+
+**What this means for the gates.**
+
+- **Gate 4 ("restore from scratch in under 30 minutes") cannot pass today.**
+  The infrastructure half rebuilds in 45 seconds. The half that makes it serve
+  traffic is a manual runbook of unmeasured length, and it has never been timed.
+- **Gate 0's zero-drift and auto-deploy criteria still hold**, because they
+  describe a running environment and say nothing about recreating one.
+- The claim in `docs/PLAN.md` section 10c that tearing down "exercises the
+  capability we have to prove anyway" is true, and this is the result of
+  exercising it: the capability is not there yet.
+
+**The fix is config management, not more Terraform.** The node needs to
+converge on its own from a signed, secret-free artifact, pulling its secrets at
+first boot the same way `pullfm-deploy` already pulls images. Setting
+`tailscale_auth_key` would restore a way in, but a way in for a human is not the
+same as a rebuild, and treating it as one is how this gap stayed invisible.
+
+---
+
 ## Not here yet
 
 Deliberate omissions, each owned by a later phase:

@@ -108,3 +108,28 @@ variable "backup_bucket_name" {
   description = "R2 bucket for pgBackRest."
   default     = "pull-fm-backups-prod"
 }
+
+# --- destroy protection ------------------------------------------------------
+#
+# The counterpart to the staging root, which sets both to false because it is
+# torn down after every gate run. Production is not ephemeral: these are the
+# second lock behind the plan file, enforced by the Hetzner API rather than by
+# this repository, so they also catch a console click, a stale state file, or a
+# `terraform state rm` followed by an apply.
+variable "db_delete_protection" {
+  type        = bool
+  description = "Hetzner-side delete and rebuild protection on the Postgres node. TRUE for production. Turning it off is a deliberate, reviewed act."
+  default     = true
+}
+
+variable "lb_delete_protection" {
+  type        = bool
+  description = "Hetzner-side delete protection on the load balancer. TRUE for production: destroying it changes the public IP that every DNS record and downstream cache points at."
+  default     = true
+}
+
+variable "network_delete_protection" {
+  type        = bool
+  description = "Hetzner-side delete protection on the private network. TRUE for production."
+  default     = true
+}

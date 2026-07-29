@@ -114,3 +114,34 @@ variable "ssh_allowlist_cidrs" {
   description = "Break-glass SSH source CIDRs. See modules/firewall/variables.tf. Empty in every committed configuration."
   default     = []
 }
+
+# --- destroy protection ------------------------------------------------------
+#
+# docs/PLAN.md section 10c decided that Hetzner's delete_protection replaces
+# Terraform's prevent_destroy because it is variable-driven, and that
+# "Production sets it true; staging false". Until 2026-07-29 that second half
+# was never wired up: the env roots did not pass these variables at all, so the
+# module defaults (true) applied and `./infra/staging-env.sh down` failed
+# halfway through with "server deletion is protected", leaving the database
+# node and the load balancer running while everything around them was gone.
+#
+# An ephemeral environment that cannot be destroyed is not ephemeral, and a
+# half-destroyed one still bills. False here is the decision being implemented,
+# not a control being weakened: production is a separate root and keeps true.
+variable "db_delete_protection" {
+  type        = bool
+  description = "Hetzner-side delete and rebuild protection on the Postgres node. FALSE for staging by design: staging is destroyed on purpose after every gate run and holds nothing that is not reproducible."
+  default     = false
+}
+
+variable "lb_delete_protection" {
+  type        = bool
+  description = "Hetzner-side delete protection on the load balancer. FALSE for staging by design, for the same reason. Destroying it changes its public IP, which is why prod keeps it on."
+  default     = false
+}
+
+variable "network_delete_protection" {
+  type        = bool
+  description = "Hetzner-side delete protection on the private network. FALSE for staging by design: the network is recreated by every 'up' and holds no state. Left true it blocks the final step of a teardown after the servers are already gone, which is the most expensive place to fail."
+  default     = false
+}
