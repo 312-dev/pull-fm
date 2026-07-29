@@ -252,6 +252,14 @@ export async function buildTestApp(
     // eventually throttle itself, which would look like an authorization
     // failure. The limiter has its own dedicated test.
     RATE_LIMIT_MAX: "100000",
+    // Same argument for the per-subject upstream budget, and it bites harder:
+    // these suites deliberately drive COLD caches, so a single file can spend
+    // hundreds of upstream calls for one fixture subject inside a minute. That
+    // is nothing like a real user and throttling it would look like an
+    // authorization failure. The budget has its own suite, which builds an
+    // application with real numbers.
+    UPSTREAM_BUDGET_AUTHENTICATED_MAX: "100000",
+    UPSTREAM_BUDGET_ANONYMOUS_MAX: "100000",
     // The anti-enumeration timing floor is a real control with its own test,
     // which builds an application that sets it. Leaving it on by default would
     // add a quarter of a second to every sign-in in every other suite for no

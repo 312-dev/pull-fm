@@ -371,13 +371,63 @@ const schema = z.object({
   /**
    * Global per-IP request ceiling.
    *
-   * A floor, not the real control: personal API tokens carry their own budget
-   * and the routes that spend metered upstream quota get tighter limits. Kept
-   * configurable because the right value differs between a staging box running
-   * a load suite and a production node behind Cloudflare.
+   * A floor, not the real control: personal API tokens carry their own budget,
+   * every subject carries an upstream-call budget (below), and both are counted
+   * in the `noeviction` quota Redis. Kept configurable because the right value
+   * differs between a staging box running a load suite and a production node
+   * behind Cloudflare.
    */
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   RATE_LIMIT_WINDOW: z.string().default("1 minute"),
+
+  /**
+   * The per-subject UPSTREAM-CALL budget.
+   *
+   * Denominated in calls that LEAVE THE PROCESS rather than in requests, because
+   * that is the resource that is scarce and shared. See lib/upstream-budget.ts
+   * for the argument; these are the numbers and why they are these numbers.
+   *
+   * WHICH BUDGET IS ACTUALLY AT RISK FROM A REQUEST
+   * ----------------------------------------------
+   * Not MusicBrainz. Every request-path MusicBrainz read is `CachedUpstream.peek`,
+   * which is a database read that returns null on a miss and cannot call out; the
+   * 1 req/s ceiling is spent only by the background warmer, in its own process.
+   * Sizing this budget against that number would be sizing it against a limit no
+   * request can reach.
+   *
+   * The allowances a request CAN spend, and their sizes:
+   *
+   *   ListenBrainz labs   ~30 per 10s, APP-WIDE, no token. The tightest shared
+   *                       budget any route can reach: ~180 a minute for
+   *                       everybody at once.
+   *   Last.fm             ~5/s on one app-wide key, so ~300 a minute shared.
+   *   ListenBrainz core   30 per 10s PER USER TOKEN, so one user cannot starve
+   *                       another with it.
+   *   Deezer              ~50 per 5s per IP, from the preview route only.
+   *
+   * 60 per minute for a signed-in subject:
+   *
+   *   - A fully cold feed render fans out to about nine upstream calls and under
+   *     a dozen in the worst case. Sixty is five such renders a minute, which is
+   *     far beyond human interaction, and every render after the first is warm.
+   *   - It caps ONE subject at a third of the ListenBrainz labs app-wide
+   *     allowance and a fifth of Last.fm's, so no single account can starve the
+   *     pool by itself. Beyond that the per-provider quota counters and circuit
+   *     breakers are the controls, as they already were.
+   *
+   * 5 per minute for an unauthenticated caller, an order of magnitude smaller.
+   * No route today lets an unauthenticated caller reach a provider at all - the
+   * three that fan out (`/similar`, `/preview`, `/events`) are session-only - so
+   * this is a forward-looking floor rather than a live control: a future public
+   * route inherits a tiny budget instead of an unlimited one.
+   */
+  UPSTREAM_BUDGET_AUTHENTICATED_MAX: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60),
+  UPSTREAM_BUDGET_ANONYMOUS_MAX: z.coerce.number().int().positive().default(5),
+  UPSTREAM_BUDGET_WINDOW_S: z.coerce.number().int().positive().default(60),
 
   /** Serves 503 with Retry-After on every route except health and metrics. */
   MAINTENANCE_MODE: z

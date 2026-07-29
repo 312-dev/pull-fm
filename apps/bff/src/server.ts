@@ -22,7 +22,10 @@ import {
   internalProblem,
   PROBLEM_CONTENT_TYPE,
 } from "./lib/errors.js";
+import { quotaRateLimitStore } from "./lib/rate-limit-store.js";
+import { UpstreamBudget } from "./lib/upstream-budget.js";
 import authPlugin from "./plugins/auth.js";
+import upstreamBudgetPlugin from "./plugins/upstream-budget.js";
 import { registerDocs, registerOpenApi } from "./plugins/docs.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import type { Services } from "./routes/deps.js";
@@ -173,12 +176,39 @@ export async function buildServer(
   });
 
   /**
+   * A named fail-closed notification, shared by every control that has one.
+   *
+   * Three now do: the global limiter, the per-token limiter and the per-subject
+   * upstream budget, plus the session revocation store. Each refuses traffic
+   * when the quota Redis cannot be consulted, and each refusal is a 503 that
+   * looks exactly like an upstream provider being down. The counter is what an
+   * alert fires on (S3); the log line is what tells the operator WHICH of them
+   * broke, at the moment it broke, which a counter alone cannot.
+   */
+  const failClosed = (store: string): void => {
+    opts.services.metrics.counter(
+      "pullfm_fail_closed_total",
+      "Requests refused because a fail-closed dependency was unreachable (S3).",
+      { store },
+    );
+    app.log.error({ store }, "fail-closed: refusing traffic");
+  };
+
+  /**
    * Global rate limit.
    *
    * This is a floor, not the real control. Personal API tokens carry their own
-   * per-token budget (plugins/auth.ts), counted in the `noeviction` quota Redis
-   * so it cannot be silently disabled by cache pressure, and the endpoints that
-   * spend metered upstream quota get tighter limits still.
+   * per-token budget (plugins/auth.ts) and every subject carries an
+   * upstream-call budget (plugins/upstream-budget.ts). All three are counted in
+   * the `noeviction` quota Redis so none can be silently disabled by cache
+   * pressure.
+   *
+   * `store` IS LOAD-BEARING AND USED TO BE ABSENT. Without it the plugin uses
+   * its in-process `LocalStore`, a 5,000-entry LRU, and the whole limiter is
+   * defeated by rotating source addresses: the audit demonstrated 5,600 distinct
+   * addresses evicting a throttled counter and restoring a full budget. See
+   * lib/rate-limit-store.ts for the transcript and for why this reuses
+   * `incrementWindow` rather than the plugin's own Redis store.
    *
    * Keyed on the client IP and on nothing else. Two things are deliberately
    * NOT used:
@@ -189,8 +219,8 @@ export async function buildServer(
    *
    *   The authenticated subject. This limiter runs at `onRequest`, before the
    *   credential has been verified, so the subject genuinely is not known yet.
-   *   Per-subject budgets belong where the subject exists: the per-token
-   *   limiter in plugins/auth.ts, counted in the `noeviction` quota Redis.
+   *   Per-subject budgets belong where the subject exists: the upstream budget
+   *   at `preHandler`, and the per-token limiter in plugins/auth.ts.
    *
    * `req.ip` is trustworthy here only because `trustProxy` is set and the
    * origin accepts connections from Cloudflare alone (M24); without that
@@ -201,7 +231,26 @@ export async function buildServer(
     max: cfg.RATE_LIMIT_MAX,
     timeWindow: cfg.RATE_LIMIT_WINDOW,
     keyGenerator: (req) => req.ip,
-    errorResponseBuilder: () => errors.rateLimited().toProblem(),
+    /**
+     * The plugin THROWS whatever this returns, so it must return an `ApiError`
+     * rather than a problem DOCUMENT.
+     *
+     * It used to return `.toProblem()`, a plain object. `setErrorHandler` sees
+     * no `ApiError` and no `statusCode` on a plain object, so an exceeded rate
+     * limit answered 500 with the generic internal body instead of 429 with the
+     * problem document. The defect was invisible because the limiter's counters
+     * were per-process and every suite raised the ceiling out of reach; moving
+     * the counters to a shared store is what surfaced it. Returning the error
+     * itself also gets the request id into `instance`, which the hand-built
+     * document could not carry.
+     */
+    errorResponseBuilder: () => errors.rateLimited(),
+    store: quotaRateLimitStore({
+      redis: opts.services.quotaRedis,
+      onFailClosed: () => {
+        failClosed("global_limiter");
+      },
+    }),
   });
 
   /**
@@ -384,20 +433,52 @@ export async function buildServer(
     tokens: opts.services.tokens,
     quotaRedis: opts.services.quotaRedis,
     onFailClosed: (store) => {
-      // Counted AND logged. The counter is what an alert fires on (S3); the log
-      // line is what tells the operator which of the two quota-Redis consumers
-      // broke, at the moment it broke, which a counter alone cannot.
-      opts.services.metrics.counter(
-        "pullfm_fail_closed_total",
-        "Requests refused because a fail-closed dependency was unreachable (S3).",
-        { store: store === "rate limiter" ? "quota_limiter" : "session_store" },
-      );
-      app.log.error({ store }, "fail-closed: refusing traffic");
+      failClosed(store === "rate limiter" ? "quota_limiter" : "session_store");
     },
     sessionCookie: {
       cipher: opts.services.sessionCookies,
       name: cfg.sessionCookieName,
     },
+  });
+
+  /**
+   * The per-subject upstream-call budget.
+   *
+   * Registered AFTER the auth plugin so `request.subject` is decorated before
+   * this plugin reads it, and it enforces at `preHandler`, which is after
+   * `requireAuth` runs at `preValidation`. That ordering is the point: this is
+   * the first limiter in the chain that gets to see a VERIFIED identity, which
+   * is what makes it survive an attacker rotating source addresses.
+   *
+   * It is also the limiter that budgets the resource that is actually scarce.
+   * The two above it count requests; the ListenBrainz labs allowance (~30 per
+   * 10s, app-wide, no per-user token) and the Last.fm app-wide key are spent by
+   * cache MISSES, and `/v1/artists/{mbid}/similar` turns any well-formed UUID
+   * into exactly one such call with no existence check first. Not MusicBrainz:
+   * its 1 req/s is unreachable from a route, because every request-path read of
+   * it is `peek`. See lib/upstream-budget.ts.
+   */
+  await app.register(upstreamBudgetPlugin, {
+    budget: new UpstreamBudget(opts.services.quotaRedis, {
+      authenticatedMax: cfg.UPSTREAM_BUDGET_AUTHENTICATED_MAX,
+      anonymousMax: cfg.UPSTREAM_BUDGET_ANONYMOUS_MAX,
+      windowSeconds: cfg.UPSTREAM_BUDGET_WINDOW_S,
+      onFailClosed: () => {
+        failClosed("upstream_budget");
+      },
+      onSettleFailure: (err) => {
+        // Not a refusal: the response has already been sent. Counted separately
+        // so it cannot be mistaken for a request that was denied, and logged so
+        // a store that accepts reservations and refuses settles - which would
+        // over-charge every subject until they were locked out - is visible
+        // before the support tickets arrive.
+        opts.services.metrics.counter(
+          "pullfm_upstream_budget_settle_failures_total",
+          "Upstream-budget reservations that could not be settled. The reserved unit stands, so the subject is over-charged rather than under-charged.",
+        );
+        app.log.warn({ err }, "upstream budget settle failed");
+      },
+    }),
   });
 
   await app.register(registerHealthRoutes, {

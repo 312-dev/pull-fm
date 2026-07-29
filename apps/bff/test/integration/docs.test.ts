@@ -35,6 +35,13 @@ beforeAll(async () => {
     WORKOS_CLIENT_ID: "client_docs",
     WORKOS_API_KEY: "sk_test_docs_only",
     MUSICBRAINZ_USER_AGENT: "PullFM/0.1.0 (docs@pull.fm)",
+    // The global per-IP floor now counts in the SHARED quota Redis rather than
+    // in a per-process LRU, which is the point of it (lib/rate-limit-store.ts).
+    // The consequence here is that every suite in every worker, and every rerun
+    // inside the same window, shares one counter for 127.0.0.1. This file is
+    // about the reference browser, so it lifts the ceiling out of the way
+    // exactly as the shared harness does; the limiter has its own suite.
+    RATE_LIMIT_MAX: "100000",
   });
   services = buildServices(cfg, {
     error: () => undefined,

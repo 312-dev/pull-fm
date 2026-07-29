@@ -21,6 +21,7 @@ import { Registry } from "./lib/metrics.js";
 import { installCollectors, recordProviderEvent } from "./lib/observability.js";
 import { createRedis } from "./lib/redis.js";
 import { SessionCookieCipher } from "./lib/session-cookie.js";
+import { chargeUpstreamCall } from "./lib/upstream-budget.js";
 import {
   AuditRetention,
   auditRetentionOptionsFromEnv,
@@ -182,6 +183,23 @@ export function buildServices(
     log,
     onEvent: (event) => {
       recordProviderEvent(metrics, event);
+      /**
+       * The per-subject upstream budget is charged from the SAME event the
+       * metric is, and that is the point rather than a convenience.
+       *
+       * `ProviderClient` emits `request` once per attempt, after the pacer has
+       * granted a slot and the local quota counter has been consumed - that is,
+       * at the exact moment a unit of a globally scarce budget is spent. Any
+       * other definition of "an upstream call happened" would eventually drift
+       * from this one, and a budget that disagrees with its own metric is a
+       * budget nobody can audit. A retry emits its own `request` and is charged
+       * again, because it consumes another real slot.
+       *
+       * `chargeUpstreamCall` finds the ambient account through an
+       * AsyncLocalStorage the request opened, so a call made by a scheduled job
+       * charges nobody. See lib/upstream-budget.ts.
+       */
+      if (event.kind === "request") chargeUpstreamCall();
     },
   });
 

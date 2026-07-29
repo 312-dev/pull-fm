@@ -15,3 +15,35 @@ enable_hsts             = false
 hsts_max_age            = 86400
 hsts_include_subdomains = false
 hsts_preload            = false
+
+# --- Edge rate limiting -----------------------------------------------------
+#
+# Every value below has a working default; they are spelled out here so an
+# operator can see the ceilings without reading the module. The edge ceilings sit
+# ABOVE the origin's RATE_LIMIT_MAX on purpose: the origin is the layer that
+# refuses with an RFC 9457 problem document, the edge is the layer that sheds
+# floods before they cost an origin connection.
+#
+# APPLYING THESE NEEDS A TOKEN WITH Zone -> Zone WAF -> Edit, which no token this
+# project holds has. See modules/edge-rate-limit/README-token-permissions.md.
+#
+# period_seconds may only be 10 or 60 below an Enterprise plan, and the NUMBER of
+# rate limiting rules is plan-bound (Free 1, Pro 2, Business 5). Each rule is
+# individually toggleable so a smaller plan can deploy the subset it is entitled
+# to instead of failing the whole apply. If only one is affordable, keep the
+# catalogue rule: it is the one that matches the demonstrated abuse.
+api_hostnames                  = ["api-staging.pull.fm", "api.pull.fm"]
+edge_rate_limit_period_seconds = 60
+
+edge_api_requests_per_period       = 600
+edge_catalogue_requests_per_period = 120
+edge_auth_requests_per_period      = 20
+
+enable_edge_api_rule       = true
+enable_edge_catalogue_rule = true
+enable_edge_auth_rule      = true
+
+enable_edge_custom_rules = true
+block_metrics_at_edge    = true
+# Leave false wherever the reference browser is deliberately published.
+block_docs_at_edge = false
