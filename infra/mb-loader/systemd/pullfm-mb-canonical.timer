@@ -1,0 +1,97 @@
+[Unit]
+Description=Check daily for a new MusicBrainz canonical dump
+
+[Timer]
+# ---------------------------------------------------------------------------
+# DAILY. The dump is published FORTNIGHTLY; this timer is deliberately 14x
+# tighter than the thing it tracks, and every part of that is measured.
+#
+# WHAT THE PUBLISHER ACTUALLY DOES, read off the directory index on 2026-07-29
+# rather than off the documentation:
+#
+#   musicbrainz-canonical-dump-20260703-080003/   03-Jul-2026 08:13
+#   musicbrainz-canonical-dump-20260717-080003/   17-Jul-2026 08:03
+#
+# TWO ENTRIES. That is the whole listing, not the head of it. MetaBrainz retain
+# EXACTLY TWO canonical dumps and delete the third, and the same retention is
+# visible on data/fullexport/ (20260725 and 20260729, nothing older). So a
+# published dump is downloadable for about one publication interval after it is
+# superseded, and no longer.
+#
+# THAT RETENTION, NOT THE PUBLICATION INTERVAL, IS WHAT SETS THIS CADENCE.
+#
+# Three facts, and the schedule falls out of them:
+#
+#   1. Publication is twice a month. MetaBrainz document it as "the 1st and the
+#      15th"; the directories are dated the 3rd and the 17th, a consistent
+#      two-day offset. So the interval is NOT a constant 14 days - it is 14 days
+#      from the 3rd to the 17th and 15 to 17 days from the 17th to the next
+#      month's 3rd. Anything expressed as a PERIOD (OnUnitActiveSec=14d) drifts
+#      against that within two months and then fires on the wrong side of a
+#      publication. A calendar timer cannot drift.
+#
+#   2. Only two dumps are retained. A run that fails has until the SECOND next
+#      publication - roughly 30 days - to succeed before the dump it missed is
+#      deleted upstream and that fortnight of catalogue is unrecoverable. A
+#      fortnightly timer gets ONE retry inside that window. A daily timer gets
+#      about thirty. This is the argument, and it is an availability argument
+#      rather than a freshness one: the question is not "how fresh is the data"
+#      but "how many independent chances does this job get before missing a dump
+#      becomes permanent".
+#
+#   3. A run that finds nothing new is nearly free. The loader checks
+#      mb.load_state for the dump it discovered and exits 0 without downloading
+#      anything, so on the 13 days out of 14 when nothing has been published the
+#      cost is one HTTPS directory listing and one .sha256 - MEASURED at 469
+#      and 64 bytes, so 533 bytes total - plus two indexed SELECTs, in 1.72
+#      seconds of wall clock end to end. The ORDER of those checks is what makes
+#      that true and is called out in the loader as load-bearing: the
+#      already-loaded probe runs BEFORE the licence gate's ranged fetch. With
+#      the gate first, as it was, a daily no-op pulls 33,554,432 bytes instead
+#      of 533 - about a gigabyte a month off a charity's file host, to learn
+#      something one indexed SELECT already knew.
+#
+# Freshness is the secondary benefit and worth stating in the same units the
+# earlier quarterly proposal was rejected in. Quarterly means new recordings are
+# invisible locally for up to three months. Fortnightly-but-misaligned means up
+# to about four weeks. Daily means at most one day past publication, and in
+# practice the same morning: the dump lands at 08:00 UTC and appears in the
+# index by 08:13, and this fires at 09:19.
+#
+# 09:19 UTC, and the minute is chosen the same way as every other job timer
+# here. :19 is off the :05 (sweep-expired), :10/:40 (warm-cache), :35
+# (reap-unverified), :17 (purge-audit), :23 (backup-dump), :11 (backup
+# retention) and :47 (restore drill) minutes already in use, and off the
+# :00/:10/:20/... minutes pullfm-deploy.timer occupies, so two containers are
+# never started on the same instant of a 2-vCPU node. 09:19 rather than an
+# overnight hour on purpose: this is the one job here that can need a human, and
+# a failure that lands in the morning is one somebody sees the same day.
+OnCalendar=*-*-* 09:19:00 UTC
+
+# 1s, against systemd's default of 1 minute. The default lets systemd coalesce
+# timers anywhere inside the accuracy window, which is exactly what puts two
+# jobs on the same instant. Same reasoning, same value, as every other job timer
+# in this repository.
+AccuracySec=1s
+
+# NO RandomizedDelaySec=. pullfm-cf-ranges.timer carries an hour of jitter
+# because it is a polite client of a shared public endpoint on a schedule
+# nothing downstream cares about. This job is also a client of a shared public
+# endpoint, but it makes ONE request per day on the days nothing is new, which
+# is not a load worth spreading, and jitter would make "after the 08:13
+# publication" a probability rather than an ordering.
+
+# TRUE. A missed day is a day in which a newly published dump was not picked up,
+# and unlike a missed cache warm that does not heal itself in thirty minutes -
+# the next scheduled chance is a day away, out of the roughly thirty this job
+# gets before a missed dump is deleted upstream. A node that was down over a
+# publication should try as soon as it is back.
+#
+# The catch-up run is safe to fire into a booting node: the loader takes no
+# lock the request path wants until its final swap, and that swap has its own
+# lock_timeout, so the worst case is a load that fails and leaves the previous
+# dump serving.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

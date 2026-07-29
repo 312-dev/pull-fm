@@ -15,8 +15,14 @@
     "reap:unverified": "node dist/scripts/reap-unverified.js",
     "warm:cache": "node dist/scripts/warm-cache.js",
     "sweep:expired": "node dist/scripts/sweep-expired.js",
-    "purge:audit": "node dist/scripts/purge-audit.js"
+    "purge:audit": "node dist/scripts/purge-audit.js",
+    "refresh:mb-canonical": "node dist/scripts/refresh-mb-canonical.js"
   },
+  "//scripts.refresh:mb-canonical": [
+    "Named and shaped exactly like the four jobs above so infra/scripts/check-job-schedule.mjs can assert it the same way: a pnpm command here, a compiled entrypoint in src/scripts/, and a systemd unit that invokes it. Without this line the entrypoint existed and NOTHING COULD NAME IT, which is the gap that checker was written to catch.",
+    "IT CANNOT RUN INSIDE THE BFF IMAGE, and that is not a defect in this line - it is the reason the shipped timer does not use it. The entrypoint spawns infra/mb-loader/mb-canonical-load.sh, which needs psql, zstd, tar, curl and awk; the runtime image is node:22-alpine plus dumb-init and carries none of them, and the loader script is not in the image either (the build ships `pnpm deploy --prod /out`, JavaScript only). So `pullfm-job refresh-mb-canonical` would fail on a missing binary, not on anything this repository could fix from here. infra/mb-loader/systemd/ runs the loader on the HOST instead, the same way infra/backup does, and infra/mb-loader/systemd/README.md explains the choice.",
+    "This command stays because it is the right entrypoint from a checkout, from CI, and from any image that does have the four binaries - and because MbCanonicalRefresh is what holds the cross-node advisory lock and turns the loader's exit code into the 0/1/2 contract."
+  ],
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "@fastify/helmet": "^12.0.1",

@@ -2,12 +2,26 @@
 
 The `mb` schema holds a local copy of the MusicBrainz canonical data dump. This
 is the operator's document: what it is for, what it costs, how to load it, what
-breaks and what to do about it, and the two things outside this pipeline that
-have to change before it is finished.
+breaks and what to do about it, and what still has to change outside this
+pipeline before it is finished.
 
 Everything below that is a number was measured on 2026-07-29 against
-`musicbrainz-canonical-dump-20260717-080003` and a disposable Neon branch, not
-estimated. The extrapolations are labelled as such.
+`musicbrainz-canonical-dump-20260717-080003`, not estimated.
+
+**The whole dump has been loaded end to end**, all 31,554,198 rows, so section 4
+is a measurement rather than an extrapolation from a 1-in-40 sample - and two of
+the sampled projections turned out to be badly wrong in a way worth
+understanding (see "where the extrapolation failed").
+
+**The database it was loaded into no longer exists.** Hosting is moving and a
+managed-Postgres region is fixed at project creation, so that branch was
+discarded. Nothing in this pipeline is tied to it: the loader takes its
+connection from `DATABASE_URL_DIRECT` and holds no host, region or project
+identifier anywhere. The measurements are a shape to expect, not this
+deployment's figures. **For a first load against a new, empty database, start at
+[`infra/mb-loader/systemd/README.md`](../../infra/mb-loader/systemd/README.md)**,
+which records the ordering against migrations and the things that only show up by
+doing it.
 
 ---
 
@@ -153,52 +167,143 @@ consistently pick the least canonical row.
 
 ---
 
-## 4. Measured footprint
+## 4. Measured footprint, and how long the load takes
 
-Loaded into a disposable Neon branch off staging, as a **uniform 1-in-40 sample**
-of the whole file (788,854 rows, 15.23% multi-artist - the full file is 15.24%,
-so the sample is representative rather than the unrepresentative head).
+**The real thing, all 31,554,198 rows**, streamed from the staging application
+node into a Neon staging branch on 2026-07-29. The load completed, was verified,
+and was then discarded along with the branch it went into: hosting is moving and
+Neon regions are fixed at project creation, so that database no longer exists.
 
-| component                                           | measured | bytes/row | **projected at 31,554,198 rows**   |
-| --------------------------------------------------- | -------- | --------- | ---------------------------------- |
-| heap                                                | 164.2 MB | 218.3     | **6.42 GB**                        |
-| `canonical_lookup_idx` btree                        | 44.2 MB  | 58.7      | 1.73 GB                            |
-| `canonical_artist_idx` GIN expression               | 36.8 MB  | 48.9      | 1.44 GB                            |
-| `canonical_recording_idx` btree                     | 23.8 MB  | 31.6      | 0.93 GB                            |
-| `canonical_release_idx` btree                       | 22.8 MB  | 30.3      | 0.89 GB                            |
-| `canonical_pkey` btree                              | 16.9 MB  | 22.5      | 0.66 GB                            |
-| **total, default index set**                        | 309 MB   | 412       | **≈ 12.1 GB** (5.6 GB of it index) |
-| `canonical_trgm_idx` GIN pg_trgm _(off by default)_ | 79.3 MB  | 105.4     | +3.10 GB                           |
-| **total with pg_trgm**                              | 388 MB   | 517       | **≈ 15.2 GB**                      |
+**The numbers survive the database.** They are a shape, not this deployment's
+figures, and two of them are latency-dependent and must be re-measured on the
+first real load: the node was one short network hop from the database and had a
+fast path to `data.metabrainz.org`. The loader writes timings, row counts and
+measured sizes into `mb.load_state` on every run, so re-measuring costs nothing -
+read the table after the first load rather than trusting this section.
 
-The prior estimate of 15-20 GB was close for the with-trgm case and high for the
-default one.
+### Time: 3 minutes 58 seconds, end to end
 
-### The 512 MiB problem
+| phase                                         | wall  |
+| --------------------------------------------- | ----- |
+| discovery, `.sha256`, licence gate            | 3 s   |
+| stream + `COPY` (2.32 GB archive, 7.5 GB CSV) | 129 s |
+| `count(*)` against the row floor              | 5 s   |
+| five indexes + `ANALYZE`                      | 98 s  |
+| swap + bookkeeping                            | 2 s   |
+| **total**                                     | 238 s |
 
-The Neon project is on the **free plan**, whose hard limit is
-`branch_logical_size_limit_bytes = 536870912` - **512 MiB per branch**. The
-staging branch currently holds 33 MB.
+Per index, from `\timing` inside the build: `pkey` 10.4 s, `lookup` 25.8 s,
+`recording` 28.1 s, `release` 10.7 s, `artist` (GIN) 22.8 s, `ANALYZE` 0.5 s.
 
-**The full dump does not fit, by a factor of about 24.** This pipeline needs a
-paid Neon plan, or a different host for the `mb` schema, before it can serve the
-whole catalogue. The loader's `--max-rows` exists so a size-capped environment can
-hold a bounded prefix rather than nothing, and the row floor (`--min-rows`,
-default 20,000,000) is what stops a partial load being published by accident.
+### Disk on the job host: none
+
+**Peak RSS 19 MB for the entire process tree**, and the free space on the node
+was identical before and after to within measurement noise. The archive is never
+written down: `curl -> tee(sha256) -> zstd -dc -> tar -xO -> psql COPY` means the
+2.32 GB archive and the 7.5 GB CSV exist only as bytes in flight. Nothing about
+this job needs a big node - a machine that could not hold the file can still load
+it.
+
+### Space in Postgres: 10 GB
+
+| component                             | **measured at 31,554,198 rows**  | 1-in-40 sample projected |
+| ------------------------------------- | -------------------------------- | ------------------------ |
+| heap                                  | **6,558 MB**                     | 6.42 GB                  |
+| `canonical_lookup_idx` btree          | 1,766 MB                         | 1.73 GB                  |
+| `canonical_recording_idx` btree       | 949 MB                           | 0.93 GB                  |
+| `canonical_pkey` btree                | 676 MB                           | 0.66 GB                  |
+| `canonical_release_idx` btree         | **331 MB**                       | 0.89 GB                  |
+| `canonical_artist_idx` GIN expression | **227 MB**                       | 1.44 GB                  |
+| **total, default index set**          | **10 GB** (3,950 MB of it index) | ≈ 12.1 GB                |
+
+### Where the extrapolation failed, and why it matters
+
+Four of the six rows above were projected to within 3%. Two were not, and both
+were **over**-estimates, in the same direction and for the same reason:
+
+- `canonical_artist_idx` (GIN): projected 1.44 GB, **actual 227 MB - 6.5x too
+  high**.
+- `canonical_release_idx` (btree): projected 0.89 GB, **actual 331 MB - 2.7x**.
+
+Both index a **low-cardinality** column, and both structures share work across
+rows with the same key. A GIN index stores one entry per distinct artist UUID
+with a compressed posting list of row pointers, and a btree deduplicates
+identical keys into a single posting list too (Postgres 13+). 31.5 million rows
+carry far fewer distinct artists and releases than that - many recordings per
+release, many releases per artist - so scaling 40x adds mostly _pointers to
+existing keys_, not new keys.
+
+The lesson is general and worth keeping: **bytes-per-row from a uniform sample
+is only linear for structures that store one independent thing per row.** The
+heap and the three high-cardinality btrees projected almost exactly. Anything
+that aggregates by key will be over-projected, and the error grows with the
+sampling ratio.
+
+### The 512 MiB problem: check it, do not assume it
+
+This document previously recorded that the database was on Neon's **free plan**,
+whose hard limit is `branch_logical_size_limit_bytes = 536870912` - 512 MiB per
+branch - and that the dump therefore did not fit, by a factor of about 24.
+
+That was true of the free plan and stopped being true when the plan changed. The
+project the load above ran against reported a 16 TiB branch limit and 0.25 to 8
+CU of compute autoscaling, and 10 GB fitted with room to spare.
+
+**This is a per-project property and it does not travel.** A new project starts
+on whatever plan it was created with, so before the first load on any new
+database, read the limit rather than assuming it:
+
+```bash
+curl -sS -H "Authorization: Bearer $NEON_API_KEY" \
+  "https://console.neon.tech/api/v2/projects?org_id=$PULLFM_NEON_ORG_ID" |
+  python3 -c 'import json,sys; [print(p["name"], p["branch_logical_size_limit_bytes"]) for p in json.load(sys.stdin)["projects"]]'
+```
+
+Anything below about 11 GB will not hold this dump. **The failure mode if you
+skip this check is not subtle but it is expensive**: the load runs, streams the
+whole 2.32 GB archive, and dies partway through the `COPY` when the branch hits
+its ceiling. Nothing is corrupted - the staging table is dropped and the live
+table is untouched - but you find out several minutes in rather than in one API
+call.
+
+**The cost moved rather than disappeared.** 10 GB of managed-Postgres storage is
+a recurring line item for data that is rebuildable from a public URL in four
+minutes. That is the argument for keeping `mb` out of the backups (section 9),
+and it is worth re-checking against the plan's included storage before this ships
+to production.
+
+`--max-rows` still exists for an environment that is size-capped for some other
+reason, and the row floor (`--min-rows`, default 20,000,000) is what stops a
+partial load being published by accident. **`--max-rows` sets the floor to
+itself**, so a capped run publishes a deliberately short table. It is an operator
+tool, and leaving it set in a scheduled job would quietly replace the catalogue
+with a prefix of it.
 
 ---
 
 ## 5. Measured query performance
 
-789k rows, Neon 0.25-CU compute, `EXPLAIN (ANALYZE)`:
+**At the full 31,554,198 rows**, Neon staging branch, `EXPLAIN (ANALYZE)`. The
+789k column is the earlier sample, kept because the comparison is the point: a
+40x table costs roughly nothing extra, because every one of these is an index
+probe rather than a scan.
 
-| query                                          | plan                                       | execution |
-| ---------------------------------------------- | ------------------------------------------ | --------- |
-| exact `combined_lookup = $1 ORDER BY score`    | Index Scan `canonical_lookup_idx`, no sort | 0.99 ms   |
-| artist prefix `~>=~ / ~<~` + `ORDER BY score`  | Index Scan `canonical_lookup_idx` + top-N  | 1.15 ms   |
-| artist containment via the GIN expression      | Bitmap Index Scan `canonical_artist_idx`   | 0.09 ms   |
-| `recording_mbid = $1`                          | Index Only Scan `canonical_recording_idx`  | 1.14 ms   |
-| pg_trgm `combined_lookup % $1` (threshold 0.6) | Bitmap Index Scan `canonical_trgm_idx`     | 21.2 ms   |
+| query                                          | plan at 31.5M rows                             | 31.5M   | 789k    |
+| ---------------------------------------------- | ---------------------------------------------- | ------- | ------- |
+| exact `combined_lookup = $1 ORDER BY score`    | Index Scan `canonical_lookup_idx`, no sort     | 0.34 ms | 0.99 ms |
+| artist prefix `~>=~ / ~<~` + `ORDER BY score`  | Index Scan `canonical_lookup_idx` + top-N sort | 2.08 ms | 1.15 ms |
+| artist containment via the GIN expression      | Bitmap Index Scan `canonical_artist_idx`       | 0.16 ms | 0.09 ms |
+| `recording_mbid = $1` (a miss)                 | Index Only Scan `canonical_recording_idx`      | 0.55 ms | 1.14 ms |
+| pg_trgm `combined_lookup % $1` (threshold 0.6) | Bitmap Index Scan `canonical_trgm_idx`         | _n/a_   | 21.2 ms |
+
+Every one of the four default-index paths uses the index it was built for at
+full scale; none falls back to a sequential scan. The prefix scan is the only
+one that grew, and visibly so rather than mysteriously: `radiohead` matches 2,251
+rows at full scale against a handful in the sample, and those 2,251 go through a
+top-N heapsort to satisfy `ORDER BY score`. That is the cost of the prefix being
+selective on artist but not on release, and it is still 2 ms.
+
+`pg_trgm` is not built (see below), so there is no full-scale number for it.
 
 ### Why `text_pattern_ops` and `~>=~` rather than `LIKE` or `>=`
 
@@ -468,18 +573,57 @@ where only a thrown error was checked and every refused deletion counted as a
 success. `defaultRunner` resolves with the code and never rejects on a non-zero
 one, so a caller is forced to look at it.
 
+### The schedule: daily, and why not fortnightly
+
+`infra/mb-loader/systemd/pullfm-mb-canonical.{service,timer}`, **daily at 09:19
+UTC**. The full argument is in the timer file and in
+`infra/mb-loader/systemd/README.md`; the three measurements it rests on:
+
+| fact                                                 | evidence                                                    |
+| ---------------------------------------------------- | ----------------------------------------------------------- |
+| Published twice a month, dated the **3rd and 17th**  | the `canonical_data/` index on 2026-07-29                   |
+| **Exactly two dumps retained**; the third is deleted | the same index has exactly two entries, and that is the lot |
+| A no-op run costs **533 bytes** and 1.72 s           | measured on the node                                        |
+
+**Retention, not freshness, is what sets the cadence.** A failed run has until
+the _second_ next publication - about thirty days - before the dump it missed is
+deleted upstream and that fortnight of catalogue is unrecoverable. A fortnightly
+timer gets one retry inside that window; a daily timer gets about thirty. Daily
+also happens to bound staleness at one day rather than the four weeks a
+misaligned fortnightly timer would allow, but that is the secondary benefit.
+
+The publication interval is **not a constant 14 days** - the 3rd to the 17th is
+14, the 17th to the next month's 3rd is 15 to 17 - so a period-based timer
+(`OnUnitActiveSec=14d`) drifts and starts firing on the wrong side of a
+publication. A calendar timer cannot.
+
+This is only affordable because the loader checks `mb.load_state` **before** it
+fetches anything. It did not always; with the licence gate first, a daily no-op
+pulled 33,554,432 bytes a day off a charity's file host instead of 533.
+
 ### Not done, and outside this work's ownership
 
-1. **No `refresh:mb-canonical` script in `apps/bff/package.json`.** Every other
-   job is invoked by its pnpm command from a systemd unit. Adding it needs
-   `"refresh:mb-canonical": "node dist/scripts/refresh-mb-canonical.js"`.
-2. **No systemd timer.** `infra/staging/app/systemd/` needs a
-   `pullfm-refresh-mb-canonical.{service,timer}` pair with `SuccessExitStatus=2`
-   and an `OnFailure`, enabled by `bootstrap.sh`, and the job added to the list in
-   `infra/scripts/check-job-schedule.mjs`. Until then this job is a command that
-   nothing invokes - which is the exact gap that checker was written to catch.
-3. **The 512 MiB Neon free-plan branch limit** (section 4). The full dump needs a
-   paid plan or a different host.
+1. **The unit files are not installed by anything.** `infra/staging/app/bootstrap.sh`
+   copies and enables the units it knows about and does not know about these.
+   See `infra/mb-loader/systemd/README.md` for the exact four changes needed:
+   `postgresql-client` on the node, `/etc/pullfm/mb-canonical.env` placed from
+   1Password, `infra/mb-loader/` synced to `/opt/pullfm/`, and the units enabled.
+2. **`psql` is absent from the staging node.** `bootstrap.sh` installs
+   `docker.io docker-compose-v2 nginx` only. `zstd`, `tar`, `curl` and `awk` are
+   all present on stock Ubuntu 24.04; `psql` is the only gap. This blocks
+   `infra/backup`'s dump job for the same reason - it needs `pg_dump` on the same
+   host and would fail today.
+3. **`infra/scripts/check-job-schedule.mjs` only looks at
+   `infra/staging/app/systemd/`.** Neither these units nor the four
+   `infra/backup/` ones are asserted by it at all. That gap predates this work.
+4. **The BFF entrypoint cannot run in the BFF image.**
+   `apps/bff/package.json` now has `refresh:mb-canonical`, but the runtime image
+   is `node:22-alpine` plus `dumb-init` and carries none of `psql`, `zstd`,
+   `curl`, and does not contain the loader script either. So the timer runs the
+   loader **on the host**, the same way `infra/backup` does, and
+   `MbCanonicalRefresh`'s cross-node advisory lock is currently unused. That is
+   acceptable at one application node and is not acceptable at two; the README in
+   `infra/mb-loader/systemd/` records the choice and the trigger to revisit it.
 
 ---
 

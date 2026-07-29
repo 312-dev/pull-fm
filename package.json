@@ -31,8 +31,17 @@
     "stack:up": "docker compose -f docker-compose.dev.yml up -d",
     "stack:down": "docker compose -f docker-compose.dev.yml down",
     "stack:reset": "docker compose -f docker-compose.dev.yml down -v && pnpm stack:up",
+    "mb:load": "infra/mb-loader/mb-canonical-load.sh",
+    "mb:load:dry": "infra/mb-loader/mb-canonical-load.sh --dry-run",
+    "mb:load:selftest": "infra/mb-loader/selftest.sh",
     "prepare": "husky"
   },
+  "//scripts.mb": [
+    "mb:load runs the MusicBrainz canonical loader. It is HERE, at the root, and not in apps/bff, because it is not a workspace's job: it is a shell pipeline of curl -> zstd -> tar -> psql COPY that needs psql, zstd, tar, curl and awk on the machine running it, and none of those are in the BFF runtime image (node:22-alpine plus dumb-init). apps/bff has refresh:mb-canonical, which is the SCHEDULED wrapper - advisory lock, exit-code classification - and it spawns this same script rather than reimplementing it.",
+    "It takes its connection from DATABASE_URL_DIRECT and nothing else, so there is no --env plumbing to get wrong: DATABASE_URL_DIRECT=... pnpm mb:load. The DIRECT endpoint, never the pooled one - the swap holds ACCESS EXCLUSIVE and an advisory lock across statements, and Neon's pooled endpoint is PgBouncer in transaction mode, which breaks both silently.",
+    "mb:load:dry discovers the newest published dump and verifies its licence, and changes nothing. Safe to run from anywhere.",
+    "mb:load:selftest needs the docker Postgres from stack:up and exits 77 if it cannot get one."
+  ],
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.2",

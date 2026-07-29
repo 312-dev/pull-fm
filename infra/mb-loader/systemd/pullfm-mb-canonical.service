@@ -1,0 +1,119 @@
+[Unit]
+Description=Load the newest MusicBrainz canonical dump into the mb schema
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/runbooks/mb-canonical-data.md
+After=network-online.target
+Wants=network-online.target
+
+# The connection file is placed by the secret-distribution step, not by this
+# unit. Its ABSENCE means "this node was never configured to load the dump",
+# which is a skip, not a failure: a skipped unit does not reach OnFailure and
+# does not page anybody. Compare pullfm-warm-cache.service, which skips on a
+# missing /etc/pullfm/deploy.env for the same reason.
+ConditionPathExists=/etc/pullfm/mb-canonical.env
+
+# [Unit], NOT [Service]. systemd parses OnFailure= in [Service], logs "Unknown
+# key name 'OnFailure' in section 'Service', ignoring", and wires NOTHING - the
+# defect that left every job unit in this repository with no alert path at all
+# until 2026-07-29. Do not move this line.
+OnFailure=pullfm-job-alert@%n.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/pullfm/mb-canonical.env
+ExecStart=/opt/pullfm/infra/mb-loader/mb-canonical-load.sh
+
+# ---------------------------------------------------------------------------
+# NO SuccessExitStatus=, AND THAT IS NOT AN OVERSIGHT
+#
+# The four application jobs carry SuccessExitStatus=2 because each of them has a
+# real "ran, and something is worth a look, but nothing is unbounded" outcome.
+# THE LOADER HAS NO SUCH OUTCOME. Its contract, stated in its own header, is two
+# codes:
+#
+#   0  loaded and swapped, OR declined because the newest published dump is
+#      already loaded. Declining is exit 0 deliberately: on 13 days out of 14
+#      nothing new has been published, and a job that reports failure for
+#      working as designed teaches an operator to ignore it.
+#   1  could not run and CHANGED NOTHING - a licence change, a checksum
+#      mismatch, a short row count, a failed COPY, a blocked swap. The live
+#      table is still serving the previous dump in every one of those cases,
+#      because the loader never mutates it: it builds a staging table and
+#      replaces the live one by rename inside one transaction.
+#
+# So every non-zero exit here is alert-worthy, exactly as it is for
+# pullfm-backup-dump.service. Adding SuccessExitStatus=2 would invent a third
+# outcome that nothing produces.
+#
+# The 0/1/2 contract DOES exist one layer up, in
+# apps/bff/src/scripts/refresh-mb-canonical.ts, where a timeout is 2 rather than
+# 1. That entrypoint is not what this unit runs; see README.md in this
+# directory for why.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# MEASURED, NOT GUESSED - but measured somewhere else. These timings are from an
+# end-to-end load of musicbrainz-canonical-dump-20260717-080003 on 2026-07-29,
+# from an application node that sat one short network hop from the database.
+# THE HOSTING IS MOVING, so treat them as a shape rather than as this
+# deployment's numbers and re-measure on the first real load (the loader records
+# every one of them in mb.load_state, so re-measuring is free):
+#
+#   discovery, .sha256, licence gate           3 s
+#   stream + COPY, 31,554,198 rows           129 s
+#   count(*) against the row floor             5 s
+#   five indexes + ANALYZE                    98 s
+#   swap + bookkeeping                         2 s
+#   -----------------------------------------------
+#   total wall clock                    3 min 58 s
+#
+# 3600 is 15x that, and the margin is sized by the part that is NOT the
+# database and NOT under this deployment's control. The COPY moved 2.32 GB of
+# archive and 7.5 GB of CSV in 129 seconds because that host had a fast path to
+# data.metabrainz.org and a short one to the database; the SAME 2.32 GB off a
+# congested public file host at 1 MB/s is 39 minutes on its own, and that is a
+# completely ordinary thing for a charity's mirror to do. Move the job further
+# from either endpoint and only this download gets slower - the index phase
+# scales with the database's compute, not with distance.
+#
+# So: do not tighten this towards the measured four minutes. Four minutes is
+# what this job costs when everything is fast and close, and the timeout exists
+# for when it is neither.
+#
+# TimeoutStartSec=, NOT RuntimeMaxSec=. RuntimeMaxSec= bounds a service that has
+# REACHED the running state and a Type=oneshot service NEVER DOES - it is
+# "activating" from ExecStart until ExecStart returns. systemd discards it with
+# "RuntimeMaxSec= has no effect in combination with Type=oneshot. Ignoring." and
+# the unit is left unbounded. Every job unit in this repository carried that bug
+# until 2026-07-29.
+#
+# Being killed here is SAFE BY CONSTRUCTION, which is why a ceiling this
+# aggressive is affordable. SIGTERM runs the loader's EXIT trap, which drops the
+# staging table and records the attempt as failed; the live table was never
+# touched, so a timeout costs a wasted download and nothing else.
+TimeoutStartSec=3600
+
+# 512M against a MEASURED peak RSS of 19 MB for the whole process tree
+# (`/usr/bin/time -v`, which reports the maximum over the script and every child
+# it waits for: curl, tee, sha256sum, zstd, tar, psql). The archive is streamed,
+# so nothing here is proportional to the 2.3 GB download or the 7.5 GB of CSV -
+# that is the whole point of the pipeline's shape. This is not a tuning knob, it
+# is a blast-radius bound: this node also runs nginx, the BFF and both Redis
+# instances in 4 GB, and a maintenance job that grows without limit would take
+# the request path down with it. If this is ever hit, something has changed
+# shape and the right response is to find out what, not to raise the number.
+MemoryMax=512M
+
+# Nice/IOSchedulingClass, because this shares two vCPUs with the request path.
+# zstd decompression of 7.5 GB is the only CPU-hungry part and it has no deadline
+# worth preempting a request for.
+Nice=10
+IOSchedulingClass=idle
+
+# The loader writes exactly two things to disk, both from mktemp: the extracted
+# COPYING (about 6 KB, for the licence digest) and the streaming sha256 (64
+# bytes). PrivateTmp gives it its own /tmp and /var/tmp so neither is visible to
+# anything else on the node, and neither survives the unit.
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true

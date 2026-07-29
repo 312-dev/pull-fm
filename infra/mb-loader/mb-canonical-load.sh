@@ -87,18 +87,21 @@
 #
 #   1. discover the newest dump, or take the one named on the command line
 #   2. fetch the publisher's .sha256 and reject anything not 64 hex characters
-#   3. VERIFY THE LICENCE: pull COPYING out of the archive and check its digest
-#   4. create mb.canonical_stage_<pid>_<epoch>, private to this run
-#   5. stream: curl -> tee(sha256) -> zstd -dc -> tar -xO -> COPY
+#   3. DECLINE EARLY, exit 0, when mb.load_state already records this dump. One
+#      indexed read, and it comes before anything bulk is fetched so that a
+#      daily schedule costs a directory listing rather than 32 MiB
+#   4. VERIFY THE LICENCE: pull COPYING out of the archive and check its digest
+#   5. create mb.canonical_stage_<pid>_<epoch>, private to this run
+#   6. stream: curl -> tee(sha256) -> zstd -dc -> tar -xO -> COPY
 #      the 7.5 GB CSV is never written to disk; only bytes in flight exist
-#   6. VERIFY THE SHA-256 BEFORE THE SWAP. A mismatch aborts with the staging
+#   7. VERIFY THE SHA-256 BEFORE THE SWAP. A mismatch aborts with the staging
 #      table dropped and the live table untouched
-#   7. sanity-check the row count against --min-rows
-#   8. build indexes and ANALYZE, on a table nothing is reading
-#   9. swap inside one transaction, under an advisory lock and a lock_timeout
-#  10. record the outcome, with measured sizes, in mb.load_state
+#   8. sanity-check the row count against --min-rows
+#   9. build indexes and ANALYZE, on a table nothing is reading
+#  10. swap inside one transaction, under an advisory lock and a lock_timeout
+#  11. record the outcome, with measured sizes, in mb.load_state
 #
-# The order of 4 and 5 is a deliberate trade worth being explicit about. The
+# The order of 5 and 6 is a deliberate trade worth being explicit about. The
 # alternative - download the whole 2.3 GB archive, verify it, and only then load
 # - needs 2.3 GB of scratch disk on the job host and makes the checksum a
 # precondition of PARSING. This orders it the other way: untrusted bytes are
@@ -151,10 +154,29 @@ EOF
 # Never interpolates a connection string. The only values that reach a log line
 # are dump ids, digests, row counts and byte sizes.
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
+
+# THE REASON IS KEPT, NOT JUST THE EXIT CODE.
+#
+# The EXIT trap used to write a fixed 'loader exited 1; see job logs' into
+# mb.load_state.error, which is what the first real end-to-end attempt against
+# staging left behind: one 'failed' row, 29 minutes long, saying nothing about
+# what went wrong. The job logs it points at are a systemd journal on one node
+# with its own retention, so by the time anybody reads the table the reason is
+# routinely gone. `die` therefore stashes its message here and the trap records
+# THAT, which makes mb.load_state self-contained: the table that says a load
+# failed also says why.
+LAST_ERROR=""
 die() {
+  LAST_ERROR="$*"
   log "FATAL: $*"
   exit 1
 }
+
+# Single quotes doubled, and truncated, because this string is interpolated into
+# an UPDATE. Nothing in a die message is attacker-controlled today - they are
+# built from dump ids, digests and exit codes - but the escape is here so that
+# stays true if a future message ever includes a server error string.
+sql_lit() { printf '%s' "${1:0:800}" | sed "s/'/''/g"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -290,11 +312,27 @@ parse_conn "${DB_URL}"
 # infra/neon/sql/set-role-timeouts.sql gives neondb_owner a 15-minute
 # statement_timeout as a role default, so a wedged maintenance session cannot
 # hold locks against the application indefinitely. THIS SCRIPT IS THE ONE THING
-# THAT LEGITIMATELY EXCEEDS IT, and it exceeds it in a single statement: step 5
+# THAT LEGITIMATELY EXCEEDS IT, and it exceeds it in a single statement: step 6
 # is one `COPY ... FROM STDIN` that runs for as long as it takes to download
 # 2.3 GB and stream 7.5 GB of CSV through it. Under the role default that COPY
 # is cancelled partway and the load fails every time, with a message about a
 # statement timeout that says nothing about why.
+#
+# THE ROLE DEFAULT IS LIVE, so this is not a precaution against something that
+# might happen later. Read off the staging branch on 2026-07-29:
+#
+#   neondb_owner   {statement_timeout=15min,idle_in_transaction_session_timeout=5min}
+#   pullfm_app     {statement_timeout=30s,idle_in_transaction_session_timeout=60s}
+#
+# The full 31,554,198-row load ran to completion the same day WITH that default
+# in place, which is the evidence that the prelude below actually clears it
+# rather than merely appearing to. The COPY itself took 129 seconds, so it would
+# have survived the 15-minute ceiling anyway - the ceiling that would have
+# killed it is `pullfm_app`'s 30 seconds, and running this as the app role would
+# also fail on privileges long before that. Do not "simplify" this by removing
+# the prelude because one measured run happened to fit: the margin is a property
+# of today's dump size, today's network and today's Neon compute, and all three
+# move.
 #
 # So it is lifted HERE, visibly, for this process only, rather than by weakening
 # the role default for everything that connects as the owner. Set
@@ -319,7 +357,7 @@ parse_conn "${DB_URL}"
 # which is what the prelude below is. It is prepended to every psql invocation
 # in this file rather than issued once, because each `psql` is its own session.
 #
-# lock_timeout is deliberately NOT cleared. The swap sets its own (step 9) and
+# lock_timeout is deliberately NOT cleared. The swap sets its own (step 10) and
 # that one is what stops this job from turning into an outage.
 PSQL_PRELUDE="SET statement_timeout = ${MB_CANONICAL_STATEMENT_TIMEOUT:-0};"
 
@@ -387,11 +425,53 @@ printf '%s' "${EXPECTED_SHA}" | grep -qE '^[0-9a-f]{64}$' ||
 log "expected sha256: ${EXPECTED_SHA}"
 
 # ---------------------------------------------------------------------------
-# 3. THE LICENCE GATE.
+# 3. IS THERE ANYTHING TO DO? Asked FIRST, and the order is load-bearing.
+#
+# This block used to sit BELOW the licence gate, which meant every run paid the
+# gate's 32 MiB ranged download before discovering it had nothing to do. That
+# was affordable at a fortnightly schedule and is not at a daily one, and daily
+# is what infra/mb-loader/systemd/pullfm-mb-canonical.timer settled on: 32 MiB a
+# day is about a gigabyte a month pulled off a charity's file host to learn a
+# fact one indexed SELECT already knew. In this order a no-op run costs one
+# directory listing, one 64-byte .sha256 and one row read, measured at about a
+# second, which is what makes a daily cadence a courtesy rather than an
+# imposition.
+#
+# IT DOES NOT WEAKEN THE LICENCE GATE, and that is the objection to answer. The
+# gate exists because a fortnightly RE-FETCH is a fortnightly RE-CONSENT, so it
+# has to fire for every dump this database has not already accepted - and it
+# still does: the only path that skips it is one where mb.load_state already
+# records a SUCCESSFUL load of this exact dump id, which is to say a dump whose
+# COPYING was verified when its rows were loaded. Re-verifying the same
+# immutable archive daily re-consents to nothing, and if its bytes ever did
+# change, the sha256 gate before the swap is what catches that, not this.
+#
+# Two dumps are retained upstream and they are published fortnightly, so any
+# schedule tighter than that will mostly find nothing new. Declining is exit 0:
+# a job that reports failure for working as designed teaches an operator to
+# ignore it, which is how a real failure goes unnoticed.
+# ---------------------------------------------------------------------------
+psql_q "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'mb'" |
+  grep -q 1 || die "the mb schema does not exist. Run migration 0007 first."
+
+if [ "${FORCE}" != "1" ]; then
+  ALREADY=$(psql_q "SELECT 1 FROM mb.load_state
+                     WHERE status = 'ok' AND dump_id = '${DUMP_ID}' LIMIT 1") ||
+    die "could not read mb.load_state"
+  if [ "${ALREADY}" = "1" ]; then
+    log "already loaded: ${DUMP_ID}. Nothing to do."
+    exit 0
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 4. THE LICENCE GATE.
 #
 # See the header for why this is checked on every run rather than once, at
 # review time: a fortnightly re-fetch is a fortnightly re-consent, and a
-# relicensed future dump would otherwise load without a word.
+# relicensed future dump would otherwise load without a word. `--force
+# --dry-run` re-runs it against a dump that is already loaded, which is the way
+# to re-check a licence on demand.
 #
 # The check runs BEFORE the 2.3 GB download, using an HTTP range request for the
 # first few megabytes, because a licence change should stop the pipeline before
@@ -444,29 +524,8 @@ if [ "${DRY_RUN}" = "1" ]; then
   exit 0
 fi
 
-psql_q "SELECT 1 FROM information_schema.schemata WHERE schema_name = 'mb'" |
-  grep -q 1 || die "the mb schema does not exist. Run migration 0007 first."
-
 # ---------------------------------------------------------------------------
-# Already loaded?
-#
-# Two dumps are retained upstream and they are published fortnightly, so any
-# schedule tighter than that will mostly find nothing new. Declining is exit 0:
-# a job that reports failure for working as designed teaches an operator to
-# ignore it, which is how a real failure goes unnoticed.
-# ---------------------------------------------------------------------------
-if [ "${FORCE}" != "1" ]; then
-  ALREADY=$(psql_q "SELECT 1 FROM mb.load_state
-                     WHERE status = 'ok' AND dump_id = '${DUMP_ID}' LIMIT 1") ||
-    die "could not read mb.load_state"
-  if [ "${ALREADY}" = "1" ]; then
-    log "already loaded: ${DUMP_ID}. Nothing to do."
-    exit 0
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# 4. A staging table private to this run.
+# 5. A staging table private to this run.
 #
 # The name carries the pid and a timestamp rather than being a fixed
 # `canonical_next`, so two loaders running at once cannot destroy each other's
@@ -492,9 +551,17 @@ cleanup() {
   if [ -n "${LOAD_ID}" ] && [ "${status}" != "0" ]; then
     # Best effort. A recorded failure is what turns "the data looks old" into
     # "the load has been failing since the 17th" without reading job logs.
+    #
+    # LAST_ERROR is empty when the process was KILLED rather than exiting through
+    # `die` - a systemd TimeoutStartSec, an OOM kill, an operator's ^C - and that
+    # distinction is worth preserving in the table rather than flattening: an
+    # exit code with no reason means nothing wrote one, which is itself the
+    # diagnosis.
+    local reason
+    reason=$(sql_lit "${LAST_ERROR:-killed or exited ${status} without a reason; see job logs}")
     psql_q "UPDATE mb.load_state
                SET status = 'failed', finished_at = now(),
-                   error  = 'loader exited ${status}; see job logs'
+                   error  = 'exit ${status}: ${reason}'
              WHERE id = ${LOAD_ID} AND status = 'running'" >/dev/null 2>&1 || true
   fi
   return "${status}"
@@ -509,7 +576,7 @@ psql_q "CREATE TABLE mb.\"${STAGE}\" (LIKE mb.canonical)" ||
   die "could not create the staging table"
 
 # ---------------------------------------------------------------------------
-# 5 and 6. Stream, hash, and load.
+# 6 and 7. Stream, hash, and load.
 #
 # `tee` into a process substitution is what lets one pass do both: the bytes go
 # to the hasher and to the decompressor simultaneously, so the archive is read
@@ -547,18 +614,43 @@ else
 fi
 
 if [ -n "${MAX_ROWS}" ]; then
+  # ---------------------------------------------------------------------------
+  # NO `tee` AND NO HASHER ON THIS BRANCH, AND THAT IS A BUG FIX RATHER THAN A
+  # TIDY-UP. This branch used to carry the same `tee >(sha256sum)` as the full
+  # branch below, and the comment here used to say that everything upstream of
+  # the splitter "is expected to die of SIGPIPE the moment the cap is reached".
+  # IT DOES NOT, and the reason is the hasher.
+  #
+  # `tee` writes to two places: the pipe to zstd, and the process substitution
+  # holding the hasher. When awk hits the cap and exits, the zstd side collapses
+  # - but the HASHER IS STILL READING, so tee still has a live output, keeps
+  # draining its stdin to feed it, and curl keeps downloading. The result is
+  # that `--max-rows 5` against the published URL still pulls the whole 2.32 GB
+  # archive across the network before the process ends. Measured: a five-row
+  # capped load ran for over five minutes and was killed, having loaded its five
+  # rows in the first second.
+  #
+  # Removing the hasher is the fix AND it costs nothing, because the digest was
+  # already worthless on this branch: the stream is cut short on purpose, so the
+  # hash is of a prefix and can never equal the publisher's. The script already
+  # says so in the WARNING below. Now SIGPIPE reaches curl directly and the cap
+  # bounds the download as well as the row count, which is what anybody passing
+  # --max-rows in a size-capped environment assumed it did.
+  #
+  # SHA_FILE is left empty, which is what the WARNING branch below expects.
+  #
   # The header is record 0, so the cap is MAX_ROWS + 1 emitted records.
+  # ---------------------------------------------------------------------------
   "${SOURCE[@]}" |
-    tee >("${SHA_CMD[@]}" | cut -d' ' -f1 >"${SHA_FILE}") |
     zstd -dc |
     tar -xOf - "${CSV_PATH}" |
     awk -v LIMIT="$((MAX_ROWS + 1))" "${SPLITTER}" |
     psql -v ON_ERROR_STOP=1 -qX -c "${PSQL_PRELUDE}" -c "${COPY_SQL}"
   STATUSES=("${PIPESTATUS[@]}")
-  # Only the COPY's status is decisive. Everything upstream of the splitter is
-  # expected to die of SIGPIPE the moment the cap is reached, and treating that
-  # as a failure would make --max-rows unusable.
-  [ "${STATUSES[5]}" = "0" ] || die "COPY failed (exit ${STATUSES[5]})"
+  # Only the COPY's status is decisive. Everything upstream of the splitter DOES
+  # now die of SIGPIPE when the cap is reached, and treating that as a failure
+  # would make --max-rows unusable. Index 4, not 5, because `tee` is gone.
+  [ "${STATUSES[4]}" = "0" ] || die "COPY failed (exit ${STATUSES[4]})"
 else
   "${SOURCE[@]}" |
     tee >("${SHA_CMD[@]}" | cut -d' ' -f1 >"${SHA_FILE}") |
@@ -600,7 +692,7 @@ if [ -z "${ARCHIVE}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Did enough arrive?
+# 8. Did enough arrive?
 #
 # A download cut inside a zstd frame fails loudly, but one cut exactly on a
 # frame boundary does not, and a tar truncated between members simply stops.
@@ -614,7 +706,7 @@ log "staged rows: ${ROWS}"
   die "only ${ROWS} rows staged, floor is ${MIN_ROWS}. Refusing to publish a partial load."
 
 # ---------------------------------------------------------------------------
-# 8. Indexes, on a table nothing is reading.
+# 9. Indexes, on a table nothing is reading.
 #
 # canonical_lookup_idx is the one that matters, and its shape is not arbitrary.
 # `text_pattern_ops` makes it usable for BYTE-ordered prefix ranges regardless of
@@ -639,20 +731,34 @@ log "staged rows: ${ROWS}"
 # against the value it adds over the trigram index that already exists on
 # mbid_crosswalk.
 # ---------------------------------------------------------------------------
+# `\timing on` and the `\echo` labels are not decoration. This block is the
+# longest phase of the run after the COPY, and it is five statements deep inside
+# one psql invocation, so without them a slow load says only "building indexes"
+# for however long it takes and an operator cannot tell a wedged GIN build from
+# a slow btree. With them every line of the log is one statement and its
+# milliseconds, which is what made the per-index numbers in
+# docs/runbooks/mb-canonical-data.md measurements rather than guesses.
 log "building indexes"
 psql_f <<SQL || die "index build failed; the live table is untouched"
+\timing on
 SET maintenance_work_mem = '${MB_CANONICAL_MAINTENANCE_WORK_MEM:-256MB}';
+\echo 'idx: pkey'
 ALTER TABLE mb."${STAGE}" ADD CONSTRAINT "${STAGE}_pkey" PRIMARY KEY (id);
+\echo 'idx: lookup (btree text_pattern_ops, score)'
 CREATE INDEX "${STAGE}_lookup_idx"    ON mb."${STAGE}" (combined_lookup text_pattern_ops, score);
+\echo 'idx: recording (btree)'
 CREATE INDEX "${STAGE}_recording_idx" ON mb."${STAGE}" (recording_mbid);
+\echo 'idx: release (btree)'
 CREATE INDEX "${STAGE}_release_idx"   ON mb."${STAGE}" (release_mbid);
+\echo 'idx: artist (gin expression)'
 CREATE INDEX "${STAGE}_artist_idx"    ON mb."${STAGE}" USING gin ((string_to_array(artist_mbids, ',')::uuid[]));
-$([ "${WITH_TRGM}" = "1" ] && printf 'CREATE INDEX "%s_trgm_idx" ON mb."%s" USING gin (combined_lookup gin_trgm_ops);' "${STAGE}" "${STAGE}")
+$([ "${WITH_TRGM}" = "1" ] && printf "\\\\echo 'idx: trgm (gin pg_trgm)'\nCREATE INDEX \"%s_trgm_idx\" ON mb.\"%s\" USING gin (combined_lookup gin_trgm_ops);" "${STAGE}" "${STAGE}")
+\echo 'analyze'
 ANALYZE mb."${STAGE}";
 SQL
 
 # ---------------------------------------------------------------------------
-# 9. The swap. One transaction, so there is no midway to be interrupted in.
+# 10. The swap. One transaction, so there is no midway to be interrupted in.
 #
 # DROP then RENAME rather than RENAME-RENAME-DROP: dropping the old table first
 # frees its index names inside the same transaction, so the staged indexes can
@@ -694,7 +800,7 @@ SQL
 STAGE=""
 
 # ---------------------------------------------------------------------------
-# 10. Record what actually happened, with MEASURED sizes.
+# 11. Record what actually happened, with MEASURED sizes.
 #
 # Measured rather than estimated because the footprint of this table is the whole
 # reason the schema is excluded from the backups, and a number that lives only in
