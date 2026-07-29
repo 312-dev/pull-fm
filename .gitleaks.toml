@@ -72,6 +72,13 @@ keywords = ["nomad"]
 tags = ["nomad", "infra"]
 
 [[rules]]
+id = "pullfm-personal-api-token"
+description = "Pull.fm personal API token (pfm_live_ / pfm_test_)"
+regex = '''\bpfm_(?:live|test)_[A-Za-z0-9_-]{43}\b'''
+keywords = ["pfm_live_", "pfm_test_"]
+tags = ["pullfm", "per-user-token"]
+
+[[rules]]
 id = "pullfm-private-key-block"
 description = "Any PEM private key block"
 regex = '''-----BEGIN[ A-Z]*PRIVATE KEY-----'''
