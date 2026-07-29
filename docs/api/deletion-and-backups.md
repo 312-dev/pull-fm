@@ -65,12 +65,24 @@ The position we take instead, which is the one regulators accept:
    access-controlled to a single scoped R2 credential, and never queried to serve live traffic.
 2. **Retention is bounded and stated.** Deleted data disappears from the backup set when the last
    backup containing it expires, within the documented PITR window.
-3. **A restore replays the deletions.** The `deletion_log` rows in this database are the
-   authoritative replay list: any restored user id present in `deletion_log` is re-deleted before the
-   restored system serves traffic. That makes the erasure durable across a restore, which is the
-   property the regulation actually cares about. `deletion_log` deliberately has no foreign key to
-   `users`, so those rows survive the deletion they record, and they hold no personal data beyond the
-   id that was erased.
+3. **A restore replays the deletions, from a list held outside this database.** The authoritative
+   replay list is an append-only erasure ledger in object storage, one immutable object per erasure.
+   Any restored user id present in the ledger is re-deleted before the restored system serves
+   traffic, which is what makes erasure durable across a restore.
+
+   **`deletion_log` is NOT the replay list, and cannot be.** This document previously said it was.
+   A restore drill on 2026-07-29 disproved it directly: erasing an account after a restore point and
+   then restoring to before it left the account present and `deletion_log` holding zero rows. The
+   list lived inside the thing being rolled back, so the rollback took the evidence with it. A replay
+   list has to survive the restore to be a replay list.
+
+   `deletion_log` keeps its real job: it is the in-database record that an erasure happened, it
+   deliberately has no foreign key to `users` so its rows outlive the deletion they record, it holds
+   no personal data beyond the id that was erased, and the replay rebuilds it from the ledger.
+
+   Residual gap: the ledger object is written by a job on a ten-minute timer, so that interval is the
+   erasure durability gap. Writing the object inline with the deletion cascade closes it. **[OPEN]**
+
 4. **Third-party credentials in a backup are ciphertext.** Backup encryption keys are not
    per-user, so there is no per-user crypto-shredding claim to make here. The claim that IS true:
    a restored backup of a deleted account yields AES-256-GCM ciphertext under a KEK that never

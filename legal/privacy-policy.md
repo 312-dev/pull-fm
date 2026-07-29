@@ -388,9 +388,24 @@ accept, and it comes with three commitments that make it meaningful:
    live traffic.
 2. Retention of the automatic history is **bounded**: your data disappears from
    it when the last point in time containing it ages out.
-3. **A restore replays the deletions.** Before a restored system serves traffic,
-   every account in the deletion record is re-deleted. That is what makes the
-   erasure durable rather than merely apparent.
+3. **A restore replays the deletions, from a record kept outside the database.**
+   Before a restored system serves traffic, every account in that record is
+   re-deleted. This wording was corrected after a restore drill on 2026-07-29
+   falsified the previous version, and the correction is worth stating plainly:
+   the replay list used to be `deletion_log`, a table **inside** the database
+   being restored, so rolling back past an erasure rolled back the erasure and
+   the evidence of it at the same instant. That claim was not merely unverified,
+   it was not satisfiable. The list now lives in object storage, one immutable
+   object per erasure, and a drill confirmed it removes a resurrected account,
+   rebuilds its `deletion_log` row, and leaves untouched the accounts that never
+   asked to be deleted.
+
+   One residual gap, stated rather than hidden: the object is currently written
+   by a job that runs every ten minutes, so an erasure completed inside that
+   window and followed immediately by a restore could be lost. Ten minutes is
+   therefore the durability gap for erasure, and closing it means writing the
+   object as part of the deletion itself. **[OPEN]**
+
 4. A restored backup yields your connected-service credentials **only as
    ciphertext**, under a key that was never in the database.
 
