@@ -34,8 +34,18 @@ pullfm-backup-retention    Mondays 07:11 UTC
 pullfm-restore-drill       1st of the month 04:47 UTC
 ```
 
-They already reference `pullfm-job-alert@%n.service` in `OnFailure=`, so they
-inherit the existing alert path with no change to it.
+They reference `pullfm-job-alert@%n.service` in `OnFailure=`, so they inherit the
+existing alert path with no change to it.
+
+That sentence was **false until 2026-07-29**. All four carried `OnFailure=` in
+`[Service]`, where it is not a valid directive: systemd parsed it, logged
+`Unknown key name 'OnFailure' in section 'Service', ignoring`, and wired
+nothing, so these units had no alert path at all. All four also carried
+`RuntimeMaxSec=` on a `Type=oneshot` unit, which systemd likewise discards, so
+none of them was bounded either. Both are fixed; the directives are now
+`OnFailure=` in `[Unit]` and `TimeoutStartSec=`. It is the same pair of defects
+that was found and fixed in the four application job units, and neither was
+caught here for the reason given in section 2 immediately below.
 
 ### 2. `infra/scripts/check-job-schedule.mjs` only looks at one directory
 

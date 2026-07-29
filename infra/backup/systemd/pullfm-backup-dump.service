@@ -5,6 +5,13 @@ After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/pullfm/backup.env
 
+# [Unit], NOT [Service], and it sat in [Service] until 2026-07-29. There systemd
+# parses it, logs "Unknown key name 'OnFailure' in section 'Service', ignoring",
+# and wires nothing, so this unit had NO alert path at all - the exact failure
+# the exit-code contract below exists to make visible. Same defect, and the same
+# fix, as the four application job units under infra/staging/app/systemd.
+OnFailure=pullfm-job-alert@%n.service
+
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/pullfm/backup.env
@@ -14,13 +21,17 @@ ExecStart=/opt/pullfm/infra/backup/pullfm-backup.sh dump --kind scheduled
 # "ran, with something worth a look" outcome: either a verified encrypted dump
 # is in R2 or the only copy of this database outside Neon is a day older than
 # anybody thinks. Every non-zero exit is alert-worthy.
-OnFailure=pullfm-job-alert@%n.service
 
 # The dump itself takes about 25 seconds against a 43 KB database, and pg_dump
 # time grows with the data. Ten minutes is far beyond any plausible size on a
 # 0.5 GB storage cap and still bounded, so a hung TLS connection to Neon cannot
 # hold the unit open until the next firing.
-RuntimeMaxSec=600
+# TimeoutStartSec=, NOT RuntimeMaxSec=, for the same reason and since the same
+# date. RuntimeMaxSec= bounds a service that has REACHED the running state and a
+# Type=oneshot service never does: it is "activating" from ExecStart until
+# ExecStart returns. systemd discarded it with "RuntimeMaxSec= has no effect in
+# combination with Type=oneshot. Ignoring." and this unit was unbounded.
+TimeoutStartSec=600
 
 # The plaintext dump exists on disk for a few seconds inside mktemp -d. These
 # make that directory private to this unit rather than to the whole filesystem.

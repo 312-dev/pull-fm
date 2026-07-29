@@ -5,6 +5,13 @@ After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/pullfm/backup.env
 
+# [Unit], NOT [Service], and it sat in [Service] until 2026-07-29. There systemd
+# parses it, logs "Unknown key name 'OnFailure' in section 'Service', ignoring",
+# and wires nothing, so this unit had NO alert path at all - the exact failure
+# the exit-code contract below exists to make visible. Same defect, and the same
+# fix, as the four application job units under infra/staging/app/systemd.
+OnFailure=pullfm-job-alert@%n.service
+
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/pullfm/backup.env
@@ -20,11 +27,15 @@ ExecStart=/opt/pullfm/infra/backup/restore-drill.sh
 # code is the alert: the script exits non-zero only when the restored data does
 # not match what was seeded, so a finding about the deletion-replay claim is
 # reported without waking anybody, and a failed restore is not.
-OnFailure=pullfm-job-alert@%n.service
 
 # The 2026-07-29 run took 2m35s wall clock. Twenty minutes leaves room for a
 # slow control plane and still fails rather than hanging.
-RuntimeMaxSec=1200
+# TimeoutStartSec=, NOT RuntimeMaxSec=, for the same reason and since the same
+# date. RuntimeMaxSec= bounds a service that has REACHED the running state and a
+# Type=oneshot service never does: it is "activating" from ExecStart until
+# ExecStart returns. systemd discarded it with "RuntimeMaxSec= has no effect in
+# combination with Type=oneshot. Ignoring." and this unit was unbounded.
+TimeoutStartSec=1200
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=strict

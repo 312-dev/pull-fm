@@ -5,6 +5,13 @@ After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/pullfm/backup.env
 
+# [Unit], NOT [Service], and it sat in [Service] until 2026-07-29. There systemd
+# parses it, logs "Unknown key name 'OnFailure' in section 'Service', ignoring",
+# and wires nothing, so this unit had NO alert path at all - the exact failure
+# the exit-code contract below exists to make visible. Same defect, and the same
+# fix, as the four application job units under infra/staging/app/systemd.
+OnFailure=pullfm-job-alert@%n.service
+
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/pullfm/backup.env
@@ -15,9 +22,13 @@ ExecStart=/opt/pullfm/infra/backup/pullfm-backup.sh ledger-export
 # deletion_log row that was supposed to be the replay list. This job is the only
 # thing that keeps a copy of that list outside the database, so a failure here
 # means the next restore silently un-deletes people.
-OnFailure=pullfm-job-alert@%n.service
 
-RuntimeMaxSec=300
+# TimeoutStartSec=, NOT RuntimeMaxSec=, for the same reason and since the same
+# date. RuntimeMaxSec= bounds a service that has REACHED the running state and a
+# Type=oneshot service never does: it is "activating" from ExecStart until
+# ExecStart returns. systemd discarded it with "RuntimeMaxSec= has no effect in
+# combination with Type=oneshot. Ignoring." and this unit was unbounded.
+TimeoutStartSec=300
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=strict
