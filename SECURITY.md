@@ -32,7 +32,7 @@ bug bounty program at this time.
 
 **In scope**
 
-- The Pull.fm backend API (`api.pull.fm`, `api.staging.pull.fm`)
+- The Pull.fm backend API (`api.pull.fm`, `api-staging.pull.fm`)
 - This repository: application code, infrastructure as code, CI workflows
 - Authentication, session handling, and the per-user credential vault
 - Object-level authorization (BOLA/IDOR) on any user-scoped endpoint

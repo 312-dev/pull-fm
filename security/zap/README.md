@@ -137,7 +137,7 @@ Reports land in `security/zap/work/reports/`. `security/zap/work/` is scratch; d
 ```bash
 docker run --rm \
   -v "$PWD/security/zap:/zap/wrk:rw" \
-  -e PULLFM_ZAP_TARGET="https://api.staging.pull.fm" \
+  -e PULLFM_ZAP_TARGET="https://api-staging.pull.fm" \
   -e PULLFM_ZAP_OPENAPI="/zap/wrk/work/openapi.dast.json" \
   -e PULLFM_ZAP_TOKEN="$PULLFM_ZAP_TOKEN" \
   ghcr.io/zaproxy/zaproxy:stable \
@@ -202,7 +202,7 @@ beyond staging being up.
       ghcr.io/zaproxy/zaproxy@sha256:<digest> \
       zap.sh -cmd -autorun /zap/wrk/plans/baseline.yaml
   env:
-    PULLFM_ZAP_TARGET: https://api.staging.pull.fm
+    PULLFM_ZAP_TARGET: https://api-staging.pull.fm
     PULLFM_ZAP_OPENAPI: /zap/wrk/work/openapi.dast.json
     PULLFM_ZAP_TOKEN: ${{ secrets.ZAP_DAST_TOKEN }}
 

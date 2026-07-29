@@ -491,7 +491,7 @@ non-production environments reachable from the internet.
 
 Pull.fm is new, so there is no legacy version to forget. The live concerns are structural:
 
-- **`api.staging.pull.fm` is internet-reachable and holds real-shaped data.** It is in scope in
+- **`api-staging.pull.fm` is internet-reachable and holds real-shaped data.** It is in scope in
   `SECURITY.md`. Staging typically has weaker secrets, more verbose errors, and looser rate limits,
   and it is the DAST target, which means it is the environment most likely to be in a broken state
   at any given moment.

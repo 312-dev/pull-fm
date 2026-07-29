@@ -94,13 +94,13 @@ variable "restrict_egress" {
 variable "api_hostname" {
   type        = string
   description = "Public hostname for the API."
-  default     = "api.staging.pull.fm"
+  default     = "api-staging.pull.fm"
 }
 
 variable "app_hostname" {
   type        = string
   description = "Public hostname for the web client."
-  default     = "app.staging.pull.fm"
+  default     = "app-staging.pull.fm"
 }
 
 variable "backup_bucket_name" {

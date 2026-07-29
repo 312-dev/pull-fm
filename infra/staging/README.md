@@ -101,7 +101,7 @@ nothing else. A leaked `GITHUB_TOKEN` from a workflow run gets an attacker a
 package push, not a shell on the machine holding every user's OAuth tokens.
 
 **Why this is stronger evidence, not weaker.** A push job proves the deployer
-ran. `deploy-staging.yml` polls `https://api.staging.pull.fm/healthz` until
+ran. `deploy-staging.yml` polls `https://api-staging.pull.fm/healthz` until
 `.version` equals the commit SHA, which proves the new code is serving real
 traffic through Cloudflare, the load balancer, nginx and the container. It
 cannot pass by reporting its own success.
