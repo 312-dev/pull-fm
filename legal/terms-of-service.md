@@ -1,5 +1,30 @@
 # Pull.fm Terms of Service and Application End User Licence Agreement
 
+> # STOP. THIS DOCUMENT CANNOT BE PUBLISHED.
+>
+> **Section 16 selects no governing law and no venue.** Both are still
+> placeholders. Published as written, **the dispute framework is void**: there is
+> no chosen law, no forum, and no consent to jurisdiction, and sections 11, 12
+> and 13 (warranty disclaimer, liability cap, indemnity) are left resting on a
+> choice-of-law clause that chose nothing.
+>
+> **This is not a drafting decision and it must not be guessed.** The controller
+> is **312.dev LLC**, and its state of organisation is a fact about that company:
+> read it off the certificate of formation or the registered-agent record. Whoever
+> publishes this is the person who knows it; the drafter did not.
+>
+> Section 1 has the same placeholder, for the same fact.
+>
+> **Before publishing, run:**
+>
+> ```bash
+> node legal/check-publication-blockers.mjs   # or: make legal
+> ```
+>
+> It exits non-zero while any placeholder remains and prints each one with a
+> file and line. It currently reports two `VOID IF PUBLISHED` markers, both in
+> section 16.
+
 > # DRAFT - NOT LEGAL ADVICE, REQUIRES REVIEW
 >
 > This document was drafted by the operator against the actual behaviour of the
@@ -32,6 +57,11 @@
 Pull.fm ("**Pull.fm**", "**we**", "**us**") is a music discovery service operated
 by **312.dev LLC**, a limited liability company organised under the laws of
 `[CONFIRM: state of organisation]`, United States.
+
+> **This placeholder identifies the party you would be contracting with, and it
+> also settles section 16.** It is one fact, needed in three places: here,
+> section 16's governing law, and section 16's venue. See the notice at the top
+> of this document.
 
 These Terms are a binding agreement between you and 312.dev LLC. They cover:
 
@@ -380,6 +410,19 @@ Sections 6 (your content licence, as to content already lawfully processed), 7,
 ---
 
 ## 16. Governing law and disputes
+
+> ### THIS SECTION IS VOID AS WRITTEN
+>
+> The two placeholders below are **not** editorial notes. Until both are filled
+> in, this section selects no law and no forum, so it has no legal effect and
+> neither does anything that depends on it: the warranty disclaimer (11), the
+> liability cap (12), and the indemnity (13) all assume a governing law exists.
+>
+> **Do not guess the state.** It is the state of organisation of **312.dev LLC**,
+> a fact recorded on that company's formation documents. Fill it in section 1
+> at the same time; it is the same fact in both places.
+>
+> `make legal` fails while either placeholder is present.
 
 These Terms are governed by the laws of `[CONFIRM: state]`, United States,
 without regard to its conflict-of-laws rules. The exclusive venue for any dispute

@@ -4,7 +4,7 @@
 # The Makefile is a discovery surface, not a build system: `pnpm` owns the
 # application build and `terraform` owns the infrastructure.
 
-.PHONY: help cost cost-json staging-up staging-down staging-status risks jobs identifiers infra-guards alerts alerts-armed
+.PHONY: help cost cost-json staging-up staging-down staging-status risks jobs identifiers legal infra-guards alerts alerts-armed
 
 help:
 	@echo "make cost           run rate + billing-alert check (Gate \$$)"
@@ -12,9 +12,10 @@ help:
 	@echo "make staging-up     provision ephemeral staging for a gate run"
 	@echo "make staging-down   destroy staging compute (keeps R2 and DNS)"
 	@echo "make staging-status what is running right now"
-	@echo "make risks          validate the accepted-risk register"
+	@echo "make risks          validate the accepted-risk register (needs the private checkout)"
 	@echo "make jobs           assert the background-job schedule matches the runbook"
 	@echo "make identifiers    fail if a live infrastructure identifier is in a tracked file"
+	@echo "make legal          fail if legal/ still has an unresolved placeholder"
 	@echo "make infra-guards   prove the scale guard and the origin config (terraform, docker)"
 	@echo "make alerts         PROVE the alert channel delivers, end to end (Gate 5)"
 	@echo "make alerts-armed   is this machine able to notify anyone at all?"
@@ -35,6 +36,12 @@ staging-down:
 staging-status:
 	@./infra/staging-env.sh status
 
+# The register itself is NOT in this repository: it moved to a private one on
+# 2026-07-29 (security/README.md). No --allow-missing here on purpose. An
+# operator running `make risks` is asking a question about the register, and the
+# useful answer to "I cannot find it" is the error that says where it looked,
+# not a green tick. Point PULLFM_RISK_REGISTER at your checkout, or put one at
+# security/private/accepted-risks.md, which is gitignored.
 risks:
 	@node security/scripts/check-accepted-risks.mjs
 
@@ -50,6 +57,15 @@ jobs:
 # its own samples first, so it cannot go green by matching nothing.
 identifiers:
 	@node tools/check-public-identifiers.mjs
+
+# legal/terms-of-service.md section 16 currently reads "governed by the laws of
+# [CONFIRM: state]". Published as written, the dispute framework selects no law
+# and no forum and is therefore void, and that is one line in a 20KB document
+# nobody re-reads before shipping. This makes it a command that fails rather
+# than something to remember. It checks for holes, not for correctness: a
+# lawyer still has to read the documents.
+legal:
+	@node legal/check-publication-blockers.mjs
 
 # Two proofs that need tooling rather than a checkout: that raising the node
 # count without externalizing Redis fails a terraform plan, and that the origin

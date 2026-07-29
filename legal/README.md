@@ -5,6 +5,33 @@ lawyer.** It is published in the repository so that the claims can be checked
 against the code that makes them true or false, which is the only way a privacy
 policy stays accurate.
 
+## Before publishing anything here, run this
+
+```bash
+make legal        # or: node legal/check-publication-blockers.mjs
+```
+
+It fails while any `[CONFIRM]` or `[OPEN]` marker remains, printing every one
+with a file and a line, sorted worst first. It exists because "remember to
+check" is not a control, and because two of the markers do more damage than the
+rest.
+
+### The two that are worse than incomplete
+
+| Where                     | Marker                           | Effect if published                                                                                                                              |
+| ------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `terms-of-service.md` §16 | `[CONFIRM: state]`               | **The dispute framework is void.** No governing law is selected, so the warranty disclaimer, the liability cap and the indemnity rest on nothing |
+| `terms-of-service.md` §16 | `[CONFIRM: county/state courts]` | **No forum and no consent to jurisdiction.** Unenforceable as written                                                                            |
+
+Both, plus `[CONFIRM: state of organisation]` in `terms-of-service.md` §1 and
+`privacy-policy.md` §2, are the **same single fact**: the state under whose law
+**312.dev LLC** is organised.
+
+**That fact is not in this repository and must not be guessed.** Read it off the
+company's certificate of formation or its registered-agent record. A guessed
+state is worse than a blank one, because a blank stops publication and a wrong
+one does not.
+
 | Document                                     | What it is                                                                                                               | Blocks                                                                                                            |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
 | [`privacy-policy.md`](privacy-policy.md)     | What Pull.fm collects, stores, uses, and discloses, written from the schema and the handlers rather than from a template | **Gate L.** Also required by SeatGeek API terms 4.4                                                               |
@@ -19,7 +46,15 @@ policy stays accurate.
 | `[CONFIRM]` | A decision the operator or counsel has to make. Must not survive into a published version.                                                                                             |
 
 `privacy-policy.md` ends with an appendix listing every `[OPEN]` in one table.
-That list is the real pre-publication checklist.
+That list is the real pre-publication checklist, and `make legal` is the machine
+that refuses to let it be skipped.
+
+**An `[OPEN]` is not a to-do to be tidied away.** It is the document declining to
+claim something the system does not do. Deleting one to make the check pass
+converts a disclosed weakness into a false statement of fact, which is the exact
+thing this directory's accuracy standard exists to prevent, and in the United
+States is the specific thing the FTC treats as a deceptive practice. Narrow the
+wording, or close the gap in code. Never just remove the marker.
 
 ## Why the accuracy standard is higher here than in ordinary documentation
 
