@@ -83,6 +83,18 @@ playwright-report/
 .vitest/
 k6-results/
 *.k6.json
+# Load-run state. `.subjects.json` holds LIVE session JWTs and personal API
+# tokens for whatever the seeder was pointed at, so it is the single most
+# sensitive artifact this repository can produce. `.env.load` holds the KEK the
+# local stack boots with. `.run/` holds pidfiles and process logs.
+load/.subjects.json
+load/.env.load
+load/.run/
+# The template, which `load/bin/stack-up.sh` tells you to copy. Caught by the
+# broad `.env.*` rule above and re-admitted here: it carries only placeholders,
+# and a documented setup step whose file is invisible is a setup step nobody
+# completes.
+!load/.env.load.example
 zap-report.*
 .trivycache/
 sbom.json

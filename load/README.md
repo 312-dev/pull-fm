@@ -15,13 +15,26 @@ k6 scenarios plus a mock upstream layer, for Phase 7 / **Gate 7** of
 > iTunes Search allows **~20 calls/minute, per IP**. Last.fm and MusicBrainz revoke access
 > **without appeal or SLA**. One 30 minute run is a product-ending event.
 >
-> Two mechanical guards enforce this, neither of which relies on anybody remembering:
+> **There is no environment variable that points the BFF at mock upstreams.** Provider origins
+> are hardcoded module constants in `packages/upstream` and `apps/bff/src/services/upstream.ts`
+> never passes a `baseUrl`. An earlier revision of this file claimed a `MUSICBRAINZ_BASE_URL`
+> knob existed. It never did: the suite had only ever been pointed at a fake BFF that had no
+> upstream clients in it. **A normally launched BFF under load calls the real providers.**
 >
-> 1. `lib/config.js` **refuses to start** if `BASE_URL` resolves to a real provider host.
->    There is no environment variable that overrides this check.
-> 2. The mock server makes **zero outbound network connections**. It has no proxy mode, no
->    record-and-replay, no fallback. Its entire import list is `node:http`, `node:crypto` and
->    local files.
+> Three mechanical guards enforce the rule, none of which relies on anybody remembering:
+>
+> 1. `safety/upstream-guard.mjs` is loaded into the BFF process with `--import`. It wraps
+>    `globalThis.fetch`, rewrites every provider origin to the mock, and **refuses** any host
+>    that is neither a known provider nor loopback. `bin/stack-up.sh` always passes it.
+> 2. Every scenario preflights `GET /__guard/health` and **aborts** when the guard is absent or
+>    is in `PULLFM_ALLOW_REAL_UPSTREAMS` mode. Forgetting the guard is a failed run, not a
+>    revoked API key.
+> 3. `lib/config.js` **refuses to start** if `BASE_URL` resolves to a real provider host. There
+>    is no environment variable that overrides this check.
+>
+> The mock server itself still makes **zero outbound network connections**: no proxy mode, no
+> record-and-replay, no fallback, and an import list of `node:http`, `node:crypto` and local
+> files.
 >
 > ### Never point this at production.
 >
@@ -33,26 +46,24 @@ k6 scenarios plus a mock upstream layer, for Phase 7 / **Gate 7** of
 
 ## Quick start
 
-`apps/bff` currently serves a route skeleton whose `/v1` handlers return `501`, so the scenarios
-have nothing to measure against it yet. A fake BFF ships with the mock so the harness can be
-exercised today:
+The whole stack, against the REAL BFF:
 
 ```bash
-# terminal 1: mock upstreams + a fake BFF on the same port
-node load/mock-upstreams/server.js --bff-stub
+pnpm stack:up                       # postgres, pgbouncer, redis, redis-quota
+cp load/.env.load.example load/.env.load   # then generate your own KEK into it
+pnpm build
+load/bin/stack-up.sh --count 200    # mock, IdP, migrations, GUARDED BFF, subjects
 
-# terminal 2: 30 second shakeout
 mkdir -p k6-results
-BASE_URL=http://127.0.0.1:8787 SMOKE=1 DURATION=30s RAMP_UP=5s RAMP_DOWN=5s \
-  k6 run load/scenarios/steady-10k.js
+k6 run load/scenarios/coalescing.js
+k6 run load/scenarios/steady-10k.js
 ```
 
-Once `apps/bff` exists:
+Full instructions, including how a runner obtains a personal API token, are in
+[`docs/RUNBOOK-SCALE.md`](../docs/RUNBOOK-SCALE.md).
 
-```bash
-node load/mock-upstreams/server.js                      # upstreams only, no stub
-BASE_URL=http://127.0.0.1:3000 k6 run load/scenarios/steady-10k.js
-```
+The fake BFF (`--bff-stub`) still exists for exercising the harness with no database, and any run
+that touches it is recorded `gate_valid: false`.
 
 Every scenario preflights `GET /healthz` and aborts with an actionable message if the BFF is
 not up, instead of producing 30 minutes of connection errors.
@@ -110,14 +121,24 @@ Encoded in `lib/journey.js` and `lib/users.js`. Derived from `PLAN.md` section 3
 
 Per session, drawn from a weighted table (`MIX` in `lib/journey.js`):
 
-| Action          | Weight | Endpoint                       |
-| --------------- | ------ | ------------------------------ |
-| preview resolve | 15     | `GET /v1/tracks/:mbid/preview` |
-| artist view     | 2      | `GET /v1/artists/:mbid`        |
-| search          | 1.5    | `GET /v1/search?q=`            |
-| wishlist read   | 1      | `GET /v1/wishlist`             |
-| wishlist add    | 0.6    | `POST /v1/wishlist`            |
-| wishlist delete | 0.15   | `DELETE /v1/wishlist/:id`      |
+| Action          | Weight | Endpoint                        | Credential |
+| --------------- | ------ | ------------------------------- | ---------- |
+| preview resolve | 15     | `GET /v1/tracks/:mbid/preview`  | session    |
+| artist view     | 2      | `GET /v1/artists/:mbid`         | session    |
+| recommendations | 2      | `GET /v1/recommendations?seed=` | **token**  |
+| track lookup    | 1.5    | `GET /v1/tracks/:mbid`          | session    |
+| search          | 1.5    | `GET /v1/search?q=`             | session    |
+| station tracks  | 1.5    | `GET /v1/stations/:id/tracks`   | **token**  |
+| similar artists | 1      | `GET /v1/artists/:mbid/similar` | session    |
+| album lookup    | 1      | `GET /v1/albums/:mbid`          | session    |
+| stations        | 1      | `GET /v1/stations`              | **token**  |
+| wishlist read   | 1      | `GET /v1/wishlist`              | **token**  |
+| wishlist add    | 0.6    | `POST /v1/wishlist`             | session    |
+| wishlist delete | 0.15   | `DELETE /v1/wishlist/:id`       | session    |
+
+The credential column is not decoration. `requireAuth` admits a personal API token on seven
+routes and answers **403** everywhere else, so a mix that guessed would report a third of its
+requests as failures and blame the system.
 
 plus exactly one `GET /v1/config` and one `GET /v1/feed` at session start. Twenty draws are
 taken with replacement, so the expected composition matches the weights.
@@ -176,13 +197,17 @@ Gate 2's "warm cache hit >= 90%" is about the MBID-keyed cache that spends upstr
 
 ## Scenarios
 
-| Scenario     | Purpose                                               | Default length                                   | Gate                    |
-| ------------ | ----------------------------------------------------- | ------------------------------------------------ | ----------------------- |
-| `steady-10k` | sustained representative traffic at the 10k target    | 38m (2m ramp, 5m warm-up, 30m measured, 1m down) | pre-launch              |
-| `cold-cache` | maximum upstream resolution pressure, empty crosswalk | 33m                                              | Gate 2, Gate 1          |
-| `soak`       | leak and gradual degradation over 4 hours             | ~4h15m                                           | pre-launch              |
-| `chaos`      | each upstream forced to 429/500/timeout in turn       | ~23m                                             | **Gate 7**              |
-| `burst-50k`  | 50k burst                                             | ~13m                                             | **DEFERRED**, see below |
+| Scenario       | Question it answers                                              | Gate                                   |
+| -------------- | ---------------------------------------------------------------- | -------------------------------------- |
+| `steady-10k`   | p95 at a warm cache, at 10x the modelled peak                    | p95<300ms, errors<0.1%                 |
+| `coalescing`   | do N concurrent cold requests for one key produce exactly 1 call | `upstream_calls_per_key` max **<=1**   |
+| `fail-closed`  | when the quota Redis refuses writes, do limits fail CLOSED       | `quota_fail_open_leaks` **==0**        |
+| `pool-ceiling` | what happens at the connection-pool ceiling                      | `pool_exhaustion_errors` **==0**       |
+| `breaker`      | what the API serves while a circuit breaker is open              | **Gate 7** (currently RED on recovery) |
+| `chaos`        | each upstream forced to 429/500/timeout in turn                  | **Gate 7**                             |
+| `cold-cache`   | what a cold cache costs                                          | Gate 2 (p95<2s)                        |
+| `soak`         | does anything drift over four hours                              | pre-launch                             |
+| `burst-50k`    | 50k burst                                                        | **DEFERRED**, see below                |
 
 ```bash
 k6 run load/scenarios/steady-10k.js
@@ -368,19 +393,21 @@ node load/mock-upstreams/server.js --bff-stub    # plus the fake BFF
 MOCK_PORT=9000 MOCK_VERBOSE=1 node load/mock-upstreams/server.js
 ```
 
-Point the BFF at it by prefix:
+**None of these environment variables exist.** An earlier revision of this section listed
+`MUSICBRAINZ_BASE_URL` and five siblings as the way to point the BFF at the mock. The BFF has no
+such knob: origins are hardcoded module constants and `buildUpstream` never passes a `baseUrl`.
 
-```
-MUSICBRAINZ_BASE_URL=http://127.0.0.1:8787/musicbrainz
-LISTENBRAINZ_BASE_URL=http://127.0.0.1:8787/listenbrainz
-LASTFM_BASE_URL=http://127.0.0.1:8787/lastfm
-ITUNES_BASE_URL=http://127.0.0.1:8787/itunes
-DEEZER_BASE_URL=http://127.0.0.1:8787/deezer
-RECCOBEATS_BASE_URL=http://127.0.0.1:8787/reccobeats
+The BFF is pointed at the mock by the egress guard instead, which rewrites at the `fetch`
+boundary and needs no cooperation from the application:
+
+```bash
+node --import ./load/safety/upstream-guard.mjs apps/bff/dist/index.js
 ```
 
-Host-header routing also works (`Host: musicbrainz.org`), for a BFF whose provider URLs cannot be
-overridden and which is redirected with `/etc/hosts` instead.
+The mock's own path prefixes (`/musicbrainz`, `/listenbrainz`, `/lastfm`, `/itunes`, `/deezer`,
+`/reccobeats`) are what the guard rewrites TO, and its host-header routing (`Host:
+musicbrainz.org`) remains available for a target that must be redirected with `/etc/hosts`
+instead.
 
 ### Modeled behavior
 
@@ -496,17 +523,25 @@ is the only way to see it.
 The suite depends on four things from `apps/bff`. Each is asserted, so a regression fails a gate
 rather than going unnoticed.
 
-1. **`x-cache: HIT | MISS | BYPASS`** on crosswalk-backed reads (`/v1/tracks/:mbid/preview`,
-   `/v1/artists/:mbid`, `/v1/search`). Without it there is no way to measure the cache gate, and
-   `cache_header_present` fails.
-2. **A load-test subject header.** The suite sends one staging bearer token (`LOAD_AUTH_TOKEN`)
-   plus `X-Load-Test-User: <subject>` per synthetic user, because thousands of real WorkOS
-   sessions are not obtainable. The BFF must honour that header **only** behind its own
-   `LOAD_TEST_MODE` flag, which must be impossible to enable in production. Without it every
-   virtual user shares one identity and per-user cache behavior is unmeasurable.
+This list used to contain four items. Two of them described a BFF that does not exist, and both
+were load-bearing, so they are corrected here rather than deleted.
+
+1. **`x-cache: HIT | MISS | BYPASS`** on crosswalk-backed reads. **NOT IMPLEMENTED.** No route
+   emits it, there is no cache-statistics endpoint, and `GET /metrics` is a stub carrying only
+   `pullfm_build_info`. `cache_hit_rate` therefore had zero samples on every run ever made, and
+   k6 scores a threshold over an empty metric as PASSING, so Gate 2's cache assertion was green
+   over nothing. The gate is now removed rather than falsely green and replaced by **upstream
+   calls per request**, measured at the egress guard. See `lib/thresholds.js`.
+2. ~~**A load-test subject header** (`X-Load-Test-User`)~~. **NEVER EXISTED, and asking for it was
+   a mistake.** No such header is read and no `LOAD_TEST_MODE` flag exists; `requireAuth` rejects
+   any request carrying an `X-User-Id` header with a 400, because impersonation-by-header is
+   exactly what it defends against. The suite now provisions **real credentials**: a session JWT
+   through the documented JWKS seam plus a real personal API token minted through
+   `POST /v1/tokens`. See `auth/` and the runbook.
 3. **RFC 9457 `application/problem+json`** on every error response (`PLAN.md` section 6).
-4. **`Idempotency-Key` honoured** on `POST /v1/wishlist`. The suite always sends one; a replay
-   should return the original item rather than creating a duplicate.
+   Implemented, and gated at `problem_json_violations == 0`.
+4. **`Idempotency-Key` honoured** on `POST /v1/wishlist`. Implemented, and required: the route
+   rejects a request without one.
 
 ---
 
@@ -566,7 +601,10 @@ Both are observable from the Phase 4 dashboards; the p95 trigger fires at 250ms 
 | `PREVIEW_SOURCE`                               | `hot`                       | `feed` follows the real feed payload instead                       |
 | `VERIFY_PREVIEW_URL`                           | `0`                         | play the resolved preview URL, catches stale Deezer URLs           |
 | `COLD_OFFSET`                                  | day-derived                 | catalog window shift for cold runs                                 |
-| `LOAD_AUTH_TOKEN`                              | empty                       | staging bearer token                                               |
+| `SUBJECTS_FILE`                                | `../.subjects.json`         | provisioned credentials, from `auth/seed-subjects.mjs`             |
+| `GUARD_URL`                                    | `http://127.0.0.1:8788`     | egress-guard control plane                                         |
+| `GUARD_NOT_REQUIRED`                           | `0`                         | skip the guard preflight; marks the run inadmissible               |
+| `LOAD_AUTH_TOKEN`                              | empty                       | single-credential probe, for targets with no manifest              |
 | `RESULTS_DIR`                                  | `k6-results`                | where the record is written                                        |
 | `SMOKE`                                        | `0`                         | relax thresholds, shorten sessions, invalidate the record          |
 | `ALLOW_UNREACHABLE`                            | `0`                         | continue when the BFF is down                                      |
@@ -595,8 +633,16 @@ Stated plainly, because a load suite that oversells itself is worse than none.
   depends on them.
 - **The mock is not the upstream.** It reproduces latency, quota and error shape. It does not
   reproduce their data, their partial outages, or their occasional 200-with-garbage.
-- **Nothing here has run against a real BFF.** Every number in this repository so far came from
-  the fake stub, and every one of those runs is marked `gate_valid: false`.
+- **Multi-node behaviour cannot be measured at all.** `app_node_count > 1` fails `terraform plan`
+  unless a separate Redis cache node is enabled, because Redis holds the shared MusicBrainz token
+  bucket. Single-flight is a PER-PROCESS map, so its cross-node behaviour (two nodes, two calls)
+  is unmeasured rather than merely untested. So is Gate 6's rolling deploy.
+- **Gate 1's pooler assertion is unmeasurable locally.** The BFF cannot connect through the local
+  PgBouncer at all: it passes `statement_timeout` as a connection parameter and PgBouncer answers
+  `unsupported startup parameter`. One-line fix in `docs/RUNBOOK-SCALE.md` section 6.2.
+- **The population is smaller than the model.** Runs used 200 provisioned subjects against a model
+  that wants 2,000 daily-active, which overstates per-user cache locality. The run record says
+  `boundBy: "fixtures"` when that applies.
 - **No k6 result proves the absence of a leak**, only that latency did not drift during the
   window. Pair the soak with process RSS, Postgres connection counts and the Last.fm cache size
   from the Phase 4 dashboards.

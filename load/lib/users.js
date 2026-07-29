@@ -19,6 +19,7 @@
 import exec from "k6/execution";
 
 import { CONFIG } from "./config.js";
+import { SUBJECT_COUNT, subjectAt } from "./subjects.js";
 import {
   CATALOG_SIZE,
   recordingMbid,
@@ -32,7 +33,28 @@ import {
  *  from 2,000 DAU against the 10,000 user target, so 20%. */
 const DAU_SHARE = Number(__ENV.DAU_SHARE ?? 0.2);
 
-const activeUserCount = Math.max(1, Math.round(CONFIG.userPool * DAU_SHARE));
+/**
+ * The population a run can actually act as.
+ *
+ * The model wants 2,000 daily-active subjects. What exists is however many the
+ * seeder provisioned, and each one is a real row in `users` with real
+ * credentials. Modelling more than were provisioned would mean most iterations
+ * sending no credential at all and measuring the 401 path, so the effective
+ * population is the smaller of the two and the run record reports which bound
+ * applied. A run whose population is much smaller than the model overstates
+ * per-user cache locality; that is a limitation to state, not to hide.
+ */
+const modelledActive = Math.max(1, Math.round(CONFIG.userPool * DAU_SHARE));
+const activeUserCount =
+  SUBJECT_COUNT > 0 ? Math.min(modelledActive, SUBJECT_COUNT) : modelledActive;
+
+export const POPULATION = {
+  modelledActive,
+  provisioned: SUBJECT_COUNT,
+  effective: activeUserCount,
+  boundBy:
+    SUBJECT_COUNT > 0 && SUBJECT_COUNT < modelledActive ? "fixtures" : "model",
+};
 
 /**
  * The user this iteration acts as.
@@ -51,11 +73,17 @@ export function currentUser() {
 
 export function userAt(index) {
   const rnd = mulberry32(fnv1a(`user:${index}`));
+  const subject = subjectAt(index);
   return {
     index,
-    // Shaped like the WorkOS subject the real BFF will see.
-    id: `user_loadtest_${String(index).padStart(6, "0")}`,
-    listenBrainzName: `lt_user_${index}`,
+    /** The provisioned subject, carrying both credentials. Null when no
+     *  manifest was loaded, in which case every request is unauthenticated and
+     *  the run measures the 401 path. lib/http.js reports that rather than
+     *  letting it look like a working run. */
+    subject,
+    id: subject
+      ? subject.id
+      : `user_loadtest_${String(index).padStart(6, "0")}`,
     /** Seeded per user so the same user browses the same neighbourhood of the
      *  catalog across sessions, which is what makes a per-user cache useful. */
     rnd,
@@ -63,6 +91,9 @@ export function userAt(index) {
      *  that exists. Session scoped by design: cross-session state would need
      *  coordination k6 does not have. */
     createdWishlistIds: [],
+    /** Signed, subject-bound station ids collected from GET /v1/stations. They
+     *  cannot be synthesised, so station_tracks depends on having seen one. */
+    stationIds: [],
   };
 }
 

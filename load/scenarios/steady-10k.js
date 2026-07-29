@@ -35,6 +35,12 @@ import {
 import { warmupPhaser } from "../lib/phase.js";
 import { runSession } from "../lib/journey.js";
 import { sloThresholds } from "../lib/thresholds.js";
+import { recordGuardMetrics } from "../lib/guard.js";
+import {
+  upstreamCalls,
+  upstreamCallsPerKey,
+  upstreamRefused,
+} from "../lib/metrics.js";
 import { buildSummary } from "../lib/summary.js";
 import { assertUpstreamQuota, logUpstreamReport } from "../lib/mock-control.js";
 
@@ -88,6 +94,11 @@ export default function () {
 }
 
 export function teardown(data) {
+  // Upstream fan-out, measured inside the BFF process. Must happen in teardown:
+  // handleSummary cannot make HTTP calls, and without this the shared
+  // upstream_calls_per_key gate has no samples and passes by default.
+  recordGuardMetrics({ upstreamCalls, upstreamCallsPerKey, upstreamRefused });
+
   if (!data || !data.mockAvailable) {
     console.warn(
       "mock control plane unavailable: upstream quota was not verified",
@@ -106,7 +117,9 @@ export function handleSummary(data) {
     notes: [
       `arrival ${CONFIG.arrivalRate} sessions/s for ${CONFIG.duration}, after ${CONFIG.warmup} of unmeasured warm-up (ramp ${CONFIG.rampUp} up, ${CONFIG.rampDown} down)`,
       `popularity head ${CONFIG.hotSetSize} recordings taking ${Math.round(CONFIG.hotSetShare * 100)}% of requests, tail drawn from ${CONFIG.tailSetSize}`,
-      "SLO: p95<300ms, p99<600ms, errors<0.1%, warm cache hit>90%",
+      "SLO: p95<300ms, p99<600ms, errors<0.1%",
+      "Gate 2's warm-cache-hit row is NOT evaluated: apps/bff emits no x-cache header. " +
+        "The substitute is upstream calls per request, counted at the egress guard.",
     ],
   });
 }

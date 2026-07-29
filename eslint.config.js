@@ -75,7 +75,7 @@ export default tseslint.config(
       "**/*.config.ts",
       // k6 scripts run in the k6 runtime, not Node, and tooling scripts sit
       // outside the TypeScript project graph on purpose.
-      "load/**/*.js",
+      "load/**/*.{js,mjs}",
       "security/**/*.{js,mjs}",
       "packages/db/scripts/**/*.mjs",
       "infra/scripts/**/*.mjs",
@@ -88,7 +88,7 @@ export default tseslint.config(
   // Node or the k6 runtime rather than the browser.
   {
     files: [
-      "load/**/*.js",
+      "load/**/*.{js,mjs}",
       "security/**/*.{js,mjs}",
       "packages/db/scripts/**/*.mjs",
       "infra/scripts/**/*.mjs",

@@ -62,6 +62,18 @@ export const CONFIG = {
   baseUrl: env("BASE_URL", "http://127.0.0.1:3000").replace(/\/$/, ""),
   mockUrl: env("MOCK_URL", "http://127.0.0.1:8787").replace(/\/$/, ""),
 
+  /** Control plane of the egress guard loaded into the BFF process. See
+   *  load/safety/upstream-guard.mjs and `requireGuard` below. */
+  guardUrl: env("GUARD_URL", "http://127.0.0.1:8788").replace(/\/$/, ""),
+
+  /** Manifest of provisioned subjects. Live credentials; never committed. */
+  subjectsFile: env("SUBJECTS_FILE", "../.subjects.json"),
+
+  /** Skip the egress-guard preflight. The ONLY legitimate use is a run against
+   *  a target whose upstream protection is enforced somewhere the guard cannot
+   *  see, and it marks the record inadmissible either way. */
+  guardNotRequired: bool("GUARD_NOT_REQUIRED", false),
+
   // Shape of the run. Every scenario derives its stages from these so a smoke
   // run is `DURATION=30s RAMP_UP=5s RAMP_DOWN=5s`.
   duration: env("DURATION", "30m"),
@@ -241,12 +253,99 @@ export function preflight(http, { requireMock = false } = {}) {
   // into the summary rather than trusted to the operator's memory.
   const stubbed = String(health.headers["X-Pullfm-Stub"] ?? "") === "1";
 
+  const guard = checkGuard(http);
+
   return {
     healthy: health.status === 200,
     mockAvailable: mockOk,
     stubbed,
+    guard,
     startedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * THE SAFETY PREFLIGHT. Refuses to run against an unguarded BFF.
+ *
+ * This is the check that makes the safe path the default, and it is worth being
+ * precise about why the obvious alternative does not work.
+ *
+ * `apps/bff/src/services/upstream.ts` hardcodes every provider origin as a
+ * module constant and never passes a `baseUrl`. There is no
+ * `MUSICBRAINZ_BASE_URL`, no `UPSTREAM_BASE_URL`, no per-provider override of
+ * any kind; earlier revisions of this README claimed otherwise and were simply
+ * wrong, because the suite had only ever been pointed at a fake BFF that had no
+ * upstream clients in it. The one seam is `WiringOverrides.upstreamFetch`,
+ * which is reachable from the unit-test harness and from nothing else.
+ *
+ * So a normally launched BFF resolves `musicbrainz.org` and calls it. Under
+ * load that is not a slow test, it is a permanent revocation: 1 req/s globally
+ * per IP, no appeal, no SLA (docs/UPSTREAM-TERMS.md). The architecture is
+ * supposed to make this impossible on the request path, but "supposed to" is
+ * the property under test and a safety mechanism that assumes its own
+ * conclusion is decoration.
+ *
+ * `load/safety/upstream-guard.mjs` closes the seam from outside the
+ * application, which is the only place this suite is allowed to touch. This
+ * preflight asserts it is loaded, and asserts it is in its SAFE mode rather
+ * than merely present.
+ */
+function checkGuard(http) {
+  const res = http.get(`${CONFIG.guardUrl}/__guard/health`, {
+    timeout: "5s",
+    tags: { endpoint: "guard_admin", slo: "no" },
+  });
+
+  if (res.status !== 200) {
+    const message = [
+      "",
+      "REFUSING TO RUN: the upstream egress guard is not answering at",
+      `  ${CONFIG.guardUrl}/__guard/health`,
+      "",
+      "  The BFF hardcodes every provider origin and has no base-URL override,",
+      "  so an unguarded process under load calls MusicBrainz, iTunes, Last.fm,",
+      "  Deezer and ListenBrainz for real. MusicBrainz permits 1 req/s globally",
+      "  per IP and revokes without appeal. That ends the project, not the run.",
+      "",
+      "  Start the BFF through the guard:",
+      "",
+      "    node --import ./load/safety/upstream-guard.mjs apps/bff/dist/index.js",
+      "",
+      "  or use load/bin/stack-up.sh, which does it for you.",
+      "",
+      "  GUARD_NOT_REQUIRED=1 skips this check and marks the run inadmissible.",
+      "",
+    ].join("\n");
+    if (!CONFIG.guardNotRequired) exec.test.abort(message);
+    console.warn(message);
+    return { present: false, safe: false, required: !CONFIG.guardNotRequired };
+  }
+
+  let body = null;
+  try {
+    body = res.json();
+  } catch {
+    /* handled below */
+  }
+
+  // Present but in pass-through mode is worse than absent, because it looks
+  // like protection. Treated as a hard stop regardless of GUARD_NOT_REQUIRED:
+  // that flag says "I am protected elsewhere", not "send real traffic".
+  if (body && body.safe === false) {
+    exec.test.abort(
+      [
+        "",
+        "REFUSING TO RUN: the egress guard is loaded but PULLFM_ALLOW_REAL_UPSTREAMS=1",
+        "is set, so provider calls are going to the real internet.",
+        "",
+        "  Unset it and restart the BFF. There is no load scenario in this",
+        "  repository that is supposed to run in that mode.",
+        "",
+      ].join("\n"),
+    );
+  }
+
+  return { present: true, safe: true, required: !CONFIG.guardNotRequired };
 }
 
 /** Parse a k6 duration string ("30m", "4h", "90s", "1h30m") into seconds.

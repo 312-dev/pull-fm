@@ -56,3 +56,61 @@ export const stubResponses = new Counter("stub_responses");
  *  throughput number for the capacity model in PLAN.md section 8. */
 export const sessionsCompleted = new Counter("sessions_completed");
 export const sessionDuration = new Trend("session_duration", true);
+
+// ---------------------------------------------------------------------------
+// Upstream fan-out, measured inside the BFF process by the egress guard.
+// ---------------------------------------------------------------------------
+
+/**
+ * The most calls any ONE cache key produced during the measured window.
+ *
+ * This is the single-flight gate as a single number. N concurrent cold misses
+ * for one key must produce exactly 1 upstream call
+ * (`packages/upstream/src/single-flight.ts`); anything more is the stampede the
+ * coalescer exists to prevent, and against MusicBrainz's 1 req/s global ceiling
+ * a stampede is a terms violation rather than a latency problem.
+ *
+ * Set in teardown from `GET /__guard/stats`, because k6 cannot make HTTP calls
+ * from `handleSummary`.
+ */
+export const upstreamCallsPerKey = new Trend("upstream_calls_per_key");
+
+/** Total provider calls the BFF attempted during the run. The numerator of the
+ *  capacity model's "upstream calls per request" row. */
+export const upstreamCalls = new Counter("upstream_calls");
+
+/** Attempts to reach a host the guard did not recognise. Any sample means the
+ *  BFF tried to talk to something no one modelled, which is a finding whether
+ *  or not it was refused. */
+export const upstreamRefused = new Counter("upstream_refused");
+
+// ---------------------------------------------------------------------------
+// Authentication and limiter behaviour.
+// ---------------------------------------------------------------------------
+
+/** Requests that wanted the personal-API-token surface and had to fall back to
+ *  a session, because the seeder could not mint a token for that subject. */
+export const tokenFallbacks = new Counter("token_auth_fallbacks");
+
+/** 429s attributable to the per-token budget rather than the global per-IP
+ *  limiter. Under-provisioned fixtures, not a system defect. */
+export const tokenRateLimited = new Counter("token_rate_limited");
+
+/**
+ * Fail-closed accounting for the quota-Redis scenario.
+ *
+ * `failed_closed` counts 503s and `failed_open` counts 2xx. Under normal load
+ * the gate is on the first; while the quota Redis is refusing writes the gate
+ * inverts, because a 200 served with no working limiter is the T11 failure the
+ * separate `noeviction` instance exists to make impossible.
+ */
+export const failedClosed = new Counter("failed_closed");
+export const failedOpen = new Counter("failed_open");
+
+/** Requests served while the quota Redis was deliberately unavailable that did
+ *  NOT fail closed. The gate for the fail-closed scenario: must be zero. */
+export const quotaFailOpenLeaks = new Counter("quota_fail_open_leaks");
+
+/** Database errors surfaced to the client while the connection pool was
+ *  saturated. Distinguishes queueing (fine) from exhaustion (not). */
+export const poolExhaustionErrors = new Counter("pool_exhaustion_errors");

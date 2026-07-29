@@ -10,13 +10,18 @@ import { check } from "k6";
 
 import { CONFIG } from "./config.js";
 import { isWarmup } from "./phase.js";
+import { credentialFor } from "./subjects.js";
 import {
   apiErrorRate,
   cacheHitRate,
   cacheHeaderPresent,
+  failedClosed,
+  failedOpen,
   problemJsonViolations,
   expiredPreviewUrls,
   stubResponses,
+  tokenFallbacks,
+  tokenRateLimited,
 } from "./metrics.js";
 
 function header(res, name) {
@@ -30,7 +35,21 @@ function header(res, name) {
   return undefined;
 }
 
-function baseHeaders(user) {
+/**
+ * Headers for one request, carrying a REAL credential for the acting subject.
+ *
+ * An earlier revision sent one shared bearer token plus `X-Load-Test-User:
+ * <subject>` and asserted that the BFF "must honour that header behind its own
+ * LOAD_TEST_MODE flag". No such flag exists, no such header is read, and
+ * `requireAuth` rejects any request carrying an `X-User-Id` header with a 400
+ * precisely because impersonation-by-header is the thing it is defending
+ * against. Sending it would have produced a run in which every request was
+ * unauthenticated.
+ *
+ * Each subject now holds two real credentials (`load/lib/subjects.js`) and the
+ * caller says which one the route admits.
+ */
+function baseHeaders(user, credentialKind) {
   const h = {
     accept: "application/json",
     // Identifies the traffic in the BFF's own logs. A load run that cannot be
@@ -39,12 +58,24 @@ function baseHeaders(user) {
     "user-agent":
       "PullFM-LoadTest/1.0 (+https://github.com/312-dev/pull-fm; k6)",
   };
-  if (CONFIG.authToken) h.authorization = `Bearer ${CONFIG.authToken}`;
-  if (user) {
-    // One staging token, many synthetic subjects. The BFF must honour this
-    // ONLY under its own LOAD_TEST_MODE flag, never in production. See README.
-    h["x-load-test-user"] = user.id;
+
+  if (user && user.subject) {
+    const cred = credentialFor(user.subject, credentialKind);
+    if (cred.value) {
+      h.authorization = `Bearer ${cred.value}`;
+      if (credentialKind === "token" && cred.kind !== "token") {
+        // Asked for the token surface, got the session instead. Counted so the
+        // summary can say the token path was under-exercised rather than the
+        // run silently measuring the session path twice.
+        tokenFallbacks.add(1);
+      }
+    }
+  } else if (CONFIG.authToken) {
+    // Escape hatch for a single-credential probe against a target where the
+    // manifest is not available. Not a load path.
+    h.authorization = `Bearer ${CONFIG.authToken}`;
   }
+
   return h;
 }
 
@@ -70,6 +101,8 @@ export function apiRequest(method, path, opts = {}) {
     expect = [200, 201, 204],
     phase,
     timeout = "10s",
+    /** 'token' where requireAuth admits a personal API token, else 'session'. */
+    credential = "session",
   } = opts;
 
   if (!endpoint)
@@ -82,12 +115,16 @@ export function apiRequest(method, path, opts = {}) {
   const countForSlo = slo && !warming;
   const countForCache = cacheable && !warming;
 
-  const headers = { ...baseHeaders(user), ...(opts.headers ?? {}) };
+  const headers = {
+    ...baseHeaders(user, credential),
+    ...(opts.headers ?? {}),
+  };
   if (method === "POST" || method === "DELETE") {
-    // PLAN.md section 6 requires Idempotency-Key on every mutating call. Sent
-    // unconditionally so the requirement is exercised, not assumed.
+    // `POST /v1/wishlist` requires Idempotency-Key (8-255 chars) and answers
+    // 409 when the same key arrives with a different body, so the value has to
+    // be unique per call rather than per session.
     headers["idempotency-key"] ??=
-      `${user ? user.id : "anon"}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      `${user ? user.index : "anon"}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     if (body !== undefined) headers["content-type"] = "application/json";
   }
 
@@ -102,17 +139,48 @@ export function apiRequest(method, path, opts = {}) {
       headers,
       tags,
       timeout,
+      /**
+       * Teach k6 which statuses are correct answers for THIS request.
+       *
+       * By default `http_req_failed` counts every response >= 400 as a failure.
+       * That is wrong here in a way that made the metric unusable: the
+       * catalogue routes (`/v1/artists/:mbid`, `/v1/tracks/:mbid`,
+       * `/v1/albums/:mbid`, and the preview route) read the crosswalk and
+       * `track_previews` without ever calling out, so a 404 on an unresolved
+       * MBID is the documented behaviour and the whole reason those routes are
+       * safe to expose. A first run against the real BFF reported a 64% "http
+       * failed rate" that was almost entirely correct 404s.
+       *
+       * With this, `http_req_failed` means "not one of the answers this call
+       * considers correct", which is what the gate was always supposed to say.
+       */
+      responseCallback: http.expectedStatuses(...expect),
     },
   );
 
-  record(res, { endpoint, cacheable: countForCache, expect });
+  record(res, { endpoint, cacheable: countForCache, expect, credential });
   return res;
 }
 
-function record(res, { endpoint, cacheable, expect }) {
+function record(res, { endpoint, cacheable, expect, credential }) {
   if (header(res, "X-Pullfm-Stub") === "1") {
     stubResponses.add(1);
   }
+
+  // A 429 on a token-authenticated call is the per-token budget
+  // (`rate_limit_per_minute`, 60/min by default), not the global per-IP
+  // limiter. Separated because the remedies are opposite: one means the load
+  // shape is wrong, the other means the fixtures are under-provisioned.
+  if (res.status === 429 && credential === "token") tokenRateLimited.add(1);
+
+  // Fail-closed accounting. `enforceTokenRateLimit`, `isRevoked` and the
+  // auth-flow budgets all convert an unreachable quota Redis into
+  // `upstream_unavailable`, which is a 503. Under the fail-closed scenario a
+  // 503 is the CORRECT answer and a 200 is the defect, so both directions are
+  // counted and the scenario decides which one is the gate.
+  if (res.status === 503) failedClosed.add(1, { endpoint });
+  else if (res.status >= 200 && res.status < 300)
+    failedOpen.add(1, { endpoint });
 
   const ok = expect.includes(res.status);
   // status 0 is a transport failure (connect error, timeout, reset). Always an

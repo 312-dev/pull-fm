@@ -15,6 +15,8 @@
  */
 import { CONFIG } from "./config.js";
 import { TRAFFIC_MODEL } from "./journey.js";
+import { SUBJECT_SUMMARY } from "./subjects.js";
+import { POPULATION } from "./users.js";
 
 /**
  * @param {string} scenario
@@ -52,6 +54,31 @@ export function buildSummary(scenario, data, meta) {
       "THINK_SCALE=0: no think time, this is a max-pressure run and not the traffic model",
     );
   }
+  const guard = data.setup_data ? data.setup_data.guard : null;
+  if (guard && guard.present === false) {
+    // The strongest invalidation there is. Without the guard there is no
+    // evidence the run did not call real providers, and "it probably did not"
+    // is not evidence.
+    invalidations.push(
+      "GUARD_NOT_REQUIRED=1: the egress guard was absent, so upstream isolation was NOT verified",
+    );
+  }
+  if (guard && guard.safe === false) {
+    invalidations.push(
+      "the egress guard was in PULLFM_ALLOW_REAL_UPSTREAMS mode: real provider traffic",
+    );
+  }
+  if (SUBJECT_SUMMARY.count === 0) {
+    invalidations.push(
+      "no subjects were provisioned: every authenticated request measured the 401 path",
+    );
+  }
+  if (count(data, "token_auth_fallbacks") > 0) {
+    invalidations.push(
+      `${count(data, "token_auth_fallbacks")} request(s) wanted the personal-API-token surface ` +
+        "and fell back to a session, so the token path is under-exercised",
+    );
+  }
 
   const record = {
     scenario,
@@ -84,6 +111,11 @@ export function buildSummary(scenario, data, meta) {
       coldOffset: CONFIG.coldOffset,
     },
     trafficModel: TRAFFIC_MODEL,
+    // Counts and configuration only. The manifest holds live credentials and a
+    // run record is an artifact people attach to tickets.
+    subjects: SUBJECT_SUMMARY,
+    population: POPULATION,
+    guard: guard ?? null,
     headline: headline(data),
     metrics: data.metrics,
   };
@@ -131,6 +163,19 @@ function headline(data) {
     upstreamQuotaViolations: count(data, "upstream_quota_violations"),
     expiredPreviewUrls: count(data, "expired_preview_urls"),
     problemJsonViolations: count(data, "problem_json_violations"),
+    // Measured inside the BFF process by the egress guard. `perRequest` is the
+    // capacity model's "upstream calls per request" row, which is the line that
+    // decides whether 50k is reachable at all: at 5x the traffic it is compared
+    // against MusicBrainz's 1/s and iTunes' ~0.33/s, and no hardware moves those.
+    upstreamCalls: count(data, "upstream_calls"),
+    upstreamCallsPerRequest: (() => {
+      const reqs = count(data, "http_reqs");
+      return reqs > 0 ? count(data, "upstream_calls") / reqs : null;
+    })(),
+    worstCallsForOneKey: value(data, "upstream_calls_per_key", "max"),
+    tokenRateLimited: count(data, "token_rate_limited"),
+    failedClosed: count(data, "failed_closed"),
+    quotaFailOpenLeaks: count(data, "quota_fail_open_leaks"),
   };
 }
 

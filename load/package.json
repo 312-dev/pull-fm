@@ -2,7 +2,7 @@
   "name": "@pullfm/load",
   "version": "0.0.0",
   "private": true,
-  "description": "Pull.fm scalability suite: k6 scenarios plus a mock upstream layer. Zero runtime dependencies.",
+  "description": "Pull.fm scalability suite: k6 scenarios, mocked upstreams, and the egress guard that makes running them safe.",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -18,6 +18,18 @@
     "cold": "pnpm results:dir && k6 run scenarios/cold-cache.js",
     "soak": "pnpm results:dir && k6 run scenarios/soak.js",
     "chaos": "pnpm results:dir && k6 run scenarios/chaos.js",
-    "inspect": "for f in scenarios/*.js; do printf '%-24s' \"$(basename $f)\"; k6 inspect -e I_UNDERSTAND_BURST_50K_IS_DEFERRED=1 \"$f\" > /dev/null || exit 1; echo 'parses'; done"
+    "inspect": "for f in scenarios/*.js; do printf '%-24s' \"$(basename $f)\"; k6 inspect -e I_UNDERSTAND_BURST_50K_IS_DEFERRED=1 \"$f\" > /dev/null || exit 1; echo 'parses'; done",
+    "up": "bin/stack-up.sh",
+    "down": "bin/stack-up.sh --down",
+    "seed": "node auth/seed-subjects.mjs",
+    "seed:clean": "node auth/seed-subjects.mjs --clean",
+    "idp": "node auth/idp.mjs",
+    "guard:stats": "curl -s http://127.0.0.1:8788/__guard/stats",
+    "guard:reset": "curl -s -X POST http://127.0.0.1:8788/__guard/reset",
+    "coalescing": "pnpm results:dir && k6 run scenarios/coalescing.js",
+    "fail-closed": "bin/fail-closed.sh",
+    "pool": "pnpm results:dir && k6 run scenarios/pool-ceiling.js",
+    "breaker": "pnpm results:dir && k6 run scenarios/breaker.js",
+    "gate": "pnpm coalescing && pnpm steady && pnpm pool && pnpm breaker && pnpm fail-closed"
   }
 }
