@@ -446,17 +446,22 @@ twice and safe to interrupt, and all three refuse to run concurrently with
 themselves. Run any one of them and it enforces exactly the numbers in this
 table.
 
-What does not exist: **anything that invokes them.** They are `pnpm` entrypoints
-and nothing more. There is no cron entry, no systemd timer, no in-database
-schedule, and no in-process timer for any of them anywhere in this repository or
-in any deployed environment. The two scheduled units that do exist deploy the
-application and refresh an IP allowlist, and neither touches user data.
+What now exists: **a schedule for each of them.** Every job has a systemd timer
+committed to this repository, enabled by the application node's bootstrap, with
+a run deadline shorter than its own interval so two runs cannot overlap. A CI
+check asserts the units exist, are enabled rather than merely installed, and
+expand to the intervals documented here.
+
+What still does not exist: **anywhere for those timers to run.** No compute is
+deployed, so no timer has ever fired. The schedule is real and dormant, not
+running.
 
 So the honest statement of the current position is: **these are the retention
-windows the system applies each time the job is run, and the job is presently run
-by hand.** Until a schedule exists and is verified, this policy must not state
-the windows above as unqualified promises, and the `[OPEN]` marker stays.
-Closing it is a scheduler entry and a check that it fired, not new code.
+windows the system applies each time the job is run, the schedule that will run
+them is written and verified, and no run has yet happened because nothing is
+deployed.** Until a deployment exists and a run is observed, this policy must not
+state the windows above as unqualified promises, and the `[OPEN]` marker stays.
+Closing it now requires evidence that a timer fired, not more configuration.
 
 The full schedule, the reasoning behind each number, and the legitimate-interest
 assessment for the security audit trail are in
