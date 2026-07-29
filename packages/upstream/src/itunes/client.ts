@@ -26,9 +26,22 @@ import type { Provider, ProviderStatus } from "../types.js";
 export const ITUNES_BASE_URL = "https://itunes.apple.com";
 
 /**
- * Apple says ~20/min. We budget 15, because the documented consequence of
- * exceeding it is being blocked with no appeals process, and the cost of
- * under-spending is one extra cache miss.
+ * Apple document "approximately 20 calls per minute" and state NO SCOPE for it:
+ * not per key, not per IP, not per application. This repository used to assert
+ * "per IP" in six places as though it were Apple's word. It is not, and the
+ * distinction matters, because the real constraint is worse than either
+ * reading: blocks are keyed to egress IP REPUTATION, and a service on shared
+ * cloud egress has been blocked at roughly nine calls a minute - well under
+ * Apple's own figure (docs/compliance/apple-itunes-terms-review.md A7, A14).
+ *
+ * We budget 15, because the documented consequence of exceeding the limit is
+ * being blocked with no appeals process and the cost of under-spending is one
+ * extra cache miss. It is necessary and NOT sufficient. Do not probe the real
+ * ceiling by exceeding it.
+ *
+ * There is also nothing to adapt to: Apple return no rate-limit headers and
+ * reject with an opaque 403 and an empty body rather than a 429, so any retry
+ * logic keyed on 429 is dead code for this provider.
  */
 export const ITUNES_QUOTA = { limit: 15, windowMs: 60_000 } as const;
 

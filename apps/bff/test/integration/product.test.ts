@@ -5,7 +5,7 @@
  * are properties of the wiring rather than of any one component:
  *
  *   1. WHAT IS NOT CALLED. MusicBrainz permits one request per second across
- *      the whole service and iTunes about twenty calls a minute per IP. A
+ *      the whole service and iTunes about twenty calls a minute. A
  *      request path that reaches either is a defect, and the only way to prove
  *      it does not is to count the calls. `upstreams.callsTo` is the assertion
  *      that matters most in this file.
@@ -332,6 +332,65 @@ describe("GET /v1/tracks/:mbid/preview", () => {
 
     // And no intermediary may keep it either.
     expect(res.headers["cache-control"]).toBe("private, no-store");
+  });
+
+  test("an iTunes preview carries the store badge Apple's licence requires", async () => {
+    // Apple's grant is six CONJUNCTIVE conditions. Condition (ii) requires the
+    // preview to sit next to an approved store badge linking directly to the
+    // page where THIS track can be purchased, so the badge and its per-item
+    // link have to reach the client with the URL. Resolved through the
+    // background path, which is the only path allowed to call iTunes.
+    const mbid = FIXTURE_RECORDING_MBID;
+    await ctx.services.upstream.previews.resolve({
+      recordingMbid: mbid,
+      artistName: FIXTURE_ARTIST_NAME,
+      title: FIXTURE_RECORDING_TITLE,
+    });
+    ctx.upstreams.reset();
+
+    const res = await get(`/v1/tracks/${mbid}/preview`);
+    expect(res.statusCode).toBe(200);
+    const body = jsonOf<{
+      provider: string;
+      cacheable: boolean;
+      attribution: {
+        text: string;
+        badge?: {
+          required: boolean;
+          linkUrl: string;
+          placement: string;
+          ordering: string;
+        };
+      };
+    }>(res);
+
+    expect(body.provider).toBe("itunes");
+    expect(body.cacheable).toBe(true);
+    // Condition (iii): the exact phrase.
+    expect(body.attribution.text).toContain("courtesy of iTunes");
+    // Condition (ii): a badge, and a link to this track rather than a homepage.
+    expect(body.attribution.badge?.required).toBe(true);
+    expect(body.attribution.badge?.linkUrl).toContain("music.apple.com");
+    expect(body.attribution.badge?.placement).toBe("proximate-to-preview");
+    expect(body.attribution.badge?.ordering).toBe("first");
+
+    // And the store link is persisted, because the badge cannot be rebuilt
+    // from a preview URL alone.
+    const stored = await ctx.services.db.query<{ store_url: string | null }>(
+      "SELECT store_url FROM track_previews WHERE recording_mbid = $1",
+      [mbid],
+    );
+    expect(stored.rows[0]?.store_url).toContain("music.apple.com");
+
+    // Serving it again spends nothing: no request path may call Apple.
+    await get(`/v1/tracks/${mbid}/preview`);
+    expect(ctx.upstreams.callsTo("itunes")).toEqual([]);
+
+    // Clean up so the Deezer assertions above stay meaningful in any order.
+    await ctx.services.db.query(
+      "DELETE FROM track_previews WHERE recording_mbid = $1",
+      [mbid],
+    );
   });
 
   test("an unknown recording is a 404 and spends no iTunes budget", async () => {

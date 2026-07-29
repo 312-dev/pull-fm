@@ -95,7 +95,7 @@ describe("ItunesClient preview resolution", () => {
   });
 });
 
-describe("ItunesClient quota (~20 calls/min per IP)", () => {
+describe("ItunesClient quota (Apple say about 20 calls/min, scope unstated)", () => {
   it("budgets under Apple's documented limit", () => {
     // Under-spending costs a cache miss; over-spending costs the IP, with no
     // appeals process.

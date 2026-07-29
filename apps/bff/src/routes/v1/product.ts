@@ -31,7 +31,7 @@
  * NO ROUTE HERE CALLS MUSICBRAINZ OR ITUNES.
  * ------------------------------------------
  * MusicBrainz permits one request per second across the whole service and
- * iTunes about twenty calls a minute per IP. A handler that reached either
+ * iTunes about twenty calls a minute. A handler that reached either
  * synchronously would be a remote kill switch operated by whoever refreshes
  * fastest, so the catalogue routes read the cache and the crosswalk and answer
  * 404 on a miss. "We have not resolved this yet" and "no such record" are

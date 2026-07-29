@@ -6,7 +6,7 @@
  * a longer-window budget is spent, and it refuses them *locally* so we learn
  * about exhaustion without spending an upstream call to be told.
  *
- * That distinction matters most for iTunes: ~20 calls/minute per IP with no
+ * That distinction matters most for iTunes: about 20 calls/minute with no
  * documented penalty for exceeding it. Being throttled or blocked by Apple has
  * no appeals process, so the safe design is to under-spend deliberately.
  *

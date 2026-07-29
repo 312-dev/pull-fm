@@ -8,6 +8,7 @@ import {
   DeezerPreviewNotCacheableError,
   MemoryPreviewStore,
   PreviewResolver,
+  appleStoreUrl,
 } from "./resolver.js";
 
 const NOW = 1_700_000_000_000;
@@ -23,6 +24,9 @@ function itunesResult() {
         artistName: "Blur",
         previewUrl: "https://audio-ssl.itunes.apple.com/preview/1.m4a",
         trackTimeMillis: 121_000,
+        // Apple licence condition (ii): without this the preview cannot be
+        // rendered next to a store badge, so the resolver refuses to serve it.
+        trackViewUrl: "https://music.apple.com/us/album/song-2/1?i=2&uo=4",
       },
     ],
   };
@@ -93,7 +97,8 @@ describe("PreviewResolver: iTunes is persisted", () => {
     const { resolver } = build(itunes);
     await resolver.resolve(TRACK);
     const second = await resolver.resolve(TRACK);
-    // ~20 calls/min per IP: the cache is what makes this viable at all.
+    // Apple document "approximately 20 calls per minute" and state no scope
+    // for it. The cache is what makes this viable at all.
     expect(itunes.callCount).toBe(1);
     expect(second?.provider).toBe("itunes");
   });
@@ -132,6 +137,7 @@ describe("PreviewResolver: Deezer is NEVER persisted", () => {
         provider: "deezer",
         url: "https://cdn.dz/preview/5.mp3?hdnea=exp=1~hmac=a",
         durationMs: 30_000,
+        storeUrl: null,
       }),
     ).rejects.toBeInstanceOf(DeezerPreviewNotCacheableError);
   });
@@ -146,6 +152,7 @@ describe("PreviewResolver: Deezer is NEVER persisted", () => {
         provider: "deezer",
         url: "https://cdn.dz/x.mp3",
         durationMs: undefined,
+        storeUrl: null,
       }),
     ).rejects.toBeInstanceOf(DeezerPreviewNotCacheableError);
   });
@@ -163,6 +170,7 @@ describe("PreviewResolver: Deezer is NEVER persisted", () => {
       provider: "itunes",
       url: "https://audio-ssl.itunes.apple.com/preview/1.m4a",
       durationMs: 30_000,
+      storeUrl: "https://music.apple.com/us/album/x/1?i=2",
     });
     expect(statements[0]).toContain("'itunes'");
     expect(statements[0]).toContain("NULL");
@@ -228,5 +236,102 @@ describe("PreviewResolver failure handling", () => {
   it("returns null when neither provider is configured", async () => {
     const { resolver } = build();
     expect(await resolver.resolve(TRACK)).toBeNull();
+  });
+});
+
+describe("Apple licence condition (ii): the store badge", () => {
+  it("carries the track's own store link, not a provider homepage", async () => {
+    // Verbatim: the badge must act as "a link directly to pages within iTunes
+    // where consumers can purchase the promoted content". A homepage link does
+    // not satisfy that, so the link is per item and comes from trackViewUrl.
+    const itunes = new FakeHttp().enqueue({ body: itunesResult() });
+    const { resolver } = build(itunes);
+    const preview = await resolver.resolve(TRACK);
+
+    expect(preview?.attribution.source).toBe("itunes");
+    expect(preview?.attribution.text).toContain("courtesy of iTunes");
+    expect(preview?.attribution.badge?.required).toBe(true);
+    expect(preview?.attribution.badge?.linkUrl).toContain("music.apple.com");
+    expect(preview?.attribution.badge?.placement).toBe("proximate-to-preview");
+    // Apple's guidelines put their badge first where several appear, which is
+    // also our answer on condition (vi) and the Qobuz/Bandcamp links.
+    expect(preview?.attribution.badge?.ordering).toBe("first");
+    // There is no "Download on iTunes" artwork despite the clause naming one.
+    expect(preview?.attribution.badge?.variants).not.toContain("Download on");
+  });
+
+  it("refuses an iTunes preview with no store link and falls back to Deezer", async () => {
+    // Partial compliance with a conjunctive licence is non-compliance. A
+    // playable preview under a licence we do satisfy beats an unplayable one
+    // under a licence we do not.
+    const withoutStoreUrl = itunesResult();
+    delete (withoutStoreUrl.results[0] as { trackViewUrl?: string })
+      .trackViewUrl;
+    const itunes = new FakeHttp().enqueue({ body: withoutStoreUrl });
+    const deezer = new FakeHttp().enqueue({
+      body: deezerResult(NOW / 1000 + 600),
+    });
+    const { resolver, store } = build(itunes, deezer);
+
+    const preview = await resolver.resolve(TRACK);
+    expect(preview?.provider).toBe("deezer");
+    // Nothing unservable was written, so a later request does not find a row
+    // it then has to refuse.
+    expect(store.size).toBe(0);
+  });
+
+  it("treats a stored row with no store link as absent", async () => {
+    // Rows written before condition (ii) was implemented. Serving one hands a
+    // client a preview it cannot legally render.
+    const store = new MemoryPreviewStore(() => NOW);
+    await store.put({
+      recordingMbid: MBID,
+      provider: "itunes",
+      url: "https://audio-ssl.itunes.apple.com/preview/1.m4a",
+      durationMs: 30_000,
+      storeUrl: null,
+    });
+    const resolver = new PreviewResolver({ store, now: () => NOW });
+    expect(await resolver.resolveCached(MBID)).toBeNull();
+  });
+
+  it("stops serving a row once its revalidation window closes", async () => {
+    // Apple may "remove any Promo Content immediately upon request", so an
+    // indefinitely stored URL would serve withdrawn content from our own table.
+    const store = new MemoryPreviewStore(() => NOW);
+    await store.put({
+      recordingMbid: MBID,
+      provider: "itunes",
+      url: "https://audio-ssl.itunes.apple.com/preview/1.m4a",
+      durationMs: 30_000,
+      storeUrl: "https://music.apple.com/us/album/x/1?i=2",
+    });
+
+    const fresh = new PreviewResolver({ store, now: () => NOW });
+    expect(await fresh.resolveCached(MBID)).not.toBeNull();
+
+    const stale = new PreviewResolver({
+      store,
+      now: () => NOW + 31 * 24 * 60 * 60 * 1000,
+    });
+    expect(await stale.resolveCached(MBID)).toBeNull();
+  });
+
+  it("rejects a store link that is not on an Apple host", () => {
+    // A badge pointing somewhere that is not Apple's store is worse than no
+    // badge: it is a breach dressed as compliance.
+    expect(
+      appleStoreUrl("https://music.apple.com/us/album/x/1?i=2"),
+    ).not.toBeNull();
+    // The old host still validates; Apple moved to music.apple.com but the
+    // check is not pinned to either.
+    expect(
+      appleStoreUrl("https://itunes.apple.com/us/album/x/1"),
+    ).not.toBeNull();
+    expect(appleStoreUrl("https://evil.example/apple.com/x")).toBeNull();
+    expect(appleStoreUrl("http://music.apple.com/us/album/x")).toBeNull();
+    expect(appleStoreUrl("https://notapple.com/x")).toBeNull();
+    expect(appleStoreUrl(undefined)).toBeNull();
+    expect(appleStoreUrl("")).toBeNull();
   });
 });

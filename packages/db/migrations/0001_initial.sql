@@ -176,7 +176,7 @@ CREATE INDEX idempotency_expiry_idx ON idempotency_keys (expires_at);
 -- Upstream cache
 --
 -- Cache-first is not an optimisation here, it is the architecture. MusicBrainz
--- permits 1 req/s globally and iTunes ~20 calls/min per IP, so anything served
+-- permits 1 req/s globally and iTunes about 20 calls/min, so anything served
 -- synchronously from an upstream cannot scale past a few hundred users.
 --
 -- provider is a first-class column so per-provider cache SIZE can be measured.

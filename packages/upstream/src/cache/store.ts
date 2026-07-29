@@ -2,7 +2,7 @@
  * The cache contract.
  *
  * Cache-first is the architecture, not an optimisation: MusicBrainz allows 1
- * req/s globally and iTunes ~20 calls/min per IP, so a synchronous read-through
+ * req/s globally and iTunes about 20 calls/min, so a synchronous read-through
  * to either cannot serve more than a few hundred users (docs/PLAN.md section 3).
  *
  * `sizeOf` and `evictLru` are part of the interface rather than an admin script

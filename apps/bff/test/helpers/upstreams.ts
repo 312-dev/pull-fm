@@ -320,6 +320,10 @@ export function fakeUpstreams(): FakeUpstreams {
               trackTimeMillis: 30_000,
               previewUrl:
                 "https://audio-ssl.itunes.apple.com/fixture/preview.m4a",
+              // Apple licence condition (ii). Without it the resolver refuses
+              // to persist or serve the preview at all.
+              trackViewUrl:
+                "https://music.apple.com/us/album/fixture/1?i=4242&uo=4",
             },
           ],
         }),

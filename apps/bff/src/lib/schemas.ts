@@ -367,7 +367,51 @@ export const previewSchema = {
     durationMs: { type: ["integer", "null"] },
     expiresAt: { type: ["integer", "null"] },
     cacheable: { type: "boolean" },
-    attribution: { type: "string" },
+    attribution: {
+      type: "object",
+      description:
+        "What must be rendered alongside this preview. Apple's grant is six CONJUNCTIVE conditions: condition (iii) requires the exact phrase in `text`, and condition (ii) requires an approved store badge, proximate to the preview, linking directly to the page where THIS track can be purchased. A client that plays the preview without the badge is outside the licence, not merely impolite, which is why the badge travels inside the same object as the URL.",
+      properties: {
+        source: { type: "string", enum: ["itunes", "deezer"] },
+        text: { type: "string" },
+        badge: {
+          type: "object",
+          description:
+            "Present only where a licence conditions playback on a store badge. NOT the same obligation as the events endpoint's logo: that one links to a provider homepage, this one links to a specific track's purchase page.",
+          properties: {
+            required: { type: "boolean" },
+            variants: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                'The badge artwork Apple actually ships. The clause names a "Download on iTunes" badge that no longer exists.',
+            },
+            assetPage: { type: "string" },
+            linkUrl: {
+              type: "string",
+              description:
+                "This track's purchase page. A provider homepage does not satisfy the condition.",
+            },
+            placement: { type: "string", enum: ["proximate-to-preview"] },
+            ordering: {
+              type: "string",
+              enum: ["first"],
+              description:
+                "Apple's guidelines require their badge first where several services' badges share a layout.",
+            },
+          },
+          required: [
+            "required",
+            "variants",
+            "assetPage",
+            "linkUrl",
+            "placement",
+            "ordering",
+          ],
+        },
+      },
+      required: ["source", "text"],
+    },
   },
   required: [
     "recordingMbid",

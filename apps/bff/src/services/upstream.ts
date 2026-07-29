@@ -6,8 +6,8 @@
  * Nothing outside this module may hold a raw provider client. The bundle
  * exposes `cache`, and the request path reaches a provider only through
  * `CachedUpstream`. That is not tidiness: MusicBrainz permits one request per
- * second across the entire service and iTunes about twenty calls a minute per
- * IP (docs/UPSTREAM-TERMS.md L2), so a handler that fans out to either one
+ * second across the entire service and iTunes about twenty calls a minute
+ * (docs/UPSTREAM-TERMS.md L2), so a handler that fans out to either one
  * synchronously is a remote kill switch that any user can operate.
  *
  * Which providers may be reached synchronously at all, and why, because the
@@ -27,7 +27,7 @@
  *   MusicBrainz   NO. 1 req/s globally per IP. Reachable only from a background
  *                 warm path; the request path uses `peek`, which never calls
  *                 out.
- *   iTunes        NO. ~20 calls/min per IP. Same treatment: the request path
+ *   iTunes        NO. About 20 calls/min, scope unstated. Same treatment: the request path
  *                 reads `track_previews`, and filling it is a background job.
  *
  * The MusicBrainz rate limiter is created here, once, and shared. It is a

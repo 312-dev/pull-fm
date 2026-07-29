@@ -4,7 +4,7 @@
  * Each client composes timeout, retry with jitter, a circuit breaker, a local
  * quota counter, and a runtime kill switch. Cache-first is the architecture
  * (docs/PLAN.md section 3), not an optimisation: MusicBrainz permits 1 req/s
- * globally and iTunes ~20 calls/min per IP, so nothing here is safe to call
+ * globally and iTunes about 20 calls/min, so nothing here is safe to call
  * synchronously on a request path without a cache in front of it.
  *
  * The licence constraints in docs/UPSTREAM-TERMS.md are enforced in code, not

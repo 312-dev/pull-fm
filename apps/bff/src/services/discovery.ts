@@ -49,6 +49,7 @@ import {
   type MusicBrainzArtist,
   type MusicBrainzRecording,
   type MusicBrainzRelease,
+  type PreviewAttribution,
 } from "@pull-fm/upstream";
 import {
   buildFeed,
@@ -162,6 +163,18 @@ export interface PreviewView {
   readonly url: string;
   readonly durationMs: number | null;
   /**
+   * What the client MUST render alongside the preview.
+   *
+   * A string was enough while the only obligation was Apple's exact
+   * "provided courtesy of iTunes" phrase. It is not enough for their condition
+   * (ii), which requires the preview to sit next to an approved store badge
+   * linking to the page where THIS track can be purchased. The badge and its
+   * per-item link therefore travel with the URL, in the same object, so a
+   * client cannot receive something playable without also receiving what it is
+   * obliged to display next to it.
+   */
+  readonly attribution: PreviewAttribution;
+  /**
    * Epoch milliseconds at which the URL stops working, or null when it does
    * not expire. Deezer signs its URLs; iTunes does not.
    */
@@ -172,7 +185,6 @@ export interface PreviewView {
    * being something the client is expected to infer from `provider`.
    */
   readonly cacheable: boolean;
-  readonly attribution: string;
 }
 
 export interface DiscoveryOptions {
