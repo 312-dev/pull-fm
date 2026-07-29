@@ -56,17 +56,17 @@ variable "app_server_type" {
   }
 }
 
-variable "db_server_type" {
+variable "cache_server_type" {
   type        = string
-  description = "Server type for the Postgres node."
-  default     = "cax31"
+  description = "Server type for the shared Redis node. Sized DOWN from the cax31 the Postgres node used, because the workload is now two Redis instances capped at 256 MB and 128 MB rather than a database with a page cache: 384 MB of data plus the OS fits inside the smallest type in the allowlist with room to spare. See modules/compute/main.tf for why this node was not folded into the BFF nodes altogether."
+  default     = "cax11"
 
   validation {
     condition = anytrue([
-      startswith(var.db_server_type, "cax"),
-      contains(["cpx11", "cpx12", "cpx21", "cpx22", "cpx31", "cpx41", "cpx51"], var.db_server_type),
+      startswith(var.cache_server_type, "cax"),
+      contains(["cpx11", "cpx12", "cpx21", "cpx22", "cpx31", "cpx41", "cpx51"], var.cache_server_type),
     ])
-    error_message = "db_server_type must be a CAX (ARM) type or one of the legacy-priced cpx_1_ types. See docs/PLAN.md section 2."
+    error_message = "cache_server_type must be a CAX (ARM) type or one of the legacy-priced cpx_1_ types. See docs/PLAN.md section 2."
   }
 }
 
@@ -100,9 +100,9 @@ variable "app_firewall_id" {
   description = "Firewall to attach to BFF nodes."
 }
 
-variable "db_firewall_id" {
+variable "cache_firewall_id" {
   type        = string
-  description = "Firewall to attach to the Postgres node."
+  description = "Firewall to attach to the shared Redis node."
 }
 
 variable "tailscale_auth_key" {
@@ -126,27 +126,16 @@ variable "enable_app_backups" {
   default     = false
 }
 
-variable "enable_db_backups" {
+variable "enable_cache_backups" {
   type        = bool
-  description = "Hetzner automatic backups on the Postgres node. Costs 20 percent of the server price (about EUR 3.20/mo on a cax31). This is NOT the backup strategy - pgBackRest to R2 is - but it is the cheapest way to get a whole-machine rollback when a config change bricks the node."
-  default     = true
+  description = "Hetzner automatic backups on the Redis node. FALSE now, where the Postgres node had it TRUE. A whole-machine snapshot was the cheap rollback for a database whose state could not be rebuilt; a cache node's state is a cache and a set of counters with a window measured in minutes, so a snapshot of one is a snapshot of nothing worth restoring."
+  default     = false
 }
 
-variable "db_data_volume_size" {
-  type        = number
-  description = "Size in GB of a dedicated Postgres data volume. 0 disables it and keeps the cluster on the node's local NVMe. A separate volume decouples data lifetime from server lifetime, which is what makes prevent_destroy actually meaningful. Costs about EUR 0.044/GB/mo."
-  default     = 0
-
-  validation {
-    condition     = var.db_data_volume_size == 0 || (var.db_data_volume_size >= 10 && var.db_data_volume_size <= 10240)
-    error_message = "db_data_volume_size must be 0 (disabled) or between 10 and 10240 GB."
-  }
-}
-
-variable "db_delete_protection" {
+variable "cache_delete_protection" {
   type        = bool
-  description = "Hetzner-side delete and rebuild protection on the Postgres node. This is the second lock; the first is the prevent_destroy lifecycle block."
-  default     = true
+  description = "Hetzner-side delete and rebuild protection on the Redis node. Defaults FALSE, where the Postgres node defaulted TRUE: destroying it costs a cold cache and a reset rate-limit window, not data. The protection was there to stop somebody deleting the only copy of the users' data, and the only copy of the users' data is now Neon's problem."
+  default     = false
 }
 
 variable "lb_delete_protection" {
@@ -157,15 +146,15 @@ variable "lb_delete_protection" {
 
 # --- public addressing -------------------------------------------------------
 
-variable "db_public_ipv4_enabled" {
+variable "cache_public_ipv4_enabled" {
   type        = bool
-  description = "Give the Postgres node a public IPv4. Default false: an interface that does not exist cannot be exposed by a mistaken firewall edit. Also saves the IPv4 surcharge."
+  description = "Give the Redis node a public IPv4. Default false: an interface that does not exist cannot be exposed by a mistaken firewall edit. Also saves the IPv4 surcharge."
   default     = false
 }
 
-variable "db_public_ipv6_enabled" {
+variable "cache_public_ipv6_enabled" {
   type        = bool
-  description = "Give the Postgres node a public IPv6. Default true so apt and pgBackRest-to-R2 have egress without a NAT hop. Both endpoints are dual-stack."
+  description = "Give the Redis node a public IPv6. Default true so apt and the Tailscale coordination server are reachable without a NAT hop. Both are dual-stack."
   default     = true
 }
 

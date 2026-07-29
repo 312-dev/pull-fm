@@ -36,7 +36,7 @@ readonly PULLFM_SECRETS_VAULT="${PULLFM_OP_VAULT:-MCP}"
 
 # Public, non-secret facts. Here rather than in the env file template so that a
 # reader can see at a glance that they are NOT credentials.
-readonly PULLFM_DB_PRIVATE_IP="${PULLFM_DB_PRIVATE_IP:-10.20.1.21}"
+readonly PULLFM_CACHE_PRIVATE_IP="${PULLFM_CACHE_PRIVATE_IP:-10.20.1.21}"
 readonly PULLFM_WORKOS_CLIENT_ID="${PULLFM_WORKOS_CLIENT_ID:-client_01KYMZ05X60BJKZKY5RTA5YP8B}"
 readonly PULLFM_PUBLIC_BASE_URL="${PULLFM_PUBLIC_BASE_URL:-https://api-staging.pull.fm}"
 readonly PULLFM_MB_USER_AGENT="${PULLFM_MB_USER_AGENT:-PullFM/0.1.0 (ope@312.dev)}"
@@ -86,7 +86,7 @@ pullfm_secret_workdir() {
 # Renders every file a staging node needs into "${1}".
 #
 #   bff.env             application configuration and secrets (app node)
-#   db.env              Postgres and Redis passwords (database node)
+#   cache.env           Redis passwords (cache node)
 #   origin.pem          Cloudflare Origin CA certificate
 #   origin.key          its private key
 #   origin-pull-ca.pem  Cloudflare's origin-pull CA, a PUBLIC certificate
@@ -111,9 +111,20 @@ pullfm_render_staging_secrets() {
     _pullfm_secret_die "secret directory '${dir}' is mode ${mode}, refusing to render credentials into it" ||
     return 1
 
-  local postgres_pw redis_cache_pw redis_quota_pw kek kek_id
+  local database_url database_url_direct redis_cache_pw redis_quota_pw kek kek_id
   local workos_key workos_webhook seatgeek_id seatgeek_secret
-  postgres_pw="$(_pullfm_field 'pull-fm/staging/POSTGRES_PASSWORD' 'password')" || return 1
+
+  # THE DATABASE CREDENTIAL IS NO LONGER A PASSWORD WE COMPOSE A URL FROM.
+  # Neon issues the whole connection string, and there are two of them because
+  # the pooled and direct endpoints are different hosts. Both are copied out of
+  # `terraform -chdir=infra/neon output` into 1Password by the cutover runbook
+  # (docs/runbooks/neon-migration.md); this function never talks to the Neon API.
+  #
+  # POOLED is what the application uses. DIRECT is what the migration runner
+  # uses, because it takes a session-level advisory lock and a transaction
+  # pooler silently breaks session-scoped locks rather than failing loudly.
+  database_url="$(_pullfm_field 'pull-fm/staging/DATABASE_URL' 'credential')" || return 1
+  database_url_direct="$(_pullfm_field 'pull-fm/staging/DATABASE_URL_DIRECT' 'credential')" || return 1
   redis_cache_pw="$(_pullfm_field 'pull-fm/staging/REDIS_CACHE_PASSWORD' 'password')" || return 1
   redis_quota_pw="$(_pullfm_field 'pull-fm/staging/REDIS_QUOTA_PASSWORD' 'password')" || return 1
   kek="$(_pullfm_field 'pull-fm/staging/CREDENTIAL_KEK' 'password')" || return 1
@@ -131,14 +142,13 @@ pullfm_render_staging_secrets() {
   seatgeek_secret="$(op item get 'Pull FM Seat Geek API Key' \
     --vault "${PULLFM_SECRETS_VAULT}" --fields label=password --reveal 2>/dev/null || true)"
 
-  # --- database node ---------------------------------------------------------
-  install -m 0600 /dev/null "${dir}/db.env"
-  cat >"${dir}/db.env" <<EOF
+  # --- cache node ------------------------------------------------------------
+  install -m 0600 /dev/null "${dir}/cache.env"
+  cat >"${dir}/cache.env" <<EOF
 # Rendered by infra/lib/secrets.sh from 1Password. NEVER COMMIT THIS FILE.
-POSTGRES_PASSWORD=${postgres_pw}
 REDIS_CACHE_PASSWORD=${redis_cache_pw}
 REDIS_QUOTA_PASSWORD=${redis_quota_pw}
-PRIVATE_IP=${PULLFM_DB_PRIVATE_IP}
+PRIVATE_IP=${PULLFM_CACHE_PRIVATE_IP}
 EOF
 
   # --- application node ------------------------------------------------------
@@ -155,9 +165,10 @@ LOG_LEVEL=info
 HOST=0.0.0.0
 PORT=3000
 
-DATABASE_URL=postgres://pullfm:${postgres_pw}@${PULLFM_DB_PRIVATE_IP}:5432/pullfm
-REDIS_URL=redis://:${redis_cache_pw}@${PULLFM_DB_PRIVATE_IP}:6379
-REDIS_QUOTA_URL=redis://:${redis_quota_pw}@${PULLFM_DB_PRIVATE_IP}:6380
+DATABASE_URL=${database_url}
+DATABASE_URL_DIRECT=${database_url_direct}
+REDIS_URL=redis://:${redis_cache_pw}@${PULLFM_CACHE_PRIVATE_IP}:6379
+REDIS_QUOTA_URL=redis://:${redis_quota_pw}@${PULLFM_CACHE_PRIVATE_IP}:6380
 
 CREDENTIAL_KEKS=${kek_id}=${kek}
 CREDENTIAL_ACTIVE_KEK_ID=${kek_id}

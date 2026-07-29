@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Bootstraps the Pull.fm staging database node.
+# Bootstraps the Pull.fm staging cache node.
+#
+# THIS USED TO BOOTSTRAP POSTGRES. The database is Neon now (infra/neon), so
+# this node runs the two Redis instances and nothing else. Nothing about the
+# Redis half changed; the Postgres half was deleted rather than rewritten.
 #
 # Idempotent: safe to re-run. Run as root ON THE NODE, with the repository's
-# infra/staging/db directory present in the working directory and
-# /etc/pullfm/db.env already placed (it holds the secrets and is never in git).
+# infra/staging/cache directory present in the working directory and
+# /etc/pullfm/cache.env already placed (it holds the secrets and is never in
+# git).
 #
 #   ssh -J pullfm@<app-public-ip> pullfm@10.20.1.21
 #   sudo bash bootstrap.sh
 #
 # This node has no public IPv4 by design, so every package and image comes in
-# over IPv6. Docker Hub, the Ubuntu archive and the PGDG mirror were all
-# verified reachable over IPv6 from here before this was written down; if that
-# ever stops being true the fallback is `docker save | ssh | docker load` from
-# the application node across the private network.
+# over IPv6. Docker Hub and the Ubuntu archive were both verified reachable over
+# IPv6 from here; if that ever stops being true the fallback is
+# `docker save | ssh | docker load` from the application node across the private
+# network.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 PRIVATE_IP=${PRIVATE_IP:-10.20.1.21}
-ENV_FILE=/etc/pullfm/db.env
+ENV_FILE=/etc/pullfm/cache.env
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "must run as root" >&2
@@ -26,8 +31,8 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 if [ ! -f "${ENV_FILE}" ]; then
-  echo "${ENV_FILE} is missing. Place it first; it holds POSTGRES_PASSWORD," >&2
-  echo "REDIS_CACHE_PASSWORD and REDIS_QUOTA_PASSWORD from 1Password." >&2
+  echo "${ENV_FILE} is missing. Place it first; it holds REDIS_CACHE_PASSWORD" >&2
+  echo "and REDIS_QUOTA_PASSWORD from 1Password." >&2
   exit 1
 fi
 
@@ -39,7 +44,10 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # Ubuntu's own packages rather than Docker's apt repository: one fewer third
 # party signing key trusted on a node that holds every user credential.
-apt-get install -y -qq docker.io docker-compose-v2 postgresql-client-16
+# postgresql-client is no longer installed here. It was for poking at the local
+# cluster, and there is no local cluster; a psql session against Neon runs from
+# the operator's laptop over TLS, not from a node.
+apt-get install -y -qq docker.io docker-compose-v2
 
 systemctl enable --now docker
 
@@ -90,20 +98,23 @@ chown 999 /etc/pullfm/redis/cache.conf /etc/pullfm/redis/quota.conf
 chmod 0600 /etc/pullfm/redis/cache.conf /etc/pullfm/redis/quota.conf
 
 # --- compose ---------------------------------------------------------------
-install -d -m 0755 /opt/pullfm-db
-install -m 0644 docker-compose.yml /opt/pullfm-db/docker-compose.yml
+install -d -m 0755 /opt/pullfm-cache
+install -m 0644 docker-compose.yml /opt/pullfm-cache/docker-compose.yml
 
 grep -q '^PRIVATE_IP=' "${ENV_FILE}" || printf 'PRIVATE_IP=%s\n' "${PRIVATE_IP}" >>"${ENV_FILE}"
 chmod 0600 "${ENV_FILE}"
 
-cd /opt/pullfm-db
+cd /opt/pullfm-cache
 docker compose --env-file "${ENV_FILE}" up -d
 
 echo
-echo "waiting for postgres"
-for _ in $(seq 1 60); do
-  if docker compose --env-file "${ENV_FILE}" exec -T postgres pg_isready -U pullfm -d pullfm >/dev/null 2>&1; then
-    echo "postgres is ready"
+echo "waiting for redis"
+for _ in $(seq 1 30); do
+  # NOAUTH proves the server is up AND enforcing authentication, so it is a
+  # success here for the same reason it is in the compose healthchecks.
+  if docker compose --env-file "${ENV_FILE}" exec -T redis-cache \
+    redis-cli ping 2>&1 | grep -qE 'PONG|NOAUTH'; then
+    echo "redis is ready"
     break
   fi
   sleep 2

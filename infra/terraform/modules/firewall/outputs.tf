@@ -3,9 +3,9 @@ output "app_firewall_id" {
   value       = hcloud_firewall.app.id
 }
 
-output "db_firewall_id" {
-  description = "ID of the Postgres node firewall."
-  value       = hcloud_firewall.db.id
+output "cache_firewall_id" {
+  description = "ID of the shared Redis node firewall."
+  value       = hcloud_firewall.cache.id
 }
 
 output "cloudflare_cidr_count" {

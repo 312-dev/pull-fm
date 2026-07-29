@@ -1,7 +1,12 @@
 # The private network is the security boundary that actually matters here.
 # Hetzner Cloud Firewalls only filter the PUBLIC interface, so anything that
-# must never be internet-reachable (Postgres, PgBouncer, Nomad RPC) is reached
-# exclusively over these addresses and binds only to them.
+# must never be internet-reachable (Redis, Nomad RPC) is reached exclusively
+# over these addresses and binds only to them.
+#
+# Postgres and PgBouncer used to head that list. Both left with the Neon
+# migration: the database is now a public endpoint guarded by a credential
+# rather than a private one guarded by topology, which is the security cost of
+# that migration and is recorded as such in docs/PLAN.md section 1c.
 resource "hcloud_network" "this" {
   name     = "${var.name_prefix}-net"
   ip_range = var.ip_range

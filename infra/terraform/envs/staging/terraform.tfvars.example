@@ -32,15 +32,18 @@ subnet_ip_range  = "10.20.1.0/24"
 # CAX is Ampere ARM64 and is the only permitted family; the module validates
 # it. Hetzner raised CPX/CCX by 150-210 percent on 2026-06-15 while CAX rose
 # about 30 percent (docs/PLAN.md section 2).
-app_node_count  = 2
-app_server_type = "cax21" # 4 vCPU ARM / 8 GB
-db_server_type  = "cax31" # 8 vCPU ARM / 16 GB
+app_node_count    = 2
+app_server_type   = "cax21" # 4 vCPU ARM / 8 GB
+cache_server_type = "cax11" # 2 vCPU ARM / 4 GB, shared Redis only
 
 # --- durability ------------------------------------------------------------
-# Staging keeps Postgres on local NVMe. Prod uses a dedicated volume.
-db_data_volume_size = 0
-enable_db_backups   = true
-enable_app_backups  = false
+# There is nothing durable on a Hetzner node any more. Postgres moved to Neon
+# (infra/neon), which takes its own point-in-time backups, so the dedicated data
+# volume and the whole-machine snapshot both went with it. What is left here is
+# Redis: a cache that is meant to be lost and a counter set whose window is
+# measured in minutes.
+enable_cache_backups = false
+enable_app_backups   = false
 
 # --- access ----------------------------------------------------------------
 # Public keys only. The matching private keys live in 1Password and never in

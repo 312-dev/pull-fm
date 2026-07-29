@@ -106,20 +106,22 @@ resource "hcloud_firewall" "app" {
   }
 }
 
-# --- Postgres node -----------------------------------------------------------
-resource "hcloud_firewall" "db" {
-  name   = "${var.name_prefix}-db"
-  labels = merge(var.labels, { role = "postgres" })
+# --- Cache node --------------------------------------------------------------
+# Was the Postgres node's firewall. Postgres moved to Neon; this now guards the
+# shared Redis instances, and the posture is unchanged because it never depended
+# on which daemon was listening.
+resource "hcloud_firewall" "cache" {
+  name   = "${var.name_prefix}-cache"
+  labels = merge(var.labels, { role = "cache" })
 
-  # No inbound 5432 rule exists, and adding one would be meaningless: Hetzner
-  # Cloud Firewalls filter the public interface only, and private-network
-  # traffic is never inspected. Postgres is kept unreachable by three
-  # independent mechanisms instead:
-  #   1. the DB server has no public IPv4 at all (see modules/compute);
-  #   2. postgresql.conf binds listen_addresses to the private IP;
-  #   3. pg_hba.conf permits only the app subnet.
-  # Items 2 and 3 belong to config management, not Terraform, and are asserted
-  # by the Gate 3 test suite.
+  # No inbound rule for 6379 or 6380 exists, and adding one would be
+  # meaningless: Hetzner Cloud Firewalls filter the public interface only, and
+  # private-network traffic is never inspected. Redis is kept unreachable by
+  # three independent mechanisms instead:
+  #   1. the node has no public IPv4 at all (see modules/compute);
+  #   2. the compose port bindings publish to the private address only;
+  #   3. requirepass on both instances.
+  # Items 2 and 3 belong to config management, not Terraform.
   rule {
     direction   = "in"
     protocol    = "udp"

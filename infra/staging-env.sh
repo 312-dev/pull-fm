@@ -33,7 +33,7 @@
 #
 #   cloud-init  (in state, therefore PUBLIC facts only) packages, docker,
 #               nginx, the tailnet, the directory layout
-#   converge    (over SSH, therefore secrets) bff.env, db.env, the origin
+#   converge    (over SSH, therefore secrets) bff.env, cache.env, the origin
 #               certificate and key, then `bash bootstrap.sh`
 #
 # The one secret cloud-init carries is a Tailscale auth key, and it is minted
@@ -54,8 +54,15 @@
 #   - Terraform state.
 #
 # WHAT DOES NOT SURVIVE: servers, the load balancer, the private network, the
-# DNS records, and every byte of staging Postgres data. That is the point. If a
-# teardown loses something you needed, it belonged in R2.
+# DNS records, and the contents of the staging Redis instances. That is the
+# point. If a teardown loses something you needed, it belonged in R2.
+#
+# STAGING POSTGRES DATA IS NO LONGER ON THIS LIST, and that is the whole shape
+# of the Neon migration. The staging database is a Neon BRANCH (infra/neon), it
+# is not built by this script, and `down` does not touch it. A branch that costs
+# nothing while its compute is suspended has no reason to be destroyed on a
+# schedule; when staging data does need discarding, the operation is a branch
+# reset from `main`, which is instant. See docs/runbooks/neon-migration.md.
 #
 # DNS USED TO BE ON THE SURVIVES LIST AND THAT WAS WRONG. Measured 2026-07-29:
 # `terraform destroy -target=...` destroys the targets AND everything that
@@ -66,7 +73,7 @@
 #
 # THE SECOND LOCK HAS TO BE UNLOCKED FIRST. Hetzner's delete_protection is
 # enforced by the API, so it survives `terraform destroy` and fails it halfway:
-# the app node, firewalls and DNS go, while the database node and load balancer
+# the app node, firewalls and DNS go, while the cache node and load balancer
 # stay up and keep billing. The staging root now defaults both flags to false
 # (docs/PLAN.md section 10c always said staging should), but a live resource
 # created before that change still carries the flag in Hetzner, and the
@@ -117,7 +124,7 @@ assert_correct_project() {
 
 readonly API_HOSTNAME="${PULLFM_API_HOSTNAME:-api-staging.pull.fm}"
 readonly APP_NODE="pullfm-staging-app-1"
-readonly DB_NODE="pullfm-staging-db-1"
+readonly CACHE_NODE="pullfm-staging-cache-1"
 readonly SSH_USER="${PULLFM_SSH_USER:-pullfm}"
 readonly SSH_KEY="${PULLFM_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
 
@@ -294,10 +301,10 @@ converge_node() {
 }
 
 cmd_converge() {
-  local app_ip db_ip secrets
+  local app_ip cache_ip secrets
   app_ip="${1:-$(tailnet_ip "${APP_NODE}")}"
-  db_ip="${2:-$(tailnet_ip "${DB_NODE}")}"
-  [[ -n "${app_ip}" && -n "${db_ip}" ]] ||
+  cache_ip="${2:-$(tailnet_ip "${CACHE_NODE}")}"
+  [[ -n "${app_ip}" && -n "${cache_ip}" ]] ||
     die "both staging nodes must be on the tailnet before converging (run 'up')"
 
   log "rendering secrets from 1Password"
@@ -308,13 +315,15 @@ cmd_converge() {
   trap "rm -rf '${secrets}'" EXIT INT TERM
   pullfm_render_staging_secrets "${secrets}" || die "could not render secrets"
 
-  # The database first. The application node runs forward migrations as part of
-  # its first deploy, so converging it against a Postgres that does not exist
-  # yet turns a correct ordering problem into a confusing deploy failure.
-  log "converging ${DB_NODE} (${db_ip})"
-  converge_node "${db_ip}" "${ROOT}/infra/staging/db" "${secrets}" "db.env" \
-    "${secrets}/db.env"
-  ssh_node "${db_ip}" "cd /tmp/pullfm-config && sudo bash bootstrap.sh"
+  # The cache node first. Ordering matters less than it did when this node held
+  # Postgres and the app node ran migrations against it on first deploy, but the
+  # BFF still reads REDIS_URL at startup, so bringing Redis up first keeps a
+  # rebuild from logging a wave of connection errors it will only recover from
+  # on retry.
+  log "converging ${CACHE_NODE} (${cache_ip})"
+  converge_node "${cache_ip}" "${ROOT}/infra/staging/cache" "${secrets}" "cache.env" \
+    "${secrets}/cache.env"
+  ssh_node "${cache_ip}" "cd /tmp/pullfm-config && sudo bash bootstrap.sh"
 
   log "converging ${APP_NODE} (${app_ip})"
   converge_node "${app_ip}" "${ROOT}/infra/staging/app" "${secrets}" "bff.env" \
@@ -398,12 +407,12 @@ cmd_up() {
 
   echo
   log "waiting for cloud-init"
-  local app_ip db_ip
-  db_ip="$(wait_for_node "${DB_NODE}")"
+  local app_ip cache_ip
+  cache_ip="$(wait_for_node "${CACHE_NODE}")"
   app_ip="$(wait_for_node "${APP_NODE}")"
 
   echo
-  cmd_converge "${app_ip}" "${db_ip}"
+  cmd_converge "${app_ip}" "${cache_ip}"
 
   echo
   cmd_verify "$(git -C "${ROOT}" rev-parse HEAD)"

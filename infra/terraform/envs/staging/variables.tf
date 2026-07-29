@@ -42,22 +42,16 @@ variable "app_server_type" {
   default     = "cax21"
 }
 
-variable "db_server_type" {
+variable "cache_server_type" {
   type        = string
-  description = "Postgres node server type. CAX only."
-  default     = "cax31"
+  description = "Shared Redis node server type. CAX only. Sized down from the cax31 the Postgres node needed: Redis holds 384 MB across two capped instances, not a database page cache."
+  default     = "cax11"
 }
 
-variable "db_data_volume_size" {
-  type        = number
-  description = "Dedicated Postgres data volume in GB, or 0 for local NVMe only."
-  default     = 0
-}
-
-variable "enable_db_backups" {
+variable "enable_cache_backups" {
   type        = bool
-  description = "Hetzner automatic backups on the Postgres node."
-  default     = true
+  description = "Hetzner automatic backups on the Redis node. False: a snapshot of a cache is a snapshot of nothing."
+  default     = false
 }
 
 variable "enable_app_backups" {
@@ -128,9 +122,9 @@ variable "ssh_allowlist_cidrs" {
 # An ephemeral environment that cannot be destroyed is not ephemeral, and a
 # half-destroyed one still bills. False here is the decision being implemented,
 # not a control being weakened: production is a separate root and keeps true.
-variable "db_delete_protection" {
+variable "cache_delete_protection" {
   type        = bool
-  description = "Hetzner-side delete and rebuild protection on the Postgres node. FALSE for staging by design: staging is destroyed on purpose after every gate run and holds nothing that is not reproducible."
+  description = "Hetzner-side delete and rebuild protection on the Redis node. FALSE for staging by design: staging is destroyed on purpose after every gate run and holds nothing that is not reproducible."
   default     = false
 }
 

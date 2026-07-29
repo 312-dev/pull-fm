@@ -41,34 +41,24 @@ output "app_private_ips" {
   value       = local.app_private_ips
 }
 
-output "db_server_id" {
-  description = "ID of the Postgres node."
-  value       = hcloud_server.db.id
+output "cache_server_id" {
+  description = "ID of the shared Redis node."
+  value       = hcloud_server.cache.id
 }
 
-output "db_server_name" {
-  description = "Name of the Postgres node."
-  value       = hcloud_server.db.name
+output "cache_server_name" {
+  description = "Name of the shared Redis node."
+  value       = hcloud_server.cache.name
 }
 
-output "db_private_ip" {
-  description = "Private IP of the Postgres node. This is the only address Postgres should ever be reachable on."
-  value       = local.db_private_ip
+output "cache_private_ip" {
+  description = "Private IP of the Redis node. The only address Redis should ever be reachable on; there is no public IPv4 and Hetzner firewalls do not filter the private network, so the binding in the compose file is the control."
+  value       = local.cache_private_ip
 }
 
-output "db_public_ipv6" {
-  description = "Public IPv6 of the Postgres node, used for egress only. Empty when IPv6 is disabled."
-  value       = var.db_public_ipv6_enabled ? hcloud_server.db.ipv6_address : ""
-}
-
-output "db_data_volume_id" {
-  description = "ID of the dedicated Postgres data volume, or null when not provisioned."
-  value       = var.db_data_volume_size > 0 ? hcloud_volume.db_data[0].id : null
-}
-
-output "db_data_volume_device" {
-  description = "Stable device path of the Postgres data volume, for the config-management mount unit."
-  value       = var.db_data_volume_size > 0 ? hcloud_volume.db_data[0].linux_device : null
+output "cache_public_ipv6" {
+  description = "Public IPv6 of the Redis node, used for egress only. Empty when IPv6 is disabled."
+  value       = var.cache_public_ipv6_enabled ? hcloud_server.cache.ipv6_address : ""
 }
 
 output "placement_group_id" {

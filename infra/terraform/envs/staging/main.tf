@@ -53,24 +53,23 @@ module "compute" {
   network_id      = module.network.network_id
   subnet_ip_range = module.network.subnet_ip_range
 
-  app_server_type = var.app_server_type
-  db_server_type  = var.db_server_type
-  app_node_count  = var.app_node_count
+  app_server_type   = var.app_server_type
+  cache_server_type = var.cache_server_type
+  app_node_count    = var.app_node_count
 
-  app_firewall_id = module.firewall.app_firewall_id
-  db_firewall_id  = module.firewall.db_firewall_id
+  app_firewall_id   = module.firewall.app_firewall_id
+  cache_firewall_id = module.firewall.cache_firewall_id
 
   ssh_public_keys    = var.ssh_public_keys
   tailscale_auth_key = var.tailscale_auth_key
 
-  enable_app_backups  = var.enable_app_backups
-  enable_db_backups   = var.enable_db_backups
-  db_data_volume_size = var.db_data_volume_size
+  enable_app_backups   = var.enable_app_backups
+  enable_cache_backups = var.enable_cache_backups
 
   enable_proxy_protocol = var.enable_proxy_protocol
 
-  db_delete_protection = var.db_delete_protection
-  lb_delete_protection = var.lb_delete_protection
+  cache_delete_protection = var.cache_delete_protection
+  lb_delete_protection    = var.lb_delete_protection
 
   # Servers cannot join a network before its subnet exists, and the subnet is
   # not in the servers' own dependency chain.

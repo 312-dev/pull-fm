@@ -1,0 +1,87 @@
+# Pull.fm staging - shared Redis on the cache node (10.20.1.21).
+#
+# THIS FILE USED TO RUN POSTGRES. It does not any more: the database is Neon
+# (infra/neon), and PgBouncer, which was going to land here in Phase 1, is not
+# needed in a cloud environment because Neon's pooled endpoint IS PgBouncer in
+# transaction mode. PgBouncer stays in docker-compose.dev.yml, and the reason is
+# written there rather than assumed.
+#
+# What is left is the state that genuinely has to be shared between BFF nodes:
+# the cache, and the quota and rate-limit counters. See the header comment on
+# hcloud_server.cache in infra/terraform/modules/compute/main.tf for why that
+# cannot simply move onto the application nodes.
+#
+# Nothing here is reachable from the internet. The node has no public IPv4 at
+# all, and every published port is bound explicitly to the private address, so a
+# future change that gives the node a public interface does not silently expose
+# Redis along with it.
+#
+# Deployed to /opt/pullfm-cache/docker-compose.yml. Secrets come from
+# /etc/pullfm/cache.env, which is root-owned 0600 and placed by bootstrap.sh
+# from 1Password. It is passed with --env-file so its values are available for
+# interpolation here; `env_file:` alone would not be.
+name: pullfm-cache
+
+services:
+  # --- Cache: evictable ----------------------------------------------------
+  redis-cache:
+    image: redis:7.4.10-alpine3.21
+    restart: unless-stopped
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+    volumes:
+      - /etc/pullfm/redis/cache.conf:/usr/local/etc/redis/redis.conf:ro
+    ports:
+      - "${PRIVATE_IP:?PRIVATE_IP is required}:6379:6379"
+    mem_limit: 320m
+    healthcheck:
+      # NOAUTH is a healthy answer: it proves the server is up and enforcing
+      # authentication. redis-cli exits 0 either way, so the reply itself has
+      # to be inspected, and passing the password in as an argument would put
+      # it in the container's process list.
+      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|NOAUTH'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- Quota and rate limit counters: MUST NOT evict -----------------------
+  # A separate instance, not a second logical database. Eviction policy in
+  # Redis is per-instance, so counters sharing an allkeys-lru instance with the
+  # cache are silently evicted by a cache-fill event and every rate limit then
+  # fails OPEN, with no error and no alert. See THREAT-MODEL T11 and the
+  # comment on REDIS_QUOTA_URL in apps/bff/src/config.ts.
+  redis-quota:
+    image: redis:7.4.10-alpine3.21
+    restart: unless-stopped
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+    volumes:
+      - /etc/pullfm/redis/quota.conf:/usr/local/etc/redis/redis.conf:ro
+      - redisquota:/data
+    ports:
+      - "${PRIVATE_IP}:6380:6379"
+    mem_limit: 192m
+    healthcheck:
+      # NOAUTH is a healthy answer: it proves the server is up and enforcing
+      # authentication. redis-cli exits 0 either way, so the reply itself has
+      # to be inspected, and passing the password in as an argument would put
+      # it in the container's process list.
+      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|NOAUTH'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  redisquota:

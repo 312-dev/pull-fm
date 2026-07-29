@@ -41,19 +41,14 @@ output "app_private_ips" {
   value       = module.compute.app_private_ips
 }
 
-output "db_server_id" {
-  description = "ID of the Postgres node."
-  value       = module.compute.db_server_id
+output "cache_server_id" {
+  description = "ID of the shared Redis node."
+  value       = module.compute.cache_server_id
 }
 
-output "db_private_ip" {
-  description = "Private IP of the Postgres node. The only address Postgres should ever answer on."
-  value       = module.compute.db_private_ip
-}
-
-output "db_data_volume_device" {
-  description = "Device path of the Postgres data volume, or null when not provisioned."
-  value       = module.compute.db_data_volume_device
+output "cache_private_ip" {
+  description = "Private IP of the Redis node. The BFF's REDIS_URL and REDIS_QUOTA_URL point here. There is no longer a Postgres address to publish: the database is Neon, and its connection strings are sensitive outputs of infra/neon."
+  value       = module.compute.cache_private_ip
 }
 
 output "network_id" {

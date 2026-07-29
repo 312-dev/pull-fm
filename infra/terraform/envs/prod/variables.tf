@@ -42,22 +42,16 @@ variable "app_server_type" {
   default     = "cax21"
 }
 
-variable "db_server_type" {
+variable "cache_server_type" {
   type        = string
-  description = "Postgres node server type. CAX only."
-  default     = "cax31"
+  description = "Shared Redis node server type. CAX only. Sized down from the cax31 the Postgres node needed: Redis holds 384 MB across two capped instances, not a database page cache."
+  default     = "cax11"
 }
 
-variable "db_data_volume_size" {
-  type        = number
-  description = "Dedicated Postgres data volume in GB. Non-zero in prod: it decouples the data lifetime from the machine lifetime, which is what turns a bricked DB node from a 30 minute R2 restore into a reattach. Costs about EUR 0.044/GB/mo."
-  default     = 100
-}
-
-variable "enable_db_backups" {
+variable "enable_cache_backups" {
   type        = bool
-  description = "Hetzner automatic backups on the Postgres node."
-  default     = true
+  description = "Hetzner automatic backups on the Redis node. False even in prod: a snapshot of a cache is a snapshot of nothing, and the data that used to justify this line now lives in Neon."
+  default     = false
 }
 
 variable "enable_app_backups" {
@@ -116,9 +110,9 @@ variable "backup_bucket_name" {
 # second lock behind the plan file, enforced by the Hetzner API rather than by
 # this repository, so they also catch a console click, a stale state file, or a
 # `terraform state rm` followed by an apply.
-variable "db_delete_protection" {
+variable "cache_delete_protection" {
   type        = bool
-  description = "Hetzner-side delete and rebuild protection on the Postgres node. TRUE for production. Turning it off is a deliberate, reviewed act."
+  description = "Hetzner-side delete and rebuild protection on the Redis node. TRUE for production, but for a much weaker reason than it once had: destroying it now costs a cold cache and a reset rate-limit window, not the only copy of user data."
   default     = true
 }
 

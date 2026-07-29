@@ -9,18 +9,23 @@ data "hcloud_image" "app" {
   with_architecture = startswith(var.app_server_type, "cax") ? "arm" : "x86"
 }
 
-data "hcloud_image" "db" {
+data "hcloud_image" "cache" {
   name              = var.image_name
-  with_architecture = startswith(var.db_server_type, "cax") ? "arm" : "x86"
+  with_architecture = startswith(var.cache_server_type, "cax") ? "arm" : "x86"
 }
 
 locals {
-  # Deterministic private addressing. pg_hba.conf, PgBouncer's host list and
-  # Nomad retry_join all reference these; DHCP-assigned addresses would turn
+  # Deterministic private addressing. The Redis URLs in the BFF environment and
+  # Nomad retry_join both reference these; DHCP-assigned addresses would turn
   # every node rebuild into a config change across three other files.
-  lb_private_ip   = cidrhost(var.subnet_ip_range, 5)
-  app_private_ips = [for i in range(var.app_node_count) : cidrhost(var.subnet_ip_range, 11 + i)]
-  db_private_ip   = cidrhost(var.subnet_ip_range, 21)
+  #
+  # The .21 slot keeps its name across the Neon migration even though Postgres
+  # no longer answers there. Renumbering would have been churn for its own sake,
+  # and an address that moved would have invalidated every runbook that quotes
+  # it while changing nothing about what is reachable.
+  lb_private_ip    = cidrhost(var.subnet_ip_range, 5)
+  app_private_ips  = [for i in range(var.app_node_count) : cidrhost(var.subnet_ip_range, 11 + i)]
+  cache_private_ip = cidrhost(var.subnet_ip_range, 21)
 
   ssh_key_ids        = [for k in hcloud_ssh_key.operators : k.id]
   tailscale_auth_key = var.tailscale_auth_key == null ? "" : var.tailscale_auth_key
@@ -85,94 +90,69 @@ resource "hcloud_server" "app" {
   }
 }
 
-# --- Postgres node -----------------------------------------------------------
-resource "hcloud_server" "db" {
-  name        = "${var.name_prefix}-db-1"
-  server_type = var.db_server_type
-  image       = data.hcloud_image.db.id
+# --- Cache node --------------------------------------------------------------
+#
+# THIS USED TO BE THE POSTGRES NODE. Postgres now lives in Neon (infra/neon), so
+# what is left on this machine is Redis: the evictable cache and the
+# must-not-evict quota instance.
+#
+# THE OBVIOUS QUESTION IS WHY THIS NODE STILL EXISTS AT ALL, since folding two
+# Redis instances into the BFF nodes would delete a whole server from the bill.
+# The answer is that Redis here is shared state, not a local cache:
+#
+#   - The quota and rate-limit counters must be counted ONCE across every BFF
+#     node. Per-node counters would multiply every published limit by
+#     app_node_count without changing a line of the code that enforces them.
+#   - The MusicBrainz egress budget is the sharp edge. docs/PLAN.md section 3
+#     records 1 req/s as a GLOBAL PER-IP ceiling, and Gate 1 asserts "<=1.0
+#     req/s egress at the network layer" for the whole service. The token bucket
+#     that holds us to it lives in Redis. Two BFF nodes with their own buckets
+#     would each honour 1 req/s and the service would emit 2, which is how API
+#     access gets revoked without appeal.
+#
+# So the node shrank rather than disappearing. It no longer needs a database
+# server type, a data volume, whole-machine backups, or delete protection,
+# because it holds nothing that a restart cannot rebuild.
+resource "hcloud_server" "cache" {
+  name        = "${var.name_prefix}-cache-1"
+  server_type = var.cache_server_type
+  image       = data.hcloud_image.cache.id
   location    = var.location
   ssh_keys    = local.ssh_key_ids
-  backups     = var.enable_db_backups
+  backups     = var.enable_cache_backups
 
-  labels = merge(var.labels, { role = "postgres" })
+  labels = merge(var.labels, { role = "cache" })
 
   user_data = templatefile("${path.module}/templates/cloud-init.yaml.tftpl", {
-    hostname           = "${var.name_prefix}-db-1"
-    role               = "db"
+    hostname           = "${var.name_prefix}-cache-1"
+    role               = "cache"
     admin_user         = var.admin_user
     ssh_public_keys    = values(var.ssh_public_keys)
     tailscale_auth_key = local.tailscale_auth_key
   })
 
-  # Postgres has no public IPv4 at all. A firewall rule is one careless edit
-  # away from being wrong; a network interface that does not exist is not.
-  # IPv6 stays on purely for egress - apt mirrors and the R2 endpoint are both
-  # dual stack - which avoids standing up a NAT hop for one machine.
+  # No public IPv4 at all, unchanged from when Postgres lived here. A firewall
+  # rule is one careless edit away from being wrong; a network interface that
+  # does not exist is not. IPv6 stays on purely for egress, so apt and the
+  # Tailscale coordination server are reachable without a NAT hop.
   public_net {
-    ipv4_enabled = var.db_public_ipv4_enabled
-    ipv6_enabled = var.db_public_ipv6_enabled
+    ipv4_enabled = var.cache_public_ipv4_enabled
+    ipv6_enabled = var.cache_public_ipv6_enabled
   }
 
   network {
     network_id = var.network_id
-    ip         = local.db_private_ip
+    ip         = local.cache_private_ip
   }
-
-  # Hetzner-side delete protection, enforced by the API.
-  #
-  # This replaced Terraform's prevent_destroy, which is a static meta-argument
-  # and therefore cannot differ per environment: keeping it would make an
-  # ephemeral staging environment impossible to tear down. delete_protection is
-  # variable-driven and strictly stronger anyway, because it also blocks
-  # deletion through the console, the CLI, and the raw API, not just this repo.
-  delete_protection  = var.db_delete_protection
-  rebuild_protection = var.db_delete_protection
 
   lifecycle {
-    # The single most expensive mistake available in this repo is destroying
-    # the database node. Gate 4 proves a restore works; it does not make the
-    # restore free (30 minutes of downtime plus up to 5 minutes of RPO loss).
-    # Removing this line must be a reviewed, deliberate commit.
-
-    # user_data is ignored here but not on the BFF nodes: replacing a stateless
-    # node to pick up a cloud-init change is routine, replacing the database to
-    # do the same is never the right move.
-    #
-    # A LIVE node therefore keeps the cloud-init it booted with, which is
-    # correct and is also why `converge` re-applies the bootstrap script rather
-    # than trusting that cloud-init already did. A REBUILT node - the case Gate
-    # 4 measures - gets the current template, because it is created rather than
-    # updated and this argument only suppresses updates.
-    ignore_changes = [image, user_data]
+    # user_data is NOT ignored here any more, and that is the substantive change
+    # rather than an oversight. It was ignored while this was the database node,
+    # because replacing the database to pick up a cloud-init edit is never the
+    # right move. A cache node holds nothing, so it is as replaceable as a BFF
+    # node and should pick up config the same way they do.
+    ignore_changes = [image]
   }
-}
-
-# --- Postgres data volume (optional) -----------------------------------------
-# Decoupling the data from the server is what makes the machine disposable. With
-# the volume in place, a bricked DB node is a rebuild-and-reattach; without it,
-# it is a restore from R2.
-resource "hcloud_volume" "db_data" {
-  count = var.db_data_volume_size > 0 ? 1 : 0
-
-  name     = "${var.name_prefix}-db-data"
-  size     = var.db_data_volume_size
-  location = var.location
-  format   = "ext4"
-  labels   = merge(var.labels, { role = "postgres-data" })
-
-  delete_protection = var.db_delete_protection
-}
-
-resource "hcloud_volume_attachment" "db_data" {
-  count = var.db_data_volume_size > 0 ? 1 : 0
-
-  volume_id = hcloud_volume.db_data[0].id
-  server_id = hcloud_server.db.id
-
-  # automount writes an fstab entry at attach time and races with the Postgres
-  # unit on boot. Config management owns the mount, with the DB unit ordered
-  # after it.
-  automount = false
 }
 
 # --- Firewall attachment -----------------------------------------------------
@@ -184,9 +164,9 @@ resource "hcloud_firewall_attachment" "app" {
   server_ids  = hcloud_server.app[*].id
 }
 
-resource "hcloud_firewall_attachment" "db" {
-  firewall_id = var.db_firewall_id
-  server_ids  = [hcloud_server.db.id]
+resource "hcloud_firewall_attachment" "cache" {
+  firewall_id = var.cache_firewall_id
+  server_ids  = [hcloud_server.cache.id]
 }
 
 # --- Load balancer -----------------------------------------------------------
