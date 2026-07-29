@@ -30,6 +30,21 @@ services:
     memswap_limit: 768m
     cpus: 0.8
 
+    # THE MAINTENANCE LEVER IS A FILE, AND A FILE ON THE HOST IS NOT A FILE IN
+    # THE CONTAINER. `touch /etc/pullfm/maintenance` on the node did exactly
+    # nothing until this mount existed: the flag is read with existsSync inside
+    # the container, and nothing of the node's filesystem was visible to it.
+    #
+    # The mount is a DEDICATED FLAGS DIRECTORY, not /etc/pullfm itself, and that
+    # is the whole design of it. /etc/pullfm holds bff.env, cache.env, alert.env,
+    # metrics.env, the Redis configs and their passwords; mounting it to deliver
+    # a zero-byte marker would hand a compromised BFF the node's entire secret
+    # directory to buy one operator convenience. Read-only, so the lever can
+    # only ever be pulled from the node - a process that could create the flag
+    # could take the service down from inside a request handler.
+    volumes:
+      - /etc/pullfm/flags:/etc/pullfm/flags:ro
+
     security_opt:
       - no-new-privileges:true
     read_only: true

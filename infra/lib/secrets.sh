@@ -156,7 +156,7 @@ pullfm_render_staging_secrets() {
     return 1
 
   local database_url database_url_direct redis_cache_pw redis_quota_pw kek kek_id
-  local workos_key workos_webhook seatgeek_id seatgeek_secret
+  local workos_key workos_webhook seatgeek_id seatgeek_secret metrics_token
 
   # THE DATABASE CREDENTIAL IS NO LONGER A PASSWORD WE COMPOSE A URL FROM.
   # Neon issues the whole connection string, and there are two of them because
@@ -175,6 +175,25 @@ pullfm_render_staging_secrets() {
   kek_id="$(_pullfm_field 'pull-fm/staging/CREDENTIAL_KEK' 'kek_id')" || return 1
   workos_key="$(_pullfm_field "${PULLFM_WORKOS_OP_ITEM}" 'password')" || return 1
   workos_webhook="$(_pullfm_field 'pull-fm/staging/WORKOS_WEBHOOK_SECRET' 'credential')" || return 1
+
+  # THE WATCHDOG CANNOT SCRAPE /metrics WITHOUT THIS, and the reason is the
+  # container boundary rather than anything about the token.
+  #
+  # The route admits two callers: a TCP peer that is loopback, or a bearer token
+  # equal to METRICS_TOKEN. The loopback path is the one the watchdog was
+  # designed around - "it runs ON the node, so it scrapes with no credential" -
+  # and it cannot work in this deployment. The BFF runs under Compose on a
+  # bridge network with `ports: 127.0.0.1:3000:3000`, so a request from the node
+  # to its own loopback is DNATed into the container and arrives with the bridge
+  # gateway as its peer address, never 127.0.0.1. Nothing running on the host
+  # can present as loopback to a bridged container, so on this shape the token
+  # is not the fallback, it is the only way in.
+  #
+  # Measured before it was set: `curl http://127.0.0.1:3000/metrics` on the node
+  # returned 404, which is the route's deliberate "no" and is indistinguishable
+  # from the route not existing. A watchdog reading that 404 reports the metrics
+  # endpoint as unreachable and every condition it derives goes unevaluated.
+  metrics_token="$(_pullfm_field 'pull-fm/staging/METRICS_TOKEN' 'password')" || return 1
 
   # The SeatGeek client id lives in the item's NOTES ("client id = <35 chars>")
   # and the secret is the password. Optional: without the id the events route
@@ -224,6 +243,38 @@ WORKOS_WEBHOOK_SECRET=${workos_webhook}
 PUBLIC_BASE_URL=${PULLFM_PUBLIC_BASE_URL}
 MUSICBRAINZ_USER_AGENT=${PULLFM_MB_USER_AGENT}
 CORS_ORIGINS=https://app-staging.pull.fm
+
+METRICS_TOKEN=${metrics_token}
+
+# The file lever, and the path is the CONTAINER'S. The node's copy is
+# /etc/pullfm/flags/maintenance, bind-mounted read-only at the same path by
+# infra/staging/app/docker-compose.yml. It is a dedicated directory rather than
+# /etc/pullfm because that directory holds every secret on the node and the
+# container has no business reading it to find a zero-byte marker.
+#
+#   sudo touch /etc/pullfm/flags/maintenance     # 503 within MAINTENANCE_POLL_MS
+#   sudo rm    /etc/pullfm/flags/maintenance     # back to 200
+MAINTENANCE_FLAG_FILE=/etc/pullfm/flags/maintenance
+EOF
+
+  # --- watchdog scrape configuration -----------------------------------------
+  # Read by /etc/systemd/system/pullfm-watchdog.service.d/10-pullfm-metrics.conf,
+  # which bootstrap.sh installs. A drop-in rather than an edit to the unit,
+  # because the unit belongs to infra/observability and this is deployment shape
+  # rather than a change to what the watchdog does.
+  #
+  # BOTH OVERRIDES ARE CORRECTIONS, not preferences. The watchdog defaults to
+  # port 8080, which on this node is nginx's health-check listener: it serves
+  # exactly `location = /healthz` and returns 404 for everything else, so both
+  # /metrics and /readyz were being read as "not answering". The BFF's own
+  # published port answers all three.
+  install -m 0600 /dev/null "${dir}/metrics.env"
+  cat >"${dir}/metrics.env" <<EOF
+# Rendered by infra/lib/secrets.sh from 1Password. NEVER COMMIT THIS FILE.
+PULLFM_METRICS_URL=http://127.0.0.1:3000/metrics
+PULLFM_READYZ_URL=http://127.0.0.1:3000/readyz
+PULLFM_HEALTHZ_URL=http://127.0.0.1:3000/healthz
+PULLFM_METRICS_TOKEN=${metrics_token}
 EOF
 
   if [[ -n "${seatgeek_id}" ]]; then

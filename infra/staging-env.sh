@@ -383,6 +383,13 @@ cmd_converge() {
     "${secrets}/bff.env" "${secrets}/origin.pem" "${secrets}/origin.key" \
     "${secrets}/origin-pull-ca.pem"
 
+  # The watchdog's scrape configuration carries METRICS_TOKEN, so it travels the
+  # same way bff.env does and lands root-owned 0600.
+  scp -q -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+    "${secrets}/metrics.env" "${SSH_USER}@${app_ip}:/tmp/metrics.env"
+  ssh_node "${app_ip}" "sudo install -m 0600 -o root -g root /tmp/metrics.env /etc/pullfm/metrics.env \
+    && rm -f /tmp/metrics.env"
+
   # infra/observability ships alongside the app directory rather than inside it,
   # so it is sent as a second tar into the same working directory. bootstrap.sh
   # installs from ./observability if it is there.
