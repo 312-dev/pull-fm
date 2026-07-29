@@ -642,8 +642,8 @@ Credentials work. Two prerequisites are **console-only** and cannot be scripted.
 | **No `pull-fm` Hetzner project** | `GET /v1/projects` returns **404**; the Cloud API has no project endpoint. The supplied token is scoped to the personal project (it enumerates `ente-jellyfin` and `hetzner-box`). | Create project `pull-fm` in the Hetzner console, mint a token scoped to it |
 | **R2 not enabled**               | `POST /accounts/.../r2/buckets` returns **403 code 10042**, "Please enable R2 through the Cloudflare Dashboard."                                                                   | Enable R2 once in the Cloudflare dashboard                                 |
 
-**Confirmed working:** `pull.fm` is an active Cloudflare zone (id `70f6a577591a0cf4813b0e1456699a28`),
-delegated from Porkbun. Terraform plans clean against the real APIs: **22 to add, 0 to change,
+**Confirmed working:** `pull.fm` is an active Cloudflare zone, delegated from Porkbun. The zone id
+is deliberately not recorded here; read it from `terraform output` or the provider API. Terraform plans clean against the real APIs: **22 to add, 0 to change,
 0 to destroy.**
 
 **Why the Hetzner project matters rather than just using the personal one:** Pull.fm stores other
