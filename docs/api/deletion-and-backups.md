@@ -42,17 +42,21 @@ Ordering matters and is chosen so that a failure at any point leaves a recoverab
 
 ## The backup position
 
-> **Status, 2026-07-29: this section describes the intended position, and the backup system it
-> describes is not deployed.** pgBackRest is a Phase 1 / Gate 4 task. `wal_level` and
-> `archive_mode` are set so enabling it is a config reload rather than a restart, but
-> `archive_command` is currently a no-op and **no retention values are configured anywhere**, so
-> there is no point-in-time-recovery window to state. Nothing user-facing may quote a number until
-> `repo1-retention-full` and `repo1-retention-archive` have one. `legal/privacy-policy.md` records
-> this as a publication blocker rather than guessing.
+> **Status, 2026-07-29: this now describes a system that exists and has been drilled.** The earlier
+> version of this block described pgBackRest against a self-managed Postgres node. That node no
+> longer exists: the database moved to Neon, and pgBackRest was never deployed. The retention
+> numbers below are configured and were verified against live storage, not planned.
 
-pgBackRest will retain WAL and full backups in Cloudflare R2 for the point-in-time-recovery
-window. A deleted user's rows therefore continue to exist inside encrypted backup artifacts until
-the last backup containing them ages out.
+Backups are three layers, because no single one covers what the others do not:
+
+| Layer                        | Covers                                           | Window                              |
+| ---------------------------- | ------------------------------------------------ | ----------------------------------- |
+| Neon point-in-time recovery  | a wrong delete or bad migration, noticed quickly | **6 hours**                         |
+| A pinned restore branch      | planned destructive operations, any age          | kept until deliberately released    |
+| Encrypted logical dump in R2 | loss of the Neon project itself, or > 6 hours    | **35 days** scheduled, 90 preflight |
+
+A deleted user's rows therefore continue to exist inside encrypted artifacts until the last one
+containing them ages out, and that is now a stated number rather than an open question.
 
 **We do not attempt to erase from backups.** The reason is the one the ICO, the EDPB, and every
 serious analysis of Article 17 give: selectively rewriting a backup destroys its integrity, which
@@ -61,8 +65,10 @@ user's data than the residual retention is to the deleted one.
 
 The position we take instead, which is the one regulators accept:
 
-1. **Backups are put beyond use.** Encrypted at rest with the pgBackRest repository cipher,
-   access-controlled to a single scoped R2 credential, and never queried to serve live traffic.
+1. **Backups are put beyond use.** Logical dumps are encrypted before upload under a dedicated
+   passphrase held outside the database (`pull-fm/infra/BACKUP_DUMP_KEY`), access-controlled to a
+   scoped R2 credential, and never queried to serve live traffic. That key inherits the KEK's escrow
+   obligation: losing it makes every dump unreadable.
 2. **Retention is bounded and stated.** Deleted data disappears from the backup set when the last
    backup containing it expires, within the documented PITR window.
 3. **A restore replays the deletions, from a list held outside this database.** The authoritative
