@@ -101,9 +101,15 @@ Consequences that follow from that, rather than opinions about it:
 - The R2 state bucket is the trust boundary for the production database
   credential. It uses a **separate** R2 token from the environment credentials so
   state stays readable if an environment credential is revoked mid-incident.
-- Object versioning is on, which is right for recovery and does mean an old
-  state object still holds an old credential. That is only acceptable because a
-  rotated credential is a dead one. See the rotation section of the runbook.
+- **Object versioning is OFF, and earlier revisions of this file said it was on.**
+  Probed on 2026-07-29: `GetBucketVersioning` returns an empty configuration at
+  exit 0, and `head-object` on the live state object returns no `VersionId`.
+  Two consequences pull in opposite directions and both are real. Recovery is
+  worse, because a corrupted state write cannot be rolled back to a previous
+  object and the rollback procedure in the runbook does not currently work.
+  Credential hygiene is better, because there is no historical state object
+  quietly holding a superseded password. Turning versioning on is the right call
+  and reinstates the first trade-off; it is tracked in `PULLFM-RISK-008`.
 - A plan file must never be committed or attached to a public pull request.
   `tfplan` and `*.tfplan` are gitignored.
 
@@ -141,12 +147,83 @@ exists so that such a rename is at least visible in `terraform output`.
 Naming convention: `main` is the default branch, and every environment branch is
 a child of `main` named after its environment. The table lives in the runbook.
 
-### Pooled and direct are both exposed, and they are not interchangeable
+### Two roles, and every output name says which one it uses
 
-| Output                  | Host      | Consumer                                     |
-| ----------------------- | --------- | -------------------------------------------- |
-| `*_database_url_pooled` | `-pooler` | the BFF's connection pool                    |
-| `*_database_url_direct` | plain     | `packages/db/scripts/migrate.mjs`, psql, DDL |
+The application does not connect as the database owner. There are two identities
+and the split is the point:
+
+| Identity             | Role           | May                                                                   | Used by                              |
+| -------------------- | -------------- | --------------------------------------------------------------------- | ------------------------------------ |
+| Migration / operator | `neondb_owner` | everything, including `DROP`, `ALTER`, `CREATE`                       | `migrate.mjs`, psql, the SQL scripts |
+| Runtime              | `pullfm_app`   | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, sequence `USAGE`, and no more | `apps/bff`                           |
+
+Outputs are named `<branch>_database_url_<role>_<endpoint>` so a reviewer can
+see which privilege level a string carries without opening anything else. The
+previous names said only which endpoint was in use, and the role is the half
+that decides what a leaked string can do.
+
+| Env var               | Output                               | Role           | Endpoint |
+| --------------------- | ------------------------------------ | -------------- | -------- |
+| `DATABASE_URL`        | `*_database_url_app_pooled_template` | `pullfm_app`   | pooled   |
+| `DATABASE_URL_DIRECT` | `*_database_url_owner_direct`        | `neondb_owner` | direct   |
+
+The `database_url_assignments` output publishes that same table from Terraform,
+so it cannot drift away from the configuration it describes.
+
+**The app-role outputs are templates, not connection strings.** They carry
+`REPLACE_WITH_APP_ROLE_PASSWORD` where the password goes, because Terraform does
+not create that role and must not learn its password. They are not marked
+`sensitive` for the same reason: there is no secret in them.
+
+### The application role is created by SQL, and it is not a Terraform resource
+
+This is the one place the configuration deliberately stops short, so it is worth
+reading before assuming it is an omission.
+
+`neon_role` creates a role through the Neon API, and **Neon grants
+`neon_superuser` to every role created through the Console, API or CLI.** That
+membership carries `CREATEDB`, `CREATEROLE`, `BYPASSRLS`, `REPLICATION`,
+`pg_read_all_data`, `pg_write_all_data`, `pg_monitor` and `ALL` on the public
+schema `WITH GRANT OPTION`. Role attributes are not inherited through
+membership, which makes it look survivable, but a member may `SET ROLE
+neon_superuser` and use all of it.
+
+Revoking it afterwards does not work, and it fails silently. Measured against
+Postgres 18 on 2026-07-29:
+
+```
+neondb_owner=> REVOKE neon_superuser FROM pullfm_app;
+WARNING:  role "pullfm_app" has not been granted membership in role
+          "neon_superuser" by role "neondb_owner"
+REVOKE ROLE
+```
+
+A warning, a success code, and nothing revoked. Postgres 16 made role membership
+track its grantor, and a `REVOKE` only removes grants issued by the revoking
+role; Neon's control plane issued this one. Naming the grantor explicitly is
+refused with an error, and holding `ADMIN OPTION` does not help, because the
+restriction is about the grantor rather than about admin rights. Only the
+original grantor or a superuser can revoke, and Neon gives customers neither.
+
+So the role is created with SQL, which Neon documents as the way to get a role
+with only "the basic public schema privileges granted to newly created roles in
+a standalone Postgres installation":
+
+| Script                    | Does                                                           |
+| ------------------------- | -------------------------------------------------------------- |
+| `sql/create-app-role.sql` | creates (or rotates the password of) `pullfm_app`              |
+| `sql/grant-app-role.sql`  | grants exactly the runtime privileges, including future tables |
+| `sql/verify-app-role.sql` | asserts what it can do **and what it must not be able to do**  |
+
+All three are idempotent and are run **per branch**, against the direct endpoint,
+as the owner. A Neon branch inherits the roles and grants that existed when it
+was cut, so neither propagates to a branch that already exists.
+
+`create_app_role` was **removed** rather than defaulted to `false`. A boolean
+that can only choose between "no app role" and "an app role that is secretly an
+administrator" reads in review as a hardening switch waiting to be flipped.
+
+### Pooled and direct are both exposed, and they are not interchangeable
 
 The direct endpoint is a **correctness** requirement for migrations, not a
 performance preference. The runner takes a session-scoped `pg_advisory_lock`;
@@ -190,14 +267,25 @@ and protected branches. Arithmetic and sources are in the runbook.
 A Neon endpoint is reachable from the public internet by anyone holding the
 credential. The Hetzner Postgres node had no public IPv4 at all. `allowed_ips` is
 the fix and requires a Scale plan; until then the credential is not the primary
-control, it is the only one. This belongs in `security/accepted-risks.md` with an
-owner and an expiry, not only in a comment.
+control, it is the only one.
+
+Registered as **`PULLFM-RISK-007`**, expiring 2026-10-27, with the paid-plan
+upgrade as the retirement condition. The least-privilege `pullfm_app` role is the
+main compensating control: it does not narrow who can reach the endpoint, it
+narrows what reaching it is worth.
+
+The state file is registered separately as **`PULLFM-RISK-008`**. Note that its
+review notes carry an open finding: object versioning on `pull-fm-tfstate` is
+documented here and in two other places as being on, and probing the bucket on
+2026-07-29 says it is not.
 
 ## What this configuration does not manage
 
-| Not managed                         | Why                                                                              |
-| ----------------------------------- | -------------------------------------------------------------------------------- |
-| The schema                          | `packages/db/migrations`, applied by the deploy path through the direct endpoint |
-| `GRANT`s for a least-privilege role | SQL, not Terraform. `create_app_role` is gated on the matching migration         |
-| Connection strings in 1Password     | Copied from `terraform output` by the runbook; Terraform never writes to a vault |
-| Branch resets                       | A control-plane call, not a resource. See the runbook                            |
+| Not managed                     | Why                                                                                                                                                                              |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The schema                      | `packages/db/migrations`, applied by the deploy path through the direct endpoint                                                                                                 |
+| The `pullfm_app` role           | A role created through the Neon API is an irrevocable member of `neon_superuser`. `sql/create-app-role.sql`, run per branch                                                      |
+| `GRANT`s of any kind            | The provider has eleven resources and no grant primitive (checked in `provider/provider.go`). `sql/grant-app-role.sql`, run per branch                                           |
+| The app role's password         | Terraform must not learn it: a value assigned to a variable is rendered into the plan file even when the variable is `sensitive`, and plans get attached to public pull requests |
+| Connection strings in 1Password | Copied from `terraform output` by the runbook; Terraform never writes to a vault                                                                                                 |
+| Branch resets                   | A control-plane call, not a resource. See the runbook                                                                                                                            |

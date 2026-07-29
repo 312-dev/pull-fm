@@ -108,22 +108,62 @@ output "staging_host_pooled" {
   value       = local.staging_pooled_host
 }
 
-# --- connection strings (SECRET) ---------------------------------------------
+# ---------------------------------------------------------------------------
+# WHICH ROLE, AND WHY EVERY OUTPUT NAME SAYS SO
+# ---------------------------------------------------------------------------
+#
+# Every connection-string output below is named
+#
+#     <branch>_database_url_<role>_<endpoint>
+#
+# because the previous names (`main_database_url_pooled`) said which ENDPOINT a
+# string used and were silent about which ROLE it authenticated as, and the role
+# is the half that decides what a leaked string can do. Two privilege levels now
+# exist, so a name that omits the role is a name that cannot be checked.
+#
+#   owner  ->  neondb_owner. Owns every object in the database. Can DROP, ALTER,
+#              CREATE. This is the MIGRATION identity and nothing else.
+#   app    ->  pullfm_app. SELECT, INSERT, UPDATE, DELETE and sequence USAGE,
+#              on this database only. Cannot DROP, cannot ALTER, cannot CREATE,
+#              cannot read pg_authid, cannot SET ROLE to anything. This is the
+#              RUNTIME identity for the BFF.
+#
+# The split matters because these two are not the same risk. A leaked runtime
+# credential reaches the data, which is bad and is what envelope encryption
+# (PLAN.md section 5) exists to bound. A leaked owner credential additionally
+# reaches the SCHEMA, so it can drop the audit log, disable a trigger, or add a
+# column, and the migration identity is the only thing that needs that power.
+#
+# THE OWNER AND APP STRINGS ARE SHAPED DIFFERENTLY, ON PURPOSE.
+#
+# The owner's password is created by Neon and returned by its API, so Terraform
+# has it and the string is complete and `sensitive`. The app role is created by
+# SQL (see main.tf for the measurement that forced that), so Terraform does not
+# have its password and must not: accepting one as a variable would render it
+# into the plan file, and plan files get attached to pull requests on a public
+# repository. The `*_app_*` outputs are therefore TEMPLATES with a placeholder,
+# and are not marked sensitive because they contain no secret.
+#
+# That asymmetry is deliberate and is the honest shape of the problem. An output
+# that pretended to be a complete app connection string would have to have got
+# the password from somewhere Terraform should not have been looking.
 
-output "main_database_url_pooled" {
-  description = "Connection string to the main branch via the pooler. This is DATABASE_URL for the production BFF."
+# --- owner connection strings (SECRET: password included) --------------------
+
+output "main_database_url_owner_pooled" {
+  description = "MAIN branch, OWNER role (neondb_owner), pooled endpoint. Full DDL rights. Not for the application; use main_database_url_app_pooled_template. Present because it is the only complete string available until the SQL app role exists, and because psql-through-the-pooler is occasionally wanted."
   value       = neon_project.pullfm.connection_uri_pooler
   sensitive   = true
 }
 
-output "main_database_url_direct" {
-  description = "Connection string to the main branch, no pooler. This is DATABASE_URL_DIRECT, used by the migration runner and by a human with psql."
+output "main_database_url_owner_direct" {
+  description = "MAIN branch, OWNER role (neondb_owner), direct endpoint. THIS IS DATABASE_URL_DIRECT for production: packages/db/scripts/migrate.mjs runs DDL and takes a session-scoped pg_advisory_lock, so it needs both the owner's privileges and an endpoint that is not a transaction pooler. Also the connection used to run infra/neon/sql/*.sql."
   value       = neon_project.pullfm.connection_uri
   sensitive   = true
 }
 
-output "staging_database_url_pooled" {
-  description = "Staging connection string via the pooler. This is DATABASE_URL for the staging BFF."
+output "staging_database_url_owner_pooled" {
+  description = "STAGING branch, OWNER role, pooled endpoint. Same caveats as the main-branch equivalent."
   value = format(
     "postgres://%s:%s@%s/%s%s",
     var.owner_role_name,
@@ -135,8 +175,8 @@ output "staging_database_url_pooled" {
   sensitive = true
 }
 
-output "staging_database_url_direct" {
-  description = "Staging connection string, no pooler. This is DATABASE_URL_DIRECT for the staging migration step."
+output "staging_database_url_owner_direct" {
+  description = "STAGING branch, OWNER role, direct endpoint. This is DATABASE_URL_DIRECT for the staging migration step."
   value = format(
     "postgres://%s:%s@%s/%s%s",
     var.owner_role_name,
@@ -148,35 +188,97 @@ output "staging_database_url_direct" {
   sensitive = true
 }
 
-# --- least-privilege application role (only when enabled) --------------------
+# --- application-role connection strings (TEMPLATES, no secret) --------------
+#
+# Substitute the password that infra/neon/sql/create-app-role.sql was given, URL
+# -encoding it first if it contains any of : / ? # [ ] @ or %, then store the
+# result in 1Password. Terraform never sees the finished string, which is why
+# these are not sensitive and why `terraform output` is not the source of truth
+# for DATABASE_URL any more.
 
-output "app_role_name" {
-  description = "Name of the least-privilege application role, or null when create_app_role is false."
-  value       = var.create_app_role ? neon_role.app[0].name : null
-}
-
-output "main_app_database_url_pooled" {
-  description = "Main-branch connection string for the least-privilege role via the pooler, or null when create_app_role is false. Do not point DATABASE_URL at this until the GRANT migration has shipped."
-  value = var.create_app_role ? format(
+output "main_database_url_app_pooled_template" {
+  description = "MAIN branch, APP role (pullfm_app), pooled endpoint. THIS IS DATABASE_URL for the production BFF once the password is substituted. Pooled because the BFF opens many short-lived connections from a pool of its own."
+  value = format(
     "postgres://%s:%s@%s/%s%s",
-    neon_role.app[0].name,
-    urlencode(neon_role.app[0].password),
+    var.app_role_name,
+    local.app_password_placeholder,
     neon_project.pullfm.database_host_pooler,
     var.database_name,
     local.ssl_suffix,
-  ) : null
-  sensitive = true
+  )
 }
 
-output "main_app_database_url_direct" {
-  description = "Main-branch connection string for the least-privilege role without the pooler, or null when create_app_role is false."
-  value = var.create_app_role ? format(
+output "main_database_url_app_direct_template" {
+  description = "MAIN branch, APP role, direct endpoint. Not used by the application. It exists so an operator can connect AS the app role with psql and confirm first-hand what it cannot do, which is the only way the least-privilege claim gets checked rather than assumed."
+  value = format(
     "postgres://%s:%s@%s/%s%s",
-    neon_role.app[0].name,
-    urlencode(neon_role.app[0].password),
+    var.app_role_name,
+    local.app_password_placeholder,
     neon_project.pullfm.database_host,
     var.database_name,
     local.ssl_suffix,
-  ) : null
-  sensitive = true
+  )
+}
+
+output "staging_database_url_app_pooled_template" {
+  description = "STAGING branch, APP role, pooled endpoint. This is DATABASE_URL for the staging BFF. The staging app role is a SEPARATE credential with its own password unless staging was branched after the role existed; run infra/neon/sql/create-app-role.sql against staging too."
+  value = format(
+    "postgres://%s:%s@%s/%s%s",
+    var.app_role_name,
+    local.app_password_placeholder,
+    local.staging_pooled_host,
+    var.database_name,
+    local.ssl_suffix,
+  )
+}
+
+output "staging_database_url_app_direct_template" {
+  description = "STAGING branch, APP role, direct endpoint. For verifying the staging role's privileges by hand."
+  value = format(
+    "postgres://%s:%s@%s/%s%s",
+    var.app_role_name,
+    local.app_password_placeholder,
+    local.staging_direct_host,
+    var.database_name,
+    local.ssl_suffix,
+  )
+}
+
+# --- role names and the assignment table (not secret) ------------------------
+
+output "app_role_name" {
+  description = "Name of the least-privilege runtime role. Declared by this configuration and CREATED BY SQL (infra/neon/sql/create-app-role.sql), not by Terraform. See main.tf for why it cannot be a neon_role resource."
+  value       = var.app_role_name
+}
+
+# A machine-readable statement of which environment variable takes which output
+# and which role it therefore authenticates as.
+#
+# It exists because this mapping was previously written only in prose, in two
+# runbooks, and prose is where a wrong answer survives: pointing DATABASE_URL at
+# an owner string is invisible at runtime. Everything works, and the only
+# difference is that a leaked credential can now drop the audit log. Publishing
+# the table next to the outputs means the two cannot drift apart silently.
+output "database_url_assignments" {
+  description = "Which env var takes which output, and the role and privilege level that implies. Not a secret: names only."
+  value = {
+    DATABASE_URL = {
+      role        = var.app_role_name
+      privileges  = "SELECT, INSERT, UPDATE, DELETE on application tables; USAGE on sequences"
+      endpoint    = "pooled"
+      main        = "main_database_url_app_pooled_template"
+      staging     = "staging_database_url_app_pooled_template"
+      consumer    = "apps/bff (runtime)"
+      needs_setup = "password substituted from infra/neon/sql/create-app-role.sql"
+    }
+    DATABASE_URL_DIRECT = {
+      role        = var.owner_role_name
+      privileges  = "owner: full DDL on the application database"
+      endpoint    = "direct"
+      main        = "main_database_url_owner_direct"
+      staging     = "staging_database_url_owner_direct"
+      consumer    = "packages/db/scripts/migrate.mjs, psql, infra/neon/sql/*.sql"
+      needs_setup = "none, complete in terraform output"
+    }
+  }
 }

@@ -53,9 +53,16 @@ staging_suspend_timeout_seconds = 0
 owner_role_name = "neondb_owner"
 database_name   = "neondb"
 
-# Leave false until packages/db/migrations contains the matching GRANTs. A role
-# that can authenticate and read nothing is an outage, not a hardening step.
-create_app_role = false
+# The RUNTIME role the BFF authenticates as. Declared here, but NOT created by
+# Terraform: a role created through the Neon API is a member of neon_superuser
+# and that membership cannot be revoked by any role a Neon customer holds, so a
+# Terraform-created role can never be least-privilege. It is created by
+# infra/neon/sql/create-app-role.sql instead. See infra/neon/main.tf.
+#
+# `create_app_role` was removed rather than defaulted to false. It could only
+# ever have chosen between no app role and an app role that was secretly an
+# administrator.
+app_role_name = "pullfm_app"
 
 # --- network posture -------------------------------------------------------
 # Requires a Scale plan. Populate with the app_egress_ipv4 output of the

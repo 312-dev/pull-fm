@@ -171,10 +171,20 @@ measures, in the order they should be applied:
    it. The addresses are already published as the `app_egress_ipv4` output of
    the environment roots, so this is a one-line change plus an apply.
 4. **`sslmode=require` on every connection string**, which Neon enforces anyway.
+5. **Do not connect as the database owner.** Section 5.5 creates a role that can
+   read and write rows and can do nothing else, so a leaked runtime credential
+   reaches data but not schema. This does not narrow who can reach the endpoint;
+   it narrows what reaching it is worth.
 
-Track this as a new entry in `security/accepted-risks.md` with an owner and an
-expiry date, because that register is CI-enforced and an unregistered accepted
-risk is just an unrecorded one.
+Registered as **`PULLFM-RISK-007`** in `security/accepted-risks.md`, with the
+paid-plan upgrade as the retirement condition and an expiry of 2026-10-27. That
+register is CI-enforced, and an unregistered accepted risk is just an unrecorded
+one.
+
+The second thing this migration changed is registered separately as
+**`PULLFM-RISK-008`**: Neon returns role passwords through its API, so the owner
+password is in Terraform state in plaintext and the R2 state bucket is now the
+trust boundary for the production database credential.
 
 ---
 
@@ -239,20 +249,31 @@ proposes destroying or replacing `neon_project.pullfm` is a bug in the
 configuration and is blocked by `prevent_destroy`; do not remove that block to
 make a plan go through.
 
-### 5.2 Capture the connection strings into 1Password
+### 5.2 Capture the OWNER connection strings into 1Password
 
-Terraform outputs them; 1Password stores them; nothing else ever sees them.
+These are the migration credentials. The runtime credentials do not exist yet;
+they are created in [section 5.5](#55-create-the-least-privilege-application-role)
+and the application must not be pointed at these for longer than it takes to get
+there.
 
 ```bash
-terraform output -raw main_database_url_pooled       # -> pull-fm/prod/DATABASE_URL
-terraform output -raw main_database_url_direct       # -> pull-fm/prod/DATABASE_URL_DIRECT
-terraform output -raw staging_database_url_pooled    # -> pull-fm/staging/DATABASE_URL
-terraform output -raw staging_database_url_direct    # -> pull-fm/staging/DATABASE_URL_DIRECT
+terraform output -raw main_database_url_owner_direct     # -> pull-fm/prod/DATABASE_URL_DIRECT
+terraform output -raw staging_database_url_owner_direct  # -> pull-fm/staging/DATABASE_URL_DIRECT
 ```
 
 Store each as the `credential` field of an item with that exact title, because
 that is what `infra/lib/secrets.sh` reads. **Do not paste them into a shell that
 records history, a chat window, or a file.**
+
+Output names encode the role as well as the endpoint
+(`<branch>_database_url_<role>_<endpoint>`). The old names said only which
+endpoint a string used, and the role is the half that decides what a leak costs.
+`terraform output database_url_assignments` prints the full table.
+
+**`main_database_url_owner_pooled` also exists and is almost never the right
+answer.** Until section 5.6 has been done there is no runtime credential, so if
+the BFF has to be brought up before then it uses the owner string and that is a
+temporary, recorded exposure rather than the intended configuration.
 
 ### 5.3 Move the data
 
@@ -297,7 +318,73 @@ That now provisions an app node and a **cache** node (Redis only), renders
 `https://api-staging.pull.fm/healthz` until it reports the commit being deployed.
 The database is not built by this script any more and is not torn down by it.
 
-### 5.5 Retire the Hetzner Postgres
+### 5.5 Create the least-privilege application role
+
+**This has to come after 5.4, not before it.** `grant-app-role.sql` grants on the
+tables that exist, and the tables are created by the migration step that 5.4
+runs. Running it against an empty database grants nothing on the schema and only
+the `ALTER DEFAULT PRIVILEGES` half takes effect; the result looks successful and
+leaves the existing tables unreadable to the application.
+
+**Run all three scripts against every branch that serves traffic.** A Neon
+branch is a copy-on-write clone taken at a moment in time: it inherits the roles
+and grants that existed when it was cut, and nothing done to `main` afterwards
+reaches it. Do `main` and `staging` separately, and repeat after any branch reset
+that predates the role.
+
+```bash
+cd infra/neon
+OWNER="$(terraform output -raw main_database_url_owner_direct)"   # or staging_...
+
+openssl rand -base64 24                       # generate the password, do not invent one
+
+psql -v ON_ERROR_STOP=1 -f sql/create-app-role.sql "$OWNER"   # prompts for it
+psql -v ON_ERROR_STOP=1 -f sql/grant-app-role.sql  "$OWNER"
+psql -v ON_ERROR_STOP=1 -f sql/verify-app-role.sql "$OWNER"
+```
+
+The owner string and the direct endpoint are both required.
+`ALTER DEFAULT PRIVILEGES` binds to the role that will create future tables, so
+running this as anyone but `neondb_owner` produces default privileges that never
+fire; the script refuses rather than trusting the operator to notice.
+
+`verify-app-role.sql` prints a PASS/FAIL table of 34 assertions and exits
+non-zero on any failure. **It is the deliverable, not the paperwork.** Every
+dangerous outcome here is a privilege that is present when it should be absent,
+and re-running the grant script cannot detect one of those because it only adds.
+
+Then assemble `DATABASE_URL` from the template and store it:
+
+```bash
+terraform output -raw main_database_url_app_pooled_template
+# postgres://pullfm_app:REPLACE_WITH_APP_ROLE_PASSWORD@ep-...-pooler.../neondb?sslmode=require
+```
+
+Substitute the password, URL-encoding it first if it contains any of
+`: / ? # [ ] @ %`, and store the result as `pull-fm/prod/DATABASE_URL` (or
+`pull-fm/staging/DATABASE_URL`). Terraform cannot do this for you and should
+not: see [section 10](#10-what-terraform-cannot-express-here-and-why).
+
+Finally, converge so the node picks up the new value:
+
+```bash
+./infra/staging-env.sh converge
+```
+
+#### Confirming it by hand
+
+Worth doing once, because a privilege you have not seen refused is a privilege
+you are assuming:
+
+```bash
+APP="$(terraform output -raw main_database_url_app_direct_template)"   # substitute the password
+psql "$APP" -c 'drop table users'
+# ERROR:  must be owner of table users
+psql "$APP" -c 'set role neon_superuser'
+# ERROR:  permission denied to set role "neon_superuser"
+```
+
+### 5.6 Retire the Hetzner Postgres
 
 Only after 5.4 is green:
 
@@ -327,24 +414,48 @@ curl -sS -X POST \
 
 # 2. Re-read what Terraform now sees, and update 1Password from it.
 terraform -chdir=infra/neon refresh
-terraform -chdir=infra/neon output -raw main_database_url_pooled
-terraform -chdir=infra/neon output -raw main_database_url_direct
+terraform -chdir=infra/neon output -raw main_database_url_owner_direct
 
 # 3. Re-render and restart. `converge` places the new bff.env and bounces the
 #    container; nothing has to be edited on the node by hand.
 ./infra/staging-env.sh converge
 ```
 
+**The application role rotates differently, and more cheaply.** It is not a Neon
+API object, so `reset_password` does not apply to it and Terraform is not
+involved at all. Re-running `create-app-role.sql` with a new password is the
+whole procedure, because the script takes the `ALTER ROLE` path when the role
+already exists:
+
+```bash
+openssl rand -base64 24
+psql -v ON_ERROR_STOP=1 -f infra/neon/sql/create-app-role.sql \
+     "$(terraform -chdir=infra/neon output -raw main_database_url_owner_direct)"
+# then substitute into the template, update 1Password, and converge
+```
+
+Grants survive a password change, so `grant-app-role.sql` does not need
+re-running; `verify-app-role.sql` is still worth running, because it costs
+seconds and it is the only thing that would notice if it did.
+
+**Rotate the two independently.** They are separate credentials with separate
+blast radii, and rotating the owner because an application node was rebuilt is a
+production DDL outage taken for no reason.
+
 Rotate when: cutover completes (the current credential has been in a browser),
 an operator device is lost, a laptop with a rendered `bff.env` is
 decommissioned, or anyone leaves. **A rotation is also the correct response to
 "I think I pasted the connection string somewhere".** It costs a minute.
 
-Terraform state holds the password in plaintext, so a rotation is not complete
-until the old state version is gone. Object versioning is on for
-`pull-fm-tfstate`, which is deliberate and helpful for recovery but does mean an
-old state object still contains the old credential. That is acceptable precisely
-because the credential is dead; it would not be if the rotation had been skipped.
+Terraform state holds the owner password in plaintext (`PULLFM-RISK-008`), so a
+rotation is not complete until no readable state object still contains the old
+one. Object versioning on `pull-fm-tfstate` is **off**, verified by probing the
+bucket on 2026-07-29 rather than by reading the docs that said otherwise, so the
+current state object is the only one and a rotation genuinely does retire the old
+credential. **This changes when versioning is turned on**, which it should be for
+the recovery reasons in section 7.1: from that point a rotation leaves the old
+password in a previous object version, which is acceptable only because a rotated
+credential is a dead one, and is not acceptable if the rotation was skipped.
 
 ---
 
@@ -354,10 +465,25 @@ Three separate failures, three separate answers. They are not interchangeable.
 
 ### 7.1 The Terraform apply goes wrong
 
-State is in R2 with object versioning on. Restore the previous state object and
-re-plan. Because the apply is import-heavy, the most likely bad outcome is
-resources adopted into state that should not have been; the fix is
-`terraform state rm`, which detaches without touching Neon.
+Because the apply is import-heavy, the most likely bad outcome is resources
+adopted into state that should not have been. The fix for that is
+`terraform state rm`, which detaches without touching Neon, and it does not need
+versioning.
+
+**The restore-a-previous-state-object path does not currently exist.** Object
+versioning on `pull-fm-tfstate` is off, confirmed by probing the bucket on
+2026-07-29; earlier revisions of this runbook asserted it was on. Turn it on
+before relying on this paragraph. Until then, take a copy of the state object
+before any import-heavy apply:
+
+```bash
+aws s3 cp "s3://pull-fm-tfstate/neon/terraform.tfstate" \
+  "./neon-tfstate-$(date +%FT%H%M).json" \
+  --endpoint-url "https://<account>.r2.cloudflarestorage.com"
+```
+
+That copy contains the production database password in plaintext. Keep it off
+shared storage and delete it when the apply is confirmed good.
 
 ### 7.2 The schema or the data is wrong, but Neon is fine
 
@@ -446,11 +572,147 @@ by this migration. Gate 4 still cannot pass.
 - **It does not remove the R2 backup bucket.** `pgBackRest` no longer writes to
   it, but a bucket outside the database vendor is exactly where the logical
   dumps from sections 5.3 and 7.2 belong. It is free at this size.
-- **It does not create a least-privilege application role.** `create_app_role`
-  exists and defaults to `false`. Terraform can create a role but cannot `GRANT`
-  to it, so switching it on before the matching migration exists produces a role
-  that authenticates and then reads nothing. Do both in one change.
-- **It does not set `allowed_ips`.** Plan-gated; see section 3.
+- **It does not set `allowed_ips`.** Plan-gated; see section 3. This is the
+  security regression the migration actually introduces, and the least-privilege
+  role in 5.5 narrows its consequences without removing it.
+- **It does not put the application role in Terraform.** It cannot; see
+  section 10. The role exists and is least-privilege, it is just made by SQL.
+- **It does not fix the fact that the database credential is in Terraform
+  state.** Neon returns role passwords through its API, so the owner password is
+  in `neon/terraform.tfstate` in plaintext and no provider setting changes that.
+  The application role's password is not, which is a side benefit of it being a
+  SQL role rather than the reason for it. Registered as `PULLFM-RISK-008`.
+
+---
+
+## 10. What Terraform cannot express here, and why
+
+Two things in this migration are operator steps rather than resources. Both were
+attempted as Terraform first, and both are recorded here so the next person does
+not spend the same afternoon rediscovering them.
+
+### 10a. `GRANT` is not in the provider at all
+
+`kislerdm/neon` v0.14.0 exposes eleven resources (`provider/provider.go`):
+`neon_api_key`, `neon_project`, `neon_branch`, `neon_endpoint`, `neon_role`,
+`neon_database`, `neon_project_permission`, `neon_jwks_url`,
+`neon_vpc_endpoint_assignment`, `neon_vpc_endpoint_restriction` and
+`neon_org_api_key`. None of them expresses a privilege. `neon_role` has a
+four-attribute schema, read from `provider/resource_role.go` rather than from
+the documentation: `project_id`, `branch_id`, `name`, and a computed `password`.
+There is no update function either, so every writable attribute is `ForceNew`
+and renaming a role is a drop and a create.
+
+That is a fact about the Neon API rather than about the provider. Neon manages
+roles and databases; privileges inside a database are Postgres's business.
+
+Reaching for the `cyrilgdn/postgresql` provider or a `null_resource` wrapping
+psql was considered and rejected. Either one needs the database password in a
+provider block or a `local-exec` environment, both of which are rendered into
+the plan file, and plan files get attached to pull requests on a public
+repository. The gain would be a `terraform apply` that also runs grants; the cost
+would be the production database credential in a CI artifact.
+
+### 10b. A Terraform-created role cannot be least-privilege
+
+This is the sharper one, because the failure is silent.
+
+Neon grants membership in `neon_superuser` to every role created through the
+Console, the API or the CLI, and `neon_role` is an API call. That membership
+carries `CREATEDB`, `CREATEROLE`, `BYPASSRLS`, `REPLICATION`,
+`pg_read_all_data`, `pg_write_all_data`, `pg_monitor`, `pg_signal_backend` and
+`ALL` on the public schema `WITH GRANT OPTION`. Role attributes are not
+inherited through membership, so this looks survivable until you notice that a
+member may `SET ROLE neon_superuser` and use every one of them.
+
+Revoking it afterwards does not work. Measured against Postgres 18 on
+2026-07-29, with the role created exactly as the Neon API creates it:
+
+```
+neondb_owner=> REVOKE neon_superuser FROM pullfm_app;
+WARNING:  role "pullfm_app" has not been granted membership in role
+          "neon_superuser" by role "neondb_owner"
+REVOKE ROLE
+```
+
+**A warning, a success code, and nothing revoked.** Postgres 16 made role
+membership track its grantor, and a `REVOKE` only removes grants issued by the
+revoking role. Neon's control plane issued this one. Naming the grantor is
+refused with a hard error instead:
+
+```
+ERROR:  permission denied to revoke privileges granted by role "..."
+DETAIL:  Only roles with privileges of role "..." may revoke privileges granted by this role.
+```
+
+Holding `ADMIN OPTION` on `neon_superuser` does not help, because the restriction
+is about the grantor rather than about admin rights. Only the original grantor or
+a superuser can revoke, and Neon gives its customers neither.
+
+The consequence worth internalising: **a script that revoked and did not verify
+would have exited zero and left production running as an administrator.** That is
+why `grant-app-role.sql` asserts the membership is gone in a block separate from
+the one that revokes it, and why `verify-app-role.sql` exists at all.
+
+Neon documents the way out, and it is the one this repository takes: roles
+"created with SQL from clients like psql, pgAdmin, or the Neon SQL Editor are
+only granted the basic public schema privileges granted to newly created roles in
+a standalone Postgres installation."
+
+One wrinkle when creating it. `neondb_owner` cannot `CREATE ROLE` on its own:
+
+```
+ERROR:  permission denied to create role
+DETAIL:  Only roles with the CREATEROLE attribute may create roles.
+```
+
+`CREATEROLE` is an attribute and attributes are not inherited, so the script does
+`SET ROLE neon_superuser` for exactly the two statements that need it. The role
+created that way is **not** a member of `neon_superuser`: creating a role while
+acting as one grants the creator admin rights over the new role, it does not
+enrol the new role in anything.
+
+### 10c. What the application role can and cannot do
+
+Verified by connecting as it, not by reading the grants back:
+
+| Allowed                                              | Refused                                                |
+| ---------------------------------------------------- | ------------------------------------------------------ |
+| `SELECT`, `INSERT`, `UPDATE`, `DELETE` on all tables | `DROP TABLE` (`must be owner of table users`)          |
+| `SELECT` on views                                    | `ALTER TABLE` (`must be owner of table users`)         |
+| `nextval()` on sequences                             | `CREATE TABLE` (`permission denied for schema public`) |
+| `pg_try_advisory_lock()`                             | `TRUNCATE` (`permission denied for table users`)       |
+| Everything on tables a FUTURE migration creates      | `SELECT` on `pg_authid` (`permission denied`)          |
+|                                                      | `SET ROLE neon_superuser` / `neondb_owner`             |
+|                                                      | `CREATE ROLE`, `CREATE DATABASE`, `CREATE EXTENSION`   |
+|                                                      | `CREATE INDEX`, `CREATE TEMP TABLE`                    |
+
+The last row of the left column is the one that needs explaining, because it is
+the one that breaks production if it is wrong.
+
+`GRANT ... ON ALL TABLES` is not retroactive in the useful direction: it covers
+the tables that exist when it runs and says nothing about the next migration's.
+`ALTER DEFAULT PRIVILEGES` covers future objects and does nothing for existing
+ones. **Both are needed and neither substitutes for the other.** Without the
+second, the next `CREATE TABLE` produces a table the application cannot read, the
+deploy reports success, and one endpoint starts returning `permission denied for
+table ...`, which is a production break introduced by an unrelated change.
+
+A default-ACL entry is keyed on `(creating role, schema, object type)`, so
+`FOR ROLE neondb_owner` is load-bearing rather than decorative. Omitting it binds
+the entry to whoever ran the script, which is right only by coincidence. The
+invariant it rests on, stated so it can be checked: **migrations always run as
+`neondb_owner`**, which holds because `migrate.mjs` connects with
+`DATABASE_URL_DIRECT` and that is the owner string. A second migration identity
+would need its own `ALTER DEFAULT PRIVILEGES` line or its tables would be
+invisible to the application.
+
+This was tested rather than reasoned about. Against Postgres 18 with the real
+migrations applied, a new table and sequence were created as `neondb_owner` and
+the application role could immediately `SELECT`, `INSERT`, `UPDATE`, `DELETE` and
+call `nextval()` on them with no further grant, while `TRUNCATE` and `DROP` were
+still refused. `verify-app-role.sql` performs that same probe inside a
+transaction every time it runs.
 
 ---
 

@@ -36,6 +36,18 @@ locals {
   # at the proxy and refuses plaintext, and a connection string that omits it
   # depends on the client library's default, which differs between drivers.
   ssl_suffix = "?sslmode=require"
+
+  # Stands in for the application role's password in the `*_app_*_template`
+  # outputs. Terraform does not know that password and must not be given it: a
+  # value assigned to a variable is rendered into the plan file even when the
+  # variable is marked sensitive, plan files get attached to pull requests, and
+  # this repository is public. The same argument that keeps NEON_API_KEY out of
+  # providers.tf keeps this out of variables.tf.
+  #
+  # Deliberately loud rather than a plausible-looking dummy, so that a template
+  # copied into a config file without substitution fails to authenticate instead
+  # of connecting as something unexpected.
+  app_password_placeholder = "REPLACE_WITH_APP_ROLE_PASSWORD"
 }
 
 # --- project -----------------------------------------------------------------
@@ -127,16 +139,53 @@ resource "neon_role" "owner" {
   }
 }
 
-# Least-privilege runtime role. Disabled by default; see the variable, which
-# explains why a role Terraform can create but not GRANT to is dangerous to
-# switch on before the matching migration exists.
-resource "neon_role" "app" {
-  count = var.create_app_role ? 1 : 0
-
-  project_id = neon_project.pullfm.id
-  branch_id  = neon_project.pullfm.default_branch_id
-  name       = var.app_role_name
-}
+# --- the application role is NOT a resource here, and that is the point ------
+#
+# There is no `neon_role.app` below. An earlier revision of this file had one,
+# gated on a `create_app_role` variable, on the assumption that Terraform could
+# create the role and SQL could grant to it. The first half of that assumption
+# is false, and it fails in a way that would have looked fine in review.
+#
+# WHY. Neon grants membership in `neon_superuser` to every role created through
+# the Console, the API or the CLI. `neon_role` is an API call, so a role created
+# here is a member. The membership carries CREATEDB, CREATEROLE, BYPASSRLS and
+# REPLICATION, plus pg_read_all_data, pg_write_all_data, pg_monitor and
+# pg_signal_backend, plus ALL on the public schema WITH GRANT OPTION. Role
+# attributes are not inherited through membership, which makes this look
+# survivable, but a member may `SET ROLE neon_superuser` and use every one of
+# them. `neon_role` therefore cannot express a non-administrative role.
+#
+# AND IT CANNOT BE REPAIRED AFTERWARDS. Measured against Postgres 18 on
+# 2026-07-29 rather than reasoned about:
+#
+#   neondb_owner=> REVOKE neon_superuser FROM pullfm_app;
+#   WARNING:  role "pullfm_app" has not been granted membership in role
+#             "neon_superuser" by role "neondb_owner"
+#   REVOKE ROLE
+#
+# A warning, a success code, and nothing revoked. Postgres 16 made role
+# membership track its grantor and a REVOKE only removes grants issued by the
+# revoking role; this one was issued by Neon's control plane. Naming the grantor
+# is refused outright, and ADMIN OPTION does not help because the restriction is
+# about the grantor rather than about admin rights. Only the original grantor or
+# a superuser can revoke, and Neon offers customers neither.
+#
+# WHAT REPLACES IT. `infra/neon/sql/create-app-role.sql` creates the role with
+# SQL, which Neon documents as the way to get a role that is "only granted the
+# basic public schema privileges granted to newly created roles in a standalone
+# Postgres installation". `grant-app-role.sql` grants it exactly SELECT, INSERT,
+# UPDATE and DELETE plus sequence USAGE, and `verify-app-role.sql` asserts both
+# halves. None of that is expressible in this provider: its eleven resources
+# contain no grant primitive at all (checked in provider/provider.go, not in the
+# documentation).
+#
+# WHAT THIS ROOT STILL OWNS. The hostnames, the database name and the role names
+# that a connection string is assembled from. See the `*_app_*` outputs, which
+# are templates carrying a password placeholder rather than complete strings,
+# because the one component Terraform must never learn is the password.
+#
+# The owner role below stays exactly as it was. It is the migration identity,
+# and migrations legitimately need DDL.
 
 # --- main-branch compute -----------------------------------------------------
 #
@@ -185,11 +234,16 @@ resource "neon_branch" "staging" {
   # the whole branching workflow exists to make cheap.
   protected = "no"
 
-  # A branch inherits the roles that exist AT THE MOMENT IT IS CREATED. Without
-  # this, an apply that creates the app role and the staging branch in the same
-  # run may order them the other way round and produce a staging branch that
-  # silently lacks the role every later apply assumes is there.
-  depends_on = [neon_role.owner, neon_role.app]
+  # A branch inherits the roles that exist AT THE MOMENT IT IS CREATED, so the
+  # owner must be in state before the branch is cut.
+  #
+  # The same rule applies to the application role and Terraform cannot express
+  # it, because that role is created by SQL after this apply (see the block
+  # above). The consequence is operational rather than avoidable: a branch that
+  # predates the SQL role does not have it, and creating it on `main` does not
+  # backfill. infra/neon/sql/*.sql are run PER BRANCH, and the runbook says so
+  # in the one place an operator will be looking.
+  depends_on = [neon_role.owner]
 }
 
 # A branch with no compute is storage that cannot be connected to. Neon does not

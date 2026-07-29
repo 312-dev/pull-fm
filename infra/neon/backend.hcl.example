@@ -8,8 +8,25 @@ bucket = "pull-fm-tfstate"
 key    = "neon/terraform.tfstate"
 region = "auto"
 
+# THE `.eu.` FORM DOES NOT FIND THIS BUCKET. Verified 2026-07-29: an R2
+# jurisdiction endpoint only lists buckets created in that jurisdiction, and
+# `pull-fm-tfstate` is NOT in the EU jurisdiction, despite
+# infra/terraform/README.md documenting `wrangler r2 bucket create
+# pull-fm-tfstate --jurisdiction eu`. The EU endpoint returns only
+# `pull-fm-backups-staging`, which is correctly EU-pinned.
+#
+# The live infra/terraform/envs/staging/backend.hcl already uses the non-EU form
+# below, so this example has been disagreeing with the only working
+# configuration in the repository.
+#
+# Left as a finding rather than fixed silently: the resolution is either to
+# accept a non-EU state bucket (state holds infrastructure metadata and the
+# database credential, not user personal data, so this is not the same GDPR
+# question the backups bucket answers) or to recreate it with `--jurisdiction
+# eu` and migrate the objects. Tracked in security/accepted-risks.md,
+# PULLFM-RISK-008.
 endpoints = {
-  s3 = "https://REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID.eu.r2.cloudflarestorage.com"
+  s3 = "https://REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
 }
 
 # Native state locking via a lockfile object. R2 has no DynamoDB analogue.

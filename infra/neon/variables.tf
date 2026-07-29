@@ -147,27 +147,38 @@ variable "database_name" {
   default     = "neondb"
 }
 
-variable "create_app_role" {
-  type        = bool
-  description = <<-DESC
-    Create a least-privilege application role alongside the owner role.
-
-    FALSE BY DEFAULT, AND THAT IS NOT AN OVERSIGHT. Terraform can create the
-    role; it cannot grant it anything, because GRANT is SQL and belongs in
-    packages/db/migrations. A role created here today would be a role that can
-    authenticate and then read nothing, so pointing DATABASE_URL at it would
-    take the API down.
-
-    Turn it on in the same change that adds the GRANT migration, not before.
-    Until then the BFF connects as the owner, which is worse security and is
-    recorded as such rather than hidden.
-  DESC
-  default     = false
-}
+# `create_app_role` USED TO LIVE HERE AND HAS BEEN REMOVED, not defaulted off.
+#
+# It gated a `neon_role.app` resource. That resource could never have produced a
+# least-privilege role: Neon grants neon_superuser to every role created through
+# its API, and Postgres 16+ makes that membership unrevocable by anyone except
+# the grantor or a superuser, neither of which a Neon customer has. The full
+# measurement is in main.tf and in infra/neon/sql/create-app-role.sql.
+#
+# A boolean that can only ever select between "no app role" and "an app role
+# that is secretly an administrator" is worse than no boolean, because it reads
+# in review as a hardening switch waiting to be flipped.
+#
+# The role is created by infra/neon/sql/create-app-role.sql instead. Its name
+# stays here because the outputs assemble connection-string templates from it.
 
 variable "app_role_name" {
   type        = string
-  description = "Name of the least-privilege application role, when create_app_role is true."
+  description = <<-DESC
+    Name of the least-privilege application role that the BFF authenticates as
+    at runtime.
+
+    NOT CREATED BY THIS CONFIGURATION. It is created by
+    infra/neon/sql/create-app-role.sql, which must use the same name, and the
+    value is declared here because the `*_app_*` outputs build connection-string
+    templates from it and because it is the identity `allowed_ips` and any
+    future audit would be reasoning about.
+
+    Changing it is a two-part operation: this variable and the literals in
+    infra/neon/sql/*.sql, which hardcode it deliberately so that a mismatch
+    fails a precondition check rather than silently granting to a role nothing
+    connects as.
+  DESC
   default     = "pullfm_app"
 }
 
