@@ -512,6 +512,18 @@ subject check excludes an unrelated client certificate and nothing more. The
 control that would genuinely bind this origin to this zone is a **per-zone
 custom origin-pull certificate**, which does not exist yet.
 
+That is buildable with the credentials already in place and was deliberately
+not attempted overnight, because it is a four-step change to a live ingress
+where the wrong ordering 403s every request until someone notices. Probed
+2026-07-29, the staging Cloudflare token **can** write
+`/zones/<zone>/origin_tls_client_auth` and `.../hostnames`, and **cannot** touch
+`rulesets` or `rate_limits`, so a WAF or edge rate-limit ruleset needs a wider
+token than any this project holds. The work is: mint a private CA and a client
+certificate, upload the certificate to Cloudflare, enable per-hostname
+authenticated origin pulls for `api-staging.pull.fm`, and only then repoint
+nginx's `ssl_client_certificate` at our CA and tighten the subject check. Do
+the nginx half last and keep a break-glass path open while doing it.
+
 `/metrics` is denied at nginx and 404s from the internet. The application also
 refuses any caller that is not loopback and holds no `METRICS_TOKEN`.
 
