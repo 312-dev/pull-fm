@@ -207,12 +207,36 @@ export async function buildServer(
   /**
    * Maintenance mode.
    *
-   * Health endpoints stay up so the orchestrator and uptime checker can still
-   * distinguish "intentionally down" from "crashed".
+   * Three endpoints stay up, and each is a different argument:
+   *
+   *   /healthz  so the orchestrator can tell "intentionally down" from
+   *             "crashed" and does not restart a node an operator contained.
+   *   /readyz   so the load balancer's view stays truthful.
+   *   /metrics  so the service is still OBSERVABLE while it is refusing
+   *             traffic. Losing observability at the moment of an incident is
+   *             the opposite of what maintenance mode is for, and Gate 6 asks
+   *             for evidence of the flip, which has to come from somewhere.
+   *
+   * `services.maintenance` rather than `cfg.MAINTENANCE_MODE` directly: the
+   * gate also honours a flag FILE, so the mode can be entered and left without
+   * a restart. See lib/maintenance.ts for why that difference matters to Gate
+   * 6 and to the SEV-1 containment step.
    */
   app.addHook("onRequest", async (req, reply) => {
-    if (!cfg.MAINTENANCE_MODE) return;
-    if (req.url.startsWith("/healthz") || req.url.startsWith("/readyz")) return;
+    if (!opts.services.maintenance.active()) return;
+    if (
+      req.url.startsWith("/healthz") ||
+      req.url.startsWith("/readyz") ||
+      req.url.startsWith("/metrics")
+    ) {
+      return;
+    }
+
+    opts.services.metrics.counter(
+      "pullfm_maintenance_refusals_total",
+      "Requests refused because maintenance mode was active.",
+      { reason: opts.services.maintenance.reason() },
+    );
 
     const problem = errors.maintenance().toProblem(req.id);
     await reply
@@ -220,6 +244,30 @@ export async function buildServer(
       .header("retry-after", "300")
       .type(PROBLEM_CONTENT_TYPE)
       .send(problem);
+  });
+
+  /**
+   * Request counters and the latency histogram.
+   *
+   * Keyed on `routeOptions.url`, the TEMPLATE (`/v1/wishlist/:id`), never the
+   * concrete path. A metric labelled with a real id is one time series per id,
+   * which is how a metrics endpoint becomes the outage it was added to detect.
+   * An unrouted request has no template, so it is labelled `unrouted` rather
+   * than by whatever the caller sent.
+   */
+  app.addHook("onResponse", async (req, reply) => {
+    const route = req.routeOptions.url ?? "unrouted";
+    opts.services.metrics.counter(
+      "pullfm_http_requests_total",
+      "HTTP responses by route template, method and status.",
+      { route, method: req.method, status: reply.statusCode },
+    );
+    opts.services.metrics.observe(
+      "pullfm_http_request_duration_seconds",
+      "HTTP response time in seconds, by route template. A6 alerts on p95 over 0.8.",
+      { route },
+      reply.elapsedTime / 1000,
+    );
   });
 
   // Every response carries its request id so a user-reported failure is
@@ -300,6 +348,17 @@ export async function buildServer(
     users: opts.services.users,
     tokens: opts.services.tokens,
     quotaRedis: opts.services.quotaRedis,
+    onFailClosed: (store) => {
+      // Counted AND logged. The counter is what an alert fires on (S3); the log
+      // line is what tells the operator which of the two quota-Redis consumers
+      // broke, at the moment it broke, which a counter alone cannot.
+      opts.services.metrics.counter(
+        "pullfm_fail_closed_total",
+        "Requests refused because a fail-closed dependency was unreachable (S3).",
+        { store: store === "rate limiter" ? "quota_limiter" : "session_store" },
+      );
+      app.log.error({ store }, "fail-closed: refusing traffic");
+    },
     sessionCookie: {
       cipher: opts.services.sessionCookies,
       name: cfg.sessionCookieName,
@@ -308,6 +367,18 @@ export async function buildServer(
 
   await app.register(registerHealthRoutes, {
     version: cfg.BUILD_SHA,
+    metricsToken: cfg.METRICS_TOKEN,
+    renderMetrics: () => opts.services.metrics.render(),
+    observeReadiness: (checks: Record<string, string>) => {
+      for (const [dependency, verdict] of Object.entries(checks)) {
+        opts.services.metrics.gauge(
+          "pullfm_dependency_up",
+          "1 ok, 0 fail, -1 not checked. Written by the last /readyz probe (A2).",
+          { dependency },
+          verdict === "ok" ? 1 : verdict === "fail" ? 0 : -1,
+        );
+      }
+    },
     checkDatabase: () => opts.services.db.healthy(),
     checkRedis: async () => {
       // BOTH instances are checked. A node that can reach the cache but not

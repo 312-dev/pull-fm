@@ -172,24 +172,32 @@ is a failure", which is the thing the three-code contract exists to avoid.
 
 ### Where an alert actually goes today
 
-**Be precise about this, because the honest answer is "nowhere off the box".**
+**This answer changed on 2026-07-29 and the change is worth stating precisely,
+because the previous answer was "nowhere off the box".**
 
-Of the 26 conditions in
-[`RUNBOOK-INCIDENT.md`](RUNBOOK-INCIDENT.md) section 6, exactly two are armed,
-both are Cloudflare billing alerts, and both are armed inside Cloudflare rather
-than by anything in this repository. **There is no ntfy topic, no webhook, and
-no notification transport configured anywhere in this project.** Inventing one
-would have produced a file that looks like an alert path and delivers nothing.
+A notification channel now exists. `infra/observability/` holds one sender, one
+watchdog and an installer that writes `/etc/pullfm/alert.env` out of 1Password,
+and **the committed handler in this section was tested against it**: with an
+`alert.env` in place, `pullfm-job-alert` published to a live ntfy endpoint and
+the notification was read back off the topic. Nothing in the handler changed;
+what changed is that the file it has always looked for now has a way to exist.
 
-So `/usr/local/bin/pullfm-job-alert` writes to the surfaces that exist on any
-node without further configuration, and treats delivery as an optional extra:
+`/usr/local/bin/pullfm-job-alert` still writes to the surfaces that exist on any
+node without further configuration, and still treats delivery as an extra rather
+than as the record:
 
-| Surface                            | Always present                                      | What it gives                                                                               |
-| ---------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Failed systemd unit                | yes                                                 | `systemctl --failed` lists it until someone resets it                                       |
-| Journal, error priority            | yes                                                 | `journalctl -t pullfm-job-alert -p err`, with the fixed token `PULLFM-ALERT`                |
-| `/var/log/pullfm/job-alerts.jsonl` | yes                                                 | One JSON object per failure, including `delivered`, so "nobody was told" is itself a record |
-| ntfy                               | **no. Not configured, and the file does not exist** | Sends only when `/etc/pullfm/alert.env` defines `PULLFM_NTFY_URL`                           |
+| Surface                            | Always present                              | What it gives                                                                               |
+| ---------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Failed systemd unit                | yes                                         | `systemctl --failed` lists it until someone resets it                                       |
+| Journal, error priority            | yes                                         | `journalctl -t pullfm-job-alert -p err`, with the fixed token `PULLFM-ALERT`                |
+| `/var/log/pullfm/job-alerts.jsonl` | yes                                         | One JSON object per failure, including `delivered`, so "nobody was told" is itself a record |
+| ntfy                               | **once `/etc/pullfm/alert.env` is written** | Proven to deliver. `make alerts-armed` says whether THIS machine can notify anyone          |
+
+**The spool's `delivered` field is now load-bearing rather than aspirational.**
+`pullfm-watchdog` reads it and raises a separate alert when a job failure was
+recorded with `delivered:false`, which covers the one case the handler cannot
+cover by itself: the job failed AND the channel was down at that moment. Without
+that backstop, a failure during a channel outage is silent forever.
 
 The handler classifies the failure before writing it, so the message says which
 of these happened rather than "something failed":
@@ -201,33 +209,45 @@ of these happened rather than "something failed":
 | `timeout`                      | `timed-out`     | Killed at `RuntimeMaxSec`. Treat the run as incomplete.    |
 | `signal` or `core-dump`        | `killed`        | Check the OOM killer first.                                |
 
-**Arming a real channel is one file**, and it is the smallest remaining piece of
-Gate 5 that is not blocked on something else existing:
+**Arming a node is one command**, and the value in it is a credential rather
+than a setting: on ntfy the topic name is the entire access control, so the URL
+is stored in 1Password and never appears in this repository.
 
 ```bash
-# /etc/pullfm/alert.env, root-owned 0600, never in git
-PULLFM_NTFY_URL=https://ntfy.sh/<topic>
-PULLFM_NTFY_TOKEN=<optional>
+# From the operator's machine, with `op` signed in:
+PULLFM_ALERT_ENV_LABEL=staging ./infra/observability/install-alert-env.sh --stdout |
+  ssh root@NODE 'install -m 0600 -o root -g root /dev/stdin /etc/pullfm/alert.env'
+
+# On the node, prove it rather than assume it:
+/usr/local/bin/pullfm-alert --key arm-test --title 'Pull.fm channel test' \
+  --message "armed at $(date -u +%FT%TZ)"
 ```
 
-Until that file exists, **an exit 1 is recorded on the node and nobody is
-told**. That is a deliberate, stated position and not an oversight, but it is
-the reason `purge:audit` also carries its own in-band freshness signal: the
-`stale` field of its run outcome reports that nothing was anonymized within the
-freshness window while rows past the retention window were waiting, which is the
-only symptom a silently dead scheduler produces from the inside.
+Until that file exists on a given node, **an exit 1 is recorded there and nobody
+is told**. `make alerts-armed` answers that question directly, and it asks the
+FILE rather than 1Password, because "can my laptop reach the vault" and "can
+this node tell anyone anything" are different questions and only the second one
+matters at 3am.
+
+This is also still the reason `purge:audit` carries its own in-band freshness
+signal: the `stale` field of its run outcome reports that nothing was anonymized
+within the freshness window while rows past the retention window were waiting.
+That is the only symptom a silently dead scheduler produces from the inside, and
+it remains worth having now that there is a channel, because a channel is one
+more thing that can be broken.
 
 ---
 
 ## 5. What is actually running
 
-| Thing                    | State                                                                         |
-| ------------------------ | ----------------------------------------------------------------------------- |
-| The four jobs            | Written, tested, and **runnable by hand**                                     |
-| The four timers          | **Configured in git and enabled by bootstrap.sh. Never fired.**               |
-| The alert handler        | **Configured. Never invoked.**                                                |
-| A notification channel   | **Does not exist.**                                                           |
-| Compute to run any of it | **Not deployed.** `infra/terraform` is not applied and the run rate is EUR 0. |
+| Thing                    | State                                                                           |
+| ------------------------ | ------------------------------------------------------------------------------- |
+| The four jobs            | Written, tested, and **runnable by hand**                                       |
+| The four timers          | **Configured in git and enabled by bootstrap.sh. Never fired.**                 |
+| The alert handler        | **Configured. Never invoked by systemd**, but proven to deliver by hand         |
+| A notification channel   | **EXISTS and is proven.** `infra/observability/`, armed per node from 1Password |
+| The watchdog             | **Written and proven** against synthetic triggers. Never run on a real node     |
+| Compute to run any of it | **Not deployed.** `infra/terraform` is not applied and the run rate is EUR 0.   |
 
 **What remains blocked on deployment**, and only on deployment:
 
@@ -237,7 +257,11 @@ only symptom a silently dead scheduler produces from the inside.
 2. Closing appendix item 1 of `legal/privacy-policy.md`, which requires a
    schedule that **exists and is verified to have fired**. The first half is now
    true. The second cannot become true without a node.
-3. Gate 5 evidence for the four job conditions, which needs a channel and a node.
+3. Gate 5 evidence for the four job conditions. The channel half is done; what
+   is left is a node on which a real exit 1 can be classified. The handler reads
+   `Result=` and `ExecMainStatus=` from systemd, so it cannot be exercised
+   anywhere else: run on a laptop it correctly reports `unexpected`, because
+   there is no unit to ask about.
 
 Until then the accurate statement, and the one the legal documents should make,
 is: **these are the retention windows the system applies on every run, the runs
@@ -279,7 +303,13 @@ systemctl start pullfm-sweep-expired.service  # force one run
 journalctl -u pullfm-sweep-expired -n 50      # the JSON summary is on stdout
 systemctl --failed                            # anything that exited 1
 cat /var/log/pullfm/job-alerts.jsonl          # the failure spool
+make alerts-armed                             # can this node notify anyone?
 ```
+
+The last line is the one that is easy to skip and is the difference between a
+recorded failure and a reported one. A node whose timers all fire correctly and
+whose `alert.env` is missing is a node that enforces every retention window and
+tells nobody when it stops.
 
 A dry run of any job without the timer, using the deployed image:
 

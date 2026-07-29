@@ -4,14 +4,42 @@
 > ntfy within 60 seconds when triggered synthetically, evidenced by a timestamped
 > log; every alert has a runbook URL returning 200.
 >
-> **Status: SPECIFICATION ONLY, with one partial exception.** No alert in
-> section 6 delivers a notification. The scheduled-job rows J1 to J4 have their
-> detection and classification committed and their delivery unconfigured, which
-> is called out where they appear. The list,
-> the synthetic trigger for each, and the runbook anchor each links to are
-> written here so the alerting work has a target and so Gate 5 has something to
-> be measured against. **Nothing below should be read as "we will be told".**
-> Read section 6's status column literally.
+> **Status: A CHANNEL EXISTS AND DELIVERS. Gate 5 is not closed.**
+>
+> Until 2026-07-29 there was no notification channel anywhere in this project,
+> and the accurate summary was "when something fails it is written to a log on a
+> node and nobody is told". That is no longer true. `infra/observability/`
+> contains one sender, one watchdog, and an `/etc/pullfm/alert.env` written from
+> 1Password, and the path has been fired end to end into a real ntfy server and
+> the message read back.
+>
+> Of the thirty rows in section 6:
+>
+> | State                                                                        | Count |
+> | ---------------------------------------------------------------------------- | ----- |
+> | **ARMED AND PROVEN** - synthetic trigger fired, message read back off ntfy   | 5     |
+> | **ARMED, delivery proven, trigger blocked on deployed compute** (J1 to J4)   | 4     |
+> | **ARMED, NOT PROVEN** - detector written, no way to trigger it from a laptop | 3     |
+> | **ARMED at the vendor**, machine-verified by `make cost` (C1, C2)            | 2     |
+> | **NOT ARMED**, each with the reason stated in its row                        | 16    |
+>
+> Against the twenty-two rows that were `SPEC` before this work: **eight are now
+> armed** and five of those are proven. Fourteen are not, and the reasons are
+> real ordering constraints rather than remaining effort: nine need infrastructure
+> that does not exist, three need an external checker, and two describe a
+> pgBackRest deployment that Neon replaced.
+>
+> **Two distinctions are kept deliberately here and must not be collapsed.**
+> "Configured" is not "proven": a channel nobody has fired is the same class of
+> defect as a backup nobody has restored, and this project has been bitten by
+> exactly that pattern twice (section 10). And "delivered to the ntfy server" is
+> not "a human read it": the operator must still subscribe to the topic, which
+> is the one step nothing in this repository can perform or verify.
+>
+> ```bash
+> make alerts-armed   # can this machine notify anyone at all?
+> make alerts         # prove it, end to end, against a real ntfy
+> ```
 
 ---
 
@@ -102,9 +130,22 @@ and the audit trail is `audit_log` plus your own notes and nothing else.
 
 ```bash
 # Put the service into honest downtime rather than leaving it timing out.
+#
+# PREFER THE FILE during an incident. It takes effect in about a second, needs
+# no restart, and therefore does not destroy the process state that step 2 of
+# the SEV-1 procedure below tells you to preserve.
+touch /etc/pullfm/maintenance
+rm    /etc/pullfm/maintenance     # and back, same latency
+
+# The env variable is the right lever for PLANNED downtime and vacation mode,
+# because it survives a restart and the file does not.
 MAINTENANCE_MODE=true    # in /etc/pullfm/bff.env, then restart the container
-# Application routes return 503 with Retry-After: 300; /healthz still returns
-# 200, so the orchestrator can tell intentional downtime from a crash.
+
+# Either way: application routes return 503 with Retry-After: 300, while
+# /healthz, /readyz and /metrics keep answering - the first two so the
+# orchestrator can tell intentional downtime from a crash, the third so the
+# service is still observable while it is refusing traffic.
+curl -s localhost:8080/metrics | grep pullfm_maintenance_mode   # 1 while down
 ```
 
 Rolling back a bad deploy: [`RUNBOOK-DEPLOY.md`](RUNBOOK-DEPLOY.md) section 5.
@@ -172,73 +213,101 @@ investigation leaves no time to write.
 
 ## 6. The Gate 5 alert list
 
-**Every row below is `SPEC` and none is configured.** The columns are the ones
-Gate 5 requires: the condition, how to fire it synthetically so the alert can be
-proven rather than assumed, and where it points.
+The columns are the ones Gate 5 requires: the condition, how to fire it
+synthetically so the alert can be proven rather than assumed, and where it
+points. **Read the status column literally.** The four values it uses:
+
+| Status                | Means                                                                                                                      |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **ARMED AND PROVEN**  | A detector exists AND the synthetic trigger was fired AND the resulting notification was read back off a real ntfy server. |
+| **ARMED, NOT PROVEN** | A detector exists and would deliver. Nothing has fired it, because the trigger needs something that does not exist yet.    |
+| **NOT ARMED**         | Nothing detects this. The reason is in the row.                                                                            |
+| **N/A**               | The condition is handled somewhere other than an alert, or has been made obsolete.                                         |
+
+The proofs are generated, not asserted:
+`infra/observability/watchdog-selftest.sh` mutates one line of a **real captured
+scrape**, runs the real watchdog, and polls ntfy until the message appears,
+timing it. It also runs negative controls, because an alerter that fires on a
+healthy system trains the operator to ignore it.
 
 ### Availability and correctness
 
-| #   | Condition                                                                              | Synthetic trigger                                  | Links to                                                | Status |
-| --- | -------------------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------- | ------ |
-| A1  | External health check: `https://api.pull.fm/healthz` non-200 twice in a row, 60s apart | Set `MAINTENANCE_MODE=true`, or stop the container | [Section 3](#3-first-fifteen-minutes-for-any-incident)  | SPEC   |
-| A2  | `/readyz` reports any dependency `fail` for 2 minutes                                  | Stop the Redis container                           | [Section 7](#7-degraded-modes-what-each-one-looks-like) | SPEC   |
-| A3  | Edge 5xx rate over 1% for 5 minutes (Cloudflare analytics)                             | Point the LB at a dead backend                     | [Section 3](#3-first-fifteen-minutes-for-any-incident)  | SPEC   |
-| A4  | Origin unreachable from the edge (521/522/525)                                         | Stop nginx on the origin                           | [`RUNBOOK-DR.md`](RUNBOOK-DR.md)                        | SPEC   |
-| A5  | Deploy timer failed 3 consecutive runs                                                 | Push an image whose migration fails                | [`RUNBOOK-DEPLOY.md`](RUNBOOK-DEPLOY.md) section 5      | SPEC   |
-| A6  | p95 latency over 800ms for 10 minutes                                                  | k6 against the mock at 2x the modelled load        | [Section 7](#7-degraded-modes-what-each-one-looks-like) | SPEC   |
+| #   | Condition                                                                              | Synthetic trigger                                    | Links to                                                | Status                                                                                                                                                                                                                                                  |
+| --- | -------------------------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1  | External health check: `https://api.pull.fm/healthz` non-200 twice in a row, 60s apart | Set `MAINTENANCE_MODE=true`, or stop the container   | [Section 3](#3-first-fifteen-minutes-for-any-incident)  | **NOT ARMED.** Needs a checker OUTSIDE our infrastructure. The watchdog runs on the node, and a watchdog on a dead node does not alert. Its local `/healthz` check is a backstop for a crashed container, not this row.                                 |
+| A2  | `/readyz` reports any dependency `fail` for 2 minutes                                  | Set `pullfm_dependency_up` to 0 and run the watchdog | [Section 7](#7-degraded-modes-what-each-one-looks-like) | **ARMED AND PROVEN.** Delivered in under 1s.                                                                                                                                                                                                            |
+| A3  | Edge 5xx rate over 1% for 5 minutes (Cloudflare analytics)                             | Point the LB at a dead backend                       | [Section 3](#3-first-fifteen-minutes-for-any-incident)  | **NOT ARMED.** Lives at the edge; needs a Cloudflare notification or a Logpush consumer, neither configured.                                                                                                                                            |
+| A4  | Origin unreachable from the edge (521/522/525)                                         | Stop nginx on the origin                             | [`RUNBOOK-DR.md`](RUNBOOK-DR.md)                        | **NOT ARMED.** Same blind spot as A1: only visible from outside.                                                                                                                                                                                        |
+| A5  | Deploy timer failed 3 consecutive runs                                                 | Push an image whose migration fails                  | [`RUNBOOK-DEPLOY.md`](RUNBOOK-DEPLOY.md) section 5      | **ARMED, NOT PROVEN.** The watchdog alerts on ANY failed `pullfm-*` unit, which covers this. It needs systemd, so it cannot be triggered from a laptop, and it alerts on the first failure rather than the third.                                       |
+| A6  | p95 latency over 800ms for 10 minutes                                                  | k6 against the mock at 2x the modelled load          | [Section 7](#7-degraded-modes-what-each-one-looks-like) | **NOT ARMED.** The evidence now exists (`pullfm_http_request_duration_seconds`, with an `le="0.8"` bucket chosen for this row) but nothing computes a quantile. A quantile over two scrapes in shell would be a wrong number rather than a missing one. |
 
 ### Data and durability
 
-| #   | Condition                                        | Synthetic trigger                                   | Links to                                                | Status                                    |
-| --- | ------------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------- |
-| D1  | No successful pgBackRest full backup in 26 hours | Stop the backup timer for a day, or move the stanza | [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 4              | SPEC (**and pgBackRest is not deployed**) |
-| D2  | WAL archive lag over 5 minutes (the Gate 4 RPO)  | Break `archive_command`                             | [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 4              | SPEC (**same**)                           |
-| D3  | Monthly restore drill did not run, or failed     | Skip the scheduled drill                            | [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 5              | SPEC                                      |
-| D4  | Postgres disk over 80%                           | `fallocate` a large file on the data volume         | [Section 7](#7-degraded-modes-what-each-one-looks-like) | SPEC                                      |
-| D5  | Replication lag over 60s (once a replica exists) | Pause the replica                                   | [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 6              | SPEC                                      |
+| #   | Condition                                        | Synthetic trigger                                   | Links to                                                | Status                                                                                                                                                                                                                                               |
+| --- | ------------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | No successful pgBackRest full backup in 26 hours | Stop the backup timer for a day, or move the stanza | [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 4              | **N/A as written.** There is no pgBackRest: the database is Neon and PITR is Neon's (`PLAN.md` phase 1). The condition worth watching is now "Neon PITR window shorter than the promise", which is a different alert and belongs to whoever owns DR. |
+| D2  | WAL archive lag over 5 minutes (the Gate 4 RPO)  | Break `archive_command`                             | [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 4              | **N/A as written.** Same reason. There is no `archive_command` we own.                                                                                                                                                                               |
+| D3  | Monthly restore drill did not run, or failed     | Skip the scheduled drill                            | [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 5              | **NOT ARMED.** There is no scheduled drill to miss yet.                                                                                                                                                                                              |
+| D4  | Postgres disk over 80%                           | `fallocate` a large file on the data volume         | [Section 7](#7-degraded-modes-what-each-one-looks-like) | **N/A.** We do not own the data volume; Neon manages storage. The node's own disk is a different and unwatched condition.                                                                                                                            |
+| D5  | Replication lag over 60s (once a replica exists) | Pause the replica                                   | [`RUNBOOK-DR.md`](RUNBOOK-DR.md) section 6              | **NOT ARMED.** No replica exists; deferred deliberately (`PLAN.md` section 9).                                                                                                                                                                       |
 
 ### Security
 
-| #   | Condition                                                                                            | Synthetic trigger                                | Links to                                                | Status                                        |
-| --- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------- | --------------------------------------------- |
-| S1  | Any `audit_log` row with `outcome = 'denied'` on a credential-affecting action, over 5 in 10 minutes | Replay a forged WorkOS webhook signature 6 times | [Section 4](#4-sev-1-suspected-credential-exposure)     | SPEC                                          |
-| S2  | Rejected webhook signature, any occurrence                                                           | Send an unsigned `POST /v1/webhooks/workos`      | [Section 4](#4-sev-1-suspected-credential-exposure)     | SPEC                                          |
-| S3  | Quota Redis unreachable (the limiter fails **closed** to 503, so this is visible as a 503 spike)     | Stop the quota Redis instance                    | [Section 7](#7-degraded-modes-what-each-one-looks-like) | SPEC                                          |
-| S4  | 401 rate on token auth over 20/min from one source                                                   | Loop a curl with a bad `pfm_live_` token         | [Section 8](#8-abuse-and-quota-arson)                   | SPEC                                          |
-| S5  | Nightly ZAP active scan finds a high or critical                                                     | Introduce a known-vulnerable route on a branch   | [`../security/README.md`](../security/README.md)        | SPEC                                          |
-| S6  | An accepted risk in the register has expired                                                         | Backdate an `expires_on`                         | `make risks`                                            | **Implemented as a CI failure, not an alert** |
+| #   | Condition                                                                                            | Synthetic trigger                                         | Links to                                                | Status                                                                                                                                                                                             |
+| --- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1  | Any `audit_log` row with `outcome = 'denied'` on a credential-affecting action, over 5 in 10 minutes | Replay a forged WorkOS webhook signature 6 times          | [Section 4](#4-sev-1-suspected-credential-exposure)     | **NOT ARMED.** Needs a database query on a cadence. The watchdog reads `/metrics` and holds no database credential, deliberately; wiring one into a host script would widen its blast radius.      |
+| S2  | Rejected webhook signature, any occurrence                                                           | Send an unsigned `POST /v1/webhooks/workos`               | [Section 4](#4-sev-1-suspected-credential-exposure)     | **NOT ARMED.** The cheapest remaining row: a counter in the webhook route would make it a watchdog check. Not done because it is a code change to a route this phase does not own.                 |
+| S3  | Quota Redis unreachable (the limiter fails **closed** to 503)                                        | Increment `pullfm_fail_closed_total` and run the watchdog | [Section 7](#7-degraded-modes-what-each-one-looks-like) | **ARMED AND PROVEN.** Delivered in under 1s. Previously invisible from inside the service: the refusal was a bare `catch` that logged nothing and counted nothing.                                 |
+| S4  | 401 rate on token auth over 20/min from one source                                                   | Loop a curl with a bad `pfm_live_` token                  | [Section 8](#8-abuse-and-quota-arson)                   | **NOT ARMED.** `pullfm_http_requests_total{status="401"}` exists, but "from one source" needs a per-source dimension, and client IP as a metric label is unbounded cardinality. Edge-side control. |
+| S5  | Nightly ZAP active scan finds a high or critical                                                     | Introduce a known-vulnerable route on a branch            | [`../security/README.md`](../security/README.md)        | **NOT ARMED.** Belongs to CI rather than the node, like S6.                                                                                                                                        |
+| S6  | An accepted risk in the register has expired                                                         | Backdate an `expires_on`                                  | `make risks`                                            | **N/A. Implemented as a CI failure, not an alert**, which is stricter: it blocks a merge rather than notifying after one.                                                                          |
 
 ### Upstream licence protection (the ones that end the product)
 
-| #   | Condition                                                           | Synthetic trigger                                     | Links to                                                | Status |
-| --- | ------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------- | ------ |
-| U1  | MusicBrainz egress over 1.0 req/s averaged over 60s                 | `MOCK_SYNC_RESOLVE=1` against the mock upstream layer | [Section 8](#8-abuse-and-quota-arson)                   | SPEC   |
-| U2  | iTunes calls over 20/min                                            | Same harness                                          | [Section 8](#8-abuse-and-quota-arson)                   | SPEC   |
-| U3  | **Last.fm cached data over 80 MB** (the licence cap is 100 MB)      | Insert rows until `cache_size_by_provider` crosses it | [Section 9](#9-the-lastfm-100-mb-cap)                   | SPEC   |
-| U4  | Any upstream circuit breaker open for over 15 minutes               | Force the mock to 500                                 | [Section 7](#7-degraded-modes-what-each-one-looks-like) | SPEC   |
-| U5  | Any 403 or explicit revocation response from Last.fm or MusicBrainz | Mock returns 403                                      | **Treat as SEV-3 immediately**                          | SPEC   |
+| #   | Condition                                                           | Synthetic trigger                                                        | Links to                                                | Status                                                                                                                                                                                              |
+| --- | ------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| U1  | MusicBrainz egress over 1.0 req/s averaged over 60s                 | Advance `pullfm_musicbrainz_pacer_dispatched_total` and run the watchdog | [Section 8](#8-abuse-and-quota-arson)                   | **ARMED AND PROVEN.** Delivered in under 1s, with a negative control proving paced traffic stays silent.                                                                                            |
+| U2  | iTunes calls over 20/min                                            | Advance `pullfm_upstream_requests_total{provider="itunes"}`              | [Section 8](#8-abuse-and-quota-arson)                   | **ARMED, NOT PROVEN.** The check is written and its arithmetic is shared with U1, which is proven. The counter is created on first use, so a scrape with no iTunes traffic has no series to mutate. |
+| U3  | **Last.fm cached data over 80 MB** (the licence cap is 100 MB)      | Set `pullfm_cache_bytes{provider="lastfm"}` above the threshold          | [Section 9](#9-the-lastfm-100-mb-cap)                   | **ARMED AND PROVEN.** Delivered in under 1s. The gauge is sampled at most every 5 minutes because it is a database aggregate.                                                                       |
+| U4  | Any upstream circuit breaker open for over 15 minutes               | Set the provider status to degraded and its age past 900s                | [Section 7](#7-degraded-modes-what-each-one-looks-like) | **ARMED AND PROVEN.** Delivered in under 1s, with a negative control proving a brief blip stays silent. Uses the coarse `degraded` status, which does not separate `open` from `half_open`.         |
+| U5  | Any 403 or explicit revocation response from Last.fm or MusicBrainz | Mock returns 403                                                         | **Treat as SEV-3 immediately**                          | **NOT ARMED.** `pullfm_upstream_failures_total` carries the error kind, but a 403 is not distinguished from any other HTTP failure in it. Needs a status-code label to become alertable.            |
 
 ### Scheduled jobs (the ones that make the retention windows true)
 
-These four are different from every other row here in one respect worth stating:
-the **detection** side is built and committed, and only the delivery side is
-missing. Each job unit carries `SuccessExitStatus=2` and
-`OnFailure=pullfm-job-alert@%n.service`, so an exit 1 (could not run, changed
-nothing) already becomes a failed unit, an error-priority journal record and a
-line in `/var/log/pullfm/job-alerts.jsonl`. What does not exist is a channel:
-`/etc/pullfm/alert.env` is not created by anything and `PULLFM_NTFY_URL` is
-unset, so **nobody is told**. Full detail in [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md)
-section 4.
+**This is the row that changed most, so it is worth being precise about which
+half moved.** The detection side was already committed: each unit carries
+`SuccessExitStatus=2` and `OnFailure=pullfm-job-alert@%n.service`, so an exit 1
+becomes a failed unit, an error-priority journal record, and a line in
+`/var/log/pullfm/job-alerts.jsonl`. What was missing was the channel.
 
-They also cannot fire at all yet, for the same reason as D1 and D2: nothing is
-deployed.
+**The channel now exists, and the committed handler was tested against it.**
+`infra/staging/app/pullfm-job-alert` was run against a live ntfy endpoint with an
+`alert.env` in place and the notification was read back off the topic. So the
+delivery leg is proven and unchanged code will use it.
 
-| #   | Condition                                                                      | Synthetic trigger                                              | Links to                             | Status                                                      |
-| --- | ------------------------------------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------ | ----------------------------------------------------------- |
-| J1  | `purge:audit` exits 1, so `audit_log` keeps identifiers past the 90-day window | Point `DATABASE_URL` at an unreachable host and start the unit | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | Handler committed, **no channel, and no compute** to run it |
-| J2  | `sweep:expired` exits 1, so `idempotency_keys` keeps copied API responses      | As above                                                       | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | Handler committed, **no channel, and no compute**           |
-| J3  | `reap:unverified` exits 1, so unconsented WorkOS records accumulate            | Revoke the WorkOS API key and start the unit                   | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | Handler committed, **no channel, and no compute**           |
-| J4  | `warm:cache` exits 1 on every run, so the cache decays and shelf items vanish  | Break the candidate query and start the unit                   | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | Handler committed, **no channel, and no compute**           |
+Two things are still not proven, and neither is a channel problem:
+
+1. **No compute exists**, so no timer has ever fired and no real exit 1 has ever
+   been classified. The handler reads `Result=` and `ExecMainStatus=` off
+   systemd, which cannot be exercised on a developer laptop; when run there it
+   correctly classifies the failure as `unexpected` because there is no unit to
+   ask about.
+2. `/etc/pullfm/alert.env` must be written to each node.
+   `infra/observability/install-alert-env.sh` does it in one command, and
+   `make alerts-armed` answers whether it happened.
+
+The watchdog carries a **backstop** for these four, which is proven: it reads
+the spool and alerts when a job failure was recorded with `delivered:false`. That
+covers the case where the job failed AND the channel was down at that moment,
+which would otherwise be a failure nobody ever hears about.
+
+| #   | Condition                                                                      | Synthetic trigger                                              | Links to                             | Status                                                                                                                                   |
+| --- | ------------------------------------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| J1  | `purge:audit` exits 1, so `audit_log` keeps identifiers past the 90-day window | Point `DATABASE_URL` at an unreachable host and start the unit | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | **ARMED.** Handler + channel proven together. Trigger blocked on compute.                                                                |
+| J2  | `sweep:expired` exits 1, so `idempotency_keys` keeps copied API responses      | As above                                                       | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | **ARMED.** Same. This unit is the one the delivery test was run against.                                                                 |
+| J3  | `reap:unverified` exits 1, so unconsented WorkOS records accumulate            | Revoke the WorkOS API key and start the unit                   | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | **ARMED.** Same.                                                                                                                         |
+| J4  | `warm:cache` exits 1 on every run, so the cache decays and shelf items vanish  | Break the candidate query and start the unit                   | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | **ARMED.** Same. Also partly covered by U1 and by the pacer queue-overflow check.                                                        |
+| Jb  | A job failure was recorded and its own alert did NOT deliver                   | Append a `"delivered":false` line to the spool                 | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | **ARMED AND PROVEN.** Not one of the original rows; added because a channel outage during a job failure is otherwise permanently silent. |
 
 **J1 to J3 are the ones that matter legally**, because until they run the
 windows in `legal/privacy-policy.md` are windows the system applies per run
@@ -246,30 +315,48 @@ rather than per day. J4 is a product-quality alert, not a compliance one.
 
 ### Cost
 
-| #   | Condition                                    | Synthetic trigger                                                            | Links to                             | Status                                                   |
-| --- | -------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------- |
-| C1  | Cloudflare account spend over $10 / over $25 | Cloudflare's own alert; verify by lowering the threshold below current spend | [`RUNBOOK-COST.md`](RUNBOOK-COST.md) | **ARMED, machine-verified by `make cost`**               |
-| C2  | R2 storage charges over $5                   | As above with `r2_storage`                                                   | [`RUNBOOK-COST.md`](RUNBOOK-COST.md) | **ARMED**                                                |
-| C3  | Hetzner spend cap                            | none available                                                               | [`RUNBOOK-COST.md`](RUNBOOK-COST.md) | **VENDOR LIMITATION** - no API, console option not found |
-| C4  | Staging left running over 12 hours           | `./infra/staging-env.sh up` and wait                                         | [`RUNBOOK-COST.md`](RUNBOOK-COST.md) | SPEC - this is the alert that would substitute for C3    |
+| #   | Condition                                    | Synthetic trigger                                                            | Links to                             | Status                                                                                                                                                   |
+| --- | -------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C1  | Cloudflare account spend over $10 / over $25 | Cloudflare's own alert; verify by lowering the threshold below current spend | [`RUNBOOK-COST.md`](RUNBOOK-COST.md) | **ARMED at the vendor, machine-verified by `make cost`**                                                                                                 |
+| C2  | R2 storage charges over $5                   | As above with `r2_storage`                                                   | [`RUNBOOK-COST.md`](RUNBOOK-COST.md) | **ARMED at the vendor**                                                                                                                                  |
+| C3  | Hetzner spend cap                            | none available                                                               | [`RUNBOOK-COST.md`](RUNBOOK-COST.md) | **N/A - VENDOR LIMITATION.** No API, console option not found. C4 is the compensating control.                                                           |
+| C4  | Staging left running over 12 hours           | `./infra/staging-env.sh up` and wait                                         | [`RUNBOOK-COST.md`](RUNBOOK-COST.md) | **ARMED, NOT PROVEN.** The watchdog reads the node's own uptime, which in staging IS the billing window. Not provable on macOS: it needs `/proc/uptime`. |
 
-**C4 is the one worth building first.** It is the alert that compensates for the
-control Hetzner does not sell, it is entirely within our power to build, and the
-data it needs is already what `make cost` computes.
+### Other conditions the watchdog now covers
+
+Not part of the original list, so not counted against it, but they exist and are
+proven, and two of them are the reason a silent failure stays silent:
+
+| Condition                                   | Why it is worth a notification                                                                                                                         |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/metrics` unreachable while up             | Every metric-derived alert on the node is now silent and will stay silent. Without this the operator sees nothing and reads it as nothing being wrong. |
+| Database pool saturated for 3 samples       | Gate 7 asserts no pool exhaustion. It presents to a user as latency with no error anywhere, so it has no other symptom.                                |
+| Warm cache hit ratio below the Gate 2 floor | Every miss is a remote MusicBrainz call, so it is an upstream budget problem before it is a latency one.                                               |
+| MusicBrainz pacer queue overflow            | The rate limit was NOT exceeded, which is the pacer working. But the warm path is dropping candidates, so the cache decays quietly.                    |
+| Any failed `pullfm-*` systemd unit          | Covers A5 and anything else not modelled above. A unit stays failed until reset, so this repeats until handled.                                        |
 
 ### What closes Gate 5
 
-For each row above, a timestamped log showing: the trigger, the ntfy delivery,
-and the elapsed time under 60 seconds. Plus a check that every runbook anchor in
-the "Links to" column resolves. **Sixteen of these cannot be demonstrated until
-the systems they watch exist** (pgBackRest, a replica, a metrics registry, and
-for J1 to J4 any deployed compute at all), which is a real ordering constraint
-and not an excuse: Gate 5 cannot close before Gate 4 and Phase 4.
+For each row, a timestamped log showing the trigger, the ntfy delivery, and the
+elapsed time under 60 seconds. `make alerts` produces exactly that for the rows
+marked proven, and each was under one second.
 
-**The cheapest remaining step is a channel, not a detector.** J1 to J4 already
-detect and classify; they write to a file. One root-owned `alert.env` with an
-ntfy URL in it turns four committed detectors into four delivered alerts, and
-the same file is what every other row will use.
+**What remains, honestly:**
+
+- **Three rows need a checker outside our infrastructure** (A1, A3, A4). This is
+  the single largest remaining gap and it is not solvable from inside the node.
+  `PLAN.md` section 9 already names an external uptime checker as the retained
+  capability behind the deferred monitoring stack; it does not exist yet.
+- **Nine rows need infrastructure that does not exist**: a deployed node (J1 to
+  J4, A5, C4), a restore drill (D3), a replica (D5), a Cloudflare notification
+  or Logpush consumer (A3).
+- **Two rows describe a system we no longer run** (D1, D2, pgBackRest) and one
+  describes a disk we do not own (D4).
+- **Three rows need a code change** to become detectable at all: a rejected-
+  signature counter (S2), a status-code label on upstream failures (U5), and a
+  quantile computation for A6.
+- **The operator must subscribe to the topic.** Nothing here can verify that a
+  notification was seen by a human, and that step has not been performed.
 
 ---
 
@@ -278,15 +365,15 @@ the same file is what every other row will use.
 Degradation is a designed state, so it should be recognisable rather than
 alarming.
 
-| Failure                    | Designed behaviour                                                                    | How you can tell                                                                                                  |
-| -------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| One upstream down          | Circuit breaker opens, that section is omitted                                        | `degraded: true` and the provider named in `unavailableProviders`                                                 |
-| Cache Redis down           | Cache misses, higher latency, correct answers                                         | `/readyz` reports `redis: fail`; latency up, no errors                                                            |
-| **Quota Redis down**       | **Rate limiting fails closed: 503, not unlimited**                                    | A 503 spike with no other symptom. This is deliberate: failing open would silently remove every abuse protection. |
-| Database read-only or slow | Read-only degraded mode: reads served, mutations refused                              | Mutating routes error, reads fine                                                                                 |
-| Database down              | `/readyz` 503, LB removes the target                                                  | `checks.database = "fail"`                                                                                        |
-| Origin unreachable         | Cloudflare maintenance worker serves an honest page                                   | Users see a maintenance page, not a timeout                                                                       |
-| Deploy failing             | **Old container keeps serving.** A migration failure stops the deploy before the swap | Version at `/healthz` stops advancing                                                                             |
+| Failure                    | Designed behaviour                                                                    | How you can tell                                                                                                                                                                                                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One upstream down          | Circuit breaker opens, that section is omitted                                        | `degraded: true` and the provider named in `unavailableProviders`                                                                                                                                                                                                                                                         |
+| Cache Redis down           | Cache misses, higher latency, correct answers                                         | `/readyz` reports `redis: fail`; latency up, no errors                                                                                                                                                                                                                                                                    |
+| **Quota Redis down**       | **Rate limiting fails closed: 503, not unlimited**                                    | `pullfm_fail_closed_total{store="quota_limiter"}` increases, and S3 fires. Before that counter existed the only symptom was a 503 spike indistinguishable from an upstream provider being down, because the refusal was a bare `catch` that logged nothing. Failing closed is deliberate; being unable to see it was not. |
+| Database read-only or slow | Read-only degraded mode: reads served, mutations refused                              | Mutating routes error, reads fine                                                                                                                                                                                                                                                                                         |
+| Database down              | `/readyz` 503, LB removes the target                                                  | `checks.database = "fail"`                                                                                                                                                                                                                                                                                                |
+| Origin unreachable         | Cloudflare maintenance worker serves an honest page                                   | Users see a maintenance page, not a timeout                                                                                                                                                                                                                                                                               |
+| Deploy failing             | **Old container keeps serving.** A migration failure stops the deploy before the swap | Version at `/healthz` stops advancing                                                                                                                                                                                                                                                                                     |
 
 The last row is worth stating positively: a build whose migration fails is a
 build that must not run, and the deploy agent enforces that ordering by running

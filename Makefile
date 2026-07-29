@@ -4,7 +4,7 @@
 # The Makefile is a discovery surface, not a build system: `pnpm` owns the
 # application build and `terraform` owns the infrastructure.
 
-.PHONY: help cost cost-json staging-up staging-down staging-status risks jobs infra-guards
+.PHONY: help cost cost-json staging-up staging-down staging-status risks jobs infra-guards alerts alerts-armed
 
 help:
 	@echo "make cost           run rate + billing-alert check (Gate \$$)"
@@ -15,6 +15,8 @@ help:
 	@echo "make risks          validate the accepted-risk register"
 	@echo "make jobs           assert the background-job schedule matches the runbook"
 	@echo "make infra-guards   prove the scale guard and the origin config (terraform, docker)"
+	@echo "make alerts         PROVE the alert channel delivers, end to end (Gate 5)"
+	@echo "make alerts-armed   is this machine able to notify anyone at all?"
 
 # Exits non-zero when a required billing alert is missing or disabled.
 cost:
@@ -47,3 +49,19 @@ jobs:
 infra-guards:
 	@./infra/scripts/check-scale-guard.sh
 	@./infra/scripts/check-origin-config.sh
+
+# Gate 5 evidence, generated rather than asserted. Both scripts publish through
+# the real sender into a real ntfy and read the message back; neither one checks
+# that a file exists or a variable is set, because that class of check is what
+# produced two of the three control failures recorded in docs/SCORECARD.md.
+#
+# Needs docker. Skips (exit 77) rather than failing where it is unavailable, so
+# a checkout without docker does not report a broken alert path.
+alerts:
+	@./infra/observability/alert-selftest.sh
+	@./infra/observability/watchdog-selftest.sh
+
+# The one question that matters at 3am, asked of the FILE rather than of
+# 1Password: "can this machine tell anyone anything right now?"
+alerts-armed:
+	@./infra/observability/install-alert-env.sh --check

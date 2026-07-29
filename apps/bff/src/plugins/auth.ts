@@ -123,6 +123,18 @@ export interface AuthPluginOptions {
   /** Fails closed when the quota store is unreachable. */
   readonly failClosed?: boolean;
   /**
+   * Called when a fail-closed path actually fires, with which store failed.
+   *
+   * This exists because the failure it reports is INVISIBLE otherwise. When the
+   * quota Redis is unreachable the limiter refuses the request, correctly, and
+   * the user gets a 503 that is indistinguishable from an upstream provider
+   * being down. Nothing was logged, nothing was counted, and the only clue was
+   * the word "rate limiter" inside a client-facing message. S3 in
+   * docs/RUNBOOK-INCIDENT.md is exactly this condition and it was, until now,
+   * unobservable from inside the service.
+   */
+  readonly onFailClosed?: (store: "rate limiter" | "session store") => void;
+  /**
    * Opens the sealed session cookie. Absent disables the cookie transport
    * entirely, which is a valid deployment: bearer-only is the stricter mode.
    */
@@ -192,6 +204,7 @@ async function authPlugin(
       // must assume says "revoked" for the security-relevant direction; the
       // alternative is honouring a session the user believes they ended.
       if (opts.failClosed !== false) {
+        opts.onFailClosed?.("session store");
         throw errors.upstreamUnavailable("session store");
       }
       return false;
@@ -290,6 +303,12 @@ async function authPlugin(
     } catch {
       // A rate limiter that fails open is not a rate limiter. THREAT-MODEL T11
       // is about this exact failure being silent; here it is explicit.
+      //
+      // "Explicit" used to mean explicit to the CALLER only. The 503 it raises
+      // is the same shape as an upstream provider outage, so from the outside a
+      // dead quota store looked like a flaky music API. The notification is
+      // what makes S3 detectable rather than merely designed.
+      opts.onFailClosed?.("rate limiter");
       throw errors.upstreamUnavailable("rate limiter");
     }
 

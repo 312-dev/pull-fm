@@ -1,0 +1,32 @@
+[Unit]
+Description=Turn Pull.fm metric conditions into notifications
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-INCIDENT.md
+After=network-online.target
+
+# The watchdog is useless before the application exists and harmless after it
+# stops, so it is not Requires= or BindsTo= on anything: a node with no
+# container should still run it, notice /healthz is not answering, and say so.
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/pullfm/alert.env
+ExecStart=/usr/local/bin/pullfm-watchdog
+
+# NOT SuccessExitStatus= and NOT OnFailure=, unlike the four job units, and the
+# asymmetry is deliberate. Those four exist to enforce retention windows, so a
+# unit that could not run is itself an alertable condition. This one exists to
+# SEND alerts, so wiring its failure into the alert path would mean a channel
+# outage tries to report itself through the channel that is out. It exits 0
+# unconditionally and a watchdog that stopped watching shows up as a stale
+# `last elapse` in `systemctl list-timers`, plus the absence of the heartbeat
+# line in the journal.
+RuntimeMaxSec=50
+
+# It reads /metrics over loopback and writes two small state files. Nothing
+# else, so nothing else is permitted.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pullfm /var/log/pullfm
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

@@ -1,0 +1,462 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# Pull.fm watchdog. Turns the conditions in docs/RUNBOOK-INCIDENT.md section 6
+# into notifications, by scraping the node's own surfaces once a minute.
+#
+#   pullfm-watchdog [--once] [--dry-run]
+#
+# Started by pullfm-watchdog.timer. Every check here reads a number the service
+# already publishes and compares it to a threshold this repository already
+# states somewhere else; no check invents a policy of its own.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS CAN AND CANNOT SEE, STATED UP FRONT
+#
+# It runs ON the node. That gives it the cheapest possible access to /metrics
+# (loopback, no credential) and it gives it one blind spot that no amount of
+# code here will close:
+#
+#   A WATCHDOG ON A DEAD NODE DOES NOT ALERT.
+#
+# So A1 (health check fails), A3 (edge 5xx rate) and A4 (origin unreachable)
+# are NOT armed by this file and cannot be. They need a checker outside our
+# infrastructure, which docs/PLAN.md section 9 already names as the retained
+# capability behind the deferred self-hosted monitoring stack. What this file
+# covers is the large class of conditions where the service is up and something
+# inside it is wrong, which is every row in section 6 that a healthy-looking
+# node can be in the middle of.
+#
+# The local /healthz check below is therefore a BACKSTOP for a crashed
+# container on a live node, not a substitute for an external probe, and it says
+# so in its own alert text so nobody reads it as one.
+#
+# ---------------------------------------------------------------------------
+# WHY RATES ARE COMPUTED FROM A STATE FILE
+#
+# Prometheus counters are monotonic; a rate needs two readings. There is no
+# Prometheus here (deferred, PLAN section 9), so the previous reading is kept in
+# a state file and the delta is divided by the elapsed wall time. That is worth
+# one caution: after a process restart the counters reset to zero, and a naive
+# delta would go NEGATIVE. A negative delta is treated as a restart and skipped
+# rather than clamped to zero, because clamping would report a full interval of
+# traffic as having happened in the instant after a restart.
+# ---------------------------------------------------------------------------
+set -uo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ALERT=${PULLFM_ALERT_BIN:-/usr/local/bin/pullfm-alert}
+[ -x "${ALERT}" ] || ALERT="${HERE}/pullfm-alert"
+
+METRICS_URL=${PULLFM_METRICS_URL:-http://127.0.0.1:8080/metrics}
+READYZ_URL=${PULLFM_READYZ_URL:-http://127.0.0.1:8080/readyz}
+HEALTHZ_URL=${PULLFM_HEALTHZ_URL:-http://127.0.0.1:8080/healthz}
+STATE=${PULLFM_WATCHDOG_STATE:-/var/lib/pullfm/watchdog.state}
+JOB_SPOOL=${PULLFM_JOB_SPOOL:-/var/log/pullfm/job-alerts.jsonl}
+RUNBOOK=${PULLFM_RUNBOOK_BASE:-https://github.com/312-dev/pull-fm/blob/main/docs}
+
+DRY_RUN=false
+for arg in "$@"; do
+  [ "${arg}" = "--dry-run" ] && DRY_RUN=true
+done
+
+# Thresholds. Each one is a number this repository already commits to somewhere,
+# named here rather than chosen here.
+MB_RATE_MAX=${PULLFM_MB_RATE_MAX:-1.0}            # MusicBrainz: 1 req/s, per IP
+ITUNES_PER_MIN_MAX=${PULLFM_ITUNES_PER_MIN_MAX:-20} # iTunes: ~20/min
+LASTFM_BYTES_MAX=${PULLFM_LASTFM_BYTES_MAX:-83886080} # 80 MB of a 100 MB cap
+DEGRADED_MAX_S=${PULLFM_DEGRADED_MAX_S:-900}      # U4: breaker open over 15 min
+POOL_WAITING_MAX=${PULLFM_POOL_WAITING_MAX:-0}    # Gate 7: no pool exhaustion
+CACHE_HIT_MIN=${PULLFM_CACHE_HIT_MIN:-0.90}       # Gate 2: warm hit >= 90%
+STAGING_MAX_UPTIME_S=${PULLFM_STAGING_MAX_UPTIME_S:-43200} # C4: 12 hours
+
+FIRED=0
+CHECKED=0
+
+fire() {
+  local key="$1" title="$2" runbook="$3" message="$4" priority="${5:-high}"
+  FIRED=$((FIRED + 1))
+  if [ "${DRY_RUN}" = true ]; then
+    echo "WOULD FIRE [${key}] ${title}"
+    echo "  ${message}"
+    return 0
+  fi
+  "${ALERT}" --key "${key}" --title "${title}" --priority "${priority}" \
+    --runbook "${runbook}" --message "${message}"
+}
+
+clear_alert() {
+  local key="$1" title="$2"
+  [ "${DRY_RUN}" = true ] && return 0
+  "${ALERT}" --key "${key}" --title "${title}" --resolve --message "condition cleared" >/dev/null 2>&1
+}
+
+# --- metric access ---------------------------------------------------------
+SCRAPE=""
+
+# Reads one sample. `name` may include a full `{label="v"}` selector. Returns
+# empty when the series is absent, which every caller distinguishes from zero:
+# "the service does not publish this" and "the value is zero" are different
+# facts and conflating them is how a broken exporter reads as a healthy system.
+metric() {
+  printf '%s\n' "${SCRAPE}" | awk -v key="$1" '
+    /^#/ { next }
+    {
+      i = index($0, " ")
+      if (i == 0) next
+      if (substr($0, 1, i - 1) == key) { print substr($0, i + 1); exit }
+    }'
+}
+
+# --- state -----------------------------------------------------------------
+state_get() {
+  [ -f "${STATE}" ] || return 1
+  awk -F'=' -v k="$1" '$1 == k { print $2; found = 1 } END { exit !found }' "${STATE}"
+}
+
+STATE_NEW=""
+state_put() { STATE_NEW="${STATE_NEW}$1=$2"$'\n'; }
+
+state_flush() {
+  mkdir -p "$(dirname "${STATE}")" 2>/dev/null || true
+  printf '%s' "${STATE_NEW}" >"${STATE}.tmp" 2>/dev/null &&
+    mv -f "${STATE}.tmp" "${STATE}" 2>/dev/null || true
+}
+
+# Per-second rate from two readings. Prints nothing when there is no usable
+# previous reading, or when the counter went backwards (a restart).
+rate_per_s() {
+  local now_v="$1" prev_v="$2" elapsed="$3"
+  [ -n "${prev_v}" ] || return 1
+  [ "${elapsed}" -gt 0 ] 2>/dev/null || return 1
+  awk -v a="${now_v}" -v b="${prev_v}" -v t="${elapsed}" \
+    'BEGIN { d = a - b; if (d < 0) exit 1; printf "%.4f", d / t }'
+}
+
+gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+lt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a < b) }'; }
+
+NOW=$(date -u +%s)
+PREV_AT=$(state_get at || echo "")
+ELAPSED=0
+[ -n "${PREV_AT}" ] && ELAPSED=$((NOW - PREV_AT))
+state_put at "${NOW}"
+
+# ===========================================================================
+# 1. Is the application answering at all?  (local backstop, NOT A1)
+# ===========================================================================
+CHECKED=$((CHECKED + 1))
+HEALTH_CODE=$(curl -sS -o /dev/null -m 5 -w '%{http_code}' "${HEALTHZ_URL}" 2>/dev/null || echo 000)
+if [ "${HEALTH_CODE}" != "200" ]; then
+  # Two consecutive failures, 60s apart, which is what the timer interval makes
+  # of a counter in the state file. One failed probe during a deploy swap is not
+  # an incident and paging on it is how a channel gets muted.
+  MISSES=$(state_get health_misses || echo 0)
+  MISSES=$((MISSES + 1))
+  state_put health_misses "${MISSES}"
+  if [ "${MISSES}" -ge 2 ]; then
+    fire "local-healthz" "Pull.fm origin not answering on this node" \
+      "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+      "GET ${HEALTHZ_URL} returned ${HEALTH_CODE} on ${MISSES} consecutive checks.
+This is the NODE-LOCAL backstop, not the external health check (A1). If the
+whole node is down, nothing sent this and no alert exists. Check the container
+first: docker compose -f /opt/pullfm/docker-compose.yml ps"
+  fi
+  state_flush
+  exit 0
+fi
+state_put health_misses 0
+clear_alert "local-healthz" "Pull.fm origin not answering on this node"
+
+# ===========================================================================
+# 2. Scrape
+# ===========================================================================
+# -f, and it is load-bearing. Without it a 404 or a 502 from the metrics route
+# hands its ERROR BODY to the parser, which finds no samples in it and reports
+# every check as "series absent" - silently, and indistinguishably from a
+# healthy system with nothing to say. Found by the negative case in
+# watchdog-selftest.sh, which is the reason that case exists.
+SCRAPE=$(curl -fsS -m 10 \
+  ${PULLFM_METRICS_TOKEN:+-H "Authorization: Bearer ${PULLFM_METRICS_TOKEN}"} \
+  "${METRICS_URL}" 2>/dev/null || true)
+
+if [ -z "${SCRAPE}" ]; then
+  # The service is alive and unobservable. Worth saying out loud: every check
+  # below this line is now silent, so a scrape failure that went unreported
+  # would look exactly like a system with nothing wrong with it.
+  fire "metrics-unreachable" "Pull.fm /metrics is not answering" \
+    "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+    "/healthz is 200 but ${METRICS_URL} returned nothing. Every metric-derived
+alert on this node is now silent and will stay silent. If METRICS_TOKEN was
+recently set, this watchdog needs it too (PULLFM_METRICS_TOKEN)."
+  state_flush
+  exit 0
+fi
+clear_alert "metrics-unreachable" "Pull.fm /metrics is not answering"
+
+# ===========================================================================
+# 3. A2  a dependency is failing
+# ===========================================================================
+for dep in database redis; do
+  CHECKED=$((CHECKED + 1))
+  v=$(metric "pullfm_dependency_up{dependency=\"${dep}\"}")
+  [ -n "${v}" ] || continue
+  if [ "${v}" = "0" ]; then
+    fire "dep-${dep}" "Pull.fm dependency ${dep} is failing" \
+      "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+      "/readyz reports ${dep}=fail. The load balancer will remove this node; it
+will NOT restart, which is correct. See section 7 for what this degrades into."
+  else
+    clear_alert "dep-${dep}" "Pull.fm dependency ${dep} is failing"
+  fi
+done
+
+# ===========================================================================
+# 4. S3  a fail-closed dependency refused traffic
+#
+# The single most valuable check in this file. When the quota Redis is
+# unreachable the limiter refuses requests, correctly, and the user sees a 503
+# that is shaped exactly like an upstream music provider being down. Availability
+# degrades and nothing else changes. Until the counter existed there was no
+# symptom at all from the inside.
+# ===========================================================================
+for store in quota_limiter session_store; do
+  CHECKED=$((CHECKED + 1))
+  v=$(metric "pullfm_fail_closed_total{store=\"${store}\"}")
+  [ -n "${v}" ] || continue
+  prev=$(state_get "failclosed_${store}" || echo "")
+  state_put "failclosed_${store}" "${v}"
+  [ -n "${prev}" ] || continue
+  if gt "${v}" "${prev}"; then
+    delta=$(awk -v a="${v}" -v b="${prev}" 'BEGIN { printf "%d", a - b }')
+    fire "failclosed-${store}" "Pull.fm is failing closed on the ${store}" \
+      "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+      "${delta} request(s) were REFUSED in the last ${ELAPSED}s because the
+${store} was unreachable. This is availability loss with no error of its own:
+users get a 503 indistinguishable from an upstream outage. Check the quota Redis
+(the noeviction instance) first."
+  fi
+done
+
+# ===========================================================================
+# 5. U1  MusicBrainz egress over 1 req/s
+#
+# The provider with no second supplier. Exceeding this is not a performance
+# problem, it is the SEV-3 that ends the product.
+# ===========================================================================
+CHECKED=$((CHECKED + 1))
+mb=$(metric "pullfm_musicbrainz_pacer_dispatched_total")
+if [ -n "${mb}" ]; then
+  prev=$(state_get mb_dispatched || echo "")
+  state_put mb_dispatched "${mb}"
+  if r=$(rate_per_s "${mb}" "${prev}" "${ELAPSED}"); then
+    if gt "${r}" "${MB_RATE_MAX}"; then
+      fire "u1-musicbrainz-rate" "Pull.fm MusicBrainz egress over budget" \
+        "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+        "MusicBrainz egress measured at ${r} req/s over ${ELAPSED}s, against a
+ceiling of ${MB_RATE_MAX}/s. MusicBrainz blocks by IP with no appeal and there is
+no second supplier of MBIDs. Treat as SEV-3: stop the warmer before diagnosing."
+    else
+      clear_alert "u1-musicbrainz-rate" "Pull.fm MusicBrainz egress over budget"
+    fi
+  fi
+fi
+
+CHECKED=$((CHECKED + 1))
+mbrej=$(metric "pullfm_musicbrainz_pacer_rejected_total")
+if [ -n "${mbrej}" ]; then
+  prev=$(state_get mb_rejected || echo "")
+  state_put mb_rejected "${mbrej}"
+  if [ -n "${prev}" ] && gt "${mbrej}" "${prev}"; then
+    fire "mb-queue-overflow" "Pull.fm MusicBrainz pacer queue overflowed" \
+      "${RUNBOOK}/RUNBOOK-JOBS.md" \
+      "The MusicBrainz pacer rejected work because its queue was full. Nothing
+exceeded the rate limit - that is the pacer doing its job - but the warm path is
+dropping candidates, so the cache will decay. Not urgent." "default"
+  fi
+fi
+
+# ===========================================================================
+# 6. U2  iTunes over its per-minute budget
+# ===========================================================================
+CHECKED=$((CHECKED + 1))
+it=$(metric 'pullfm_upstream_requests_total{provider="itunes"}')
+if [ -n "${it}" ]; then
+  prev=$(state_get itunes_requests || echo "")
+  state_put itunes_requests "${it}"
+  if r=$(rate_per_s "${it}" "${prev}" "${ELAPSED}"); then
+    per_min=$(awk -v r="${r}" 'BEGIN { printf "%.2f", r * 60 }')
+    if gt "${per_min}" "${ITUNES_PER_MIN_MAX}"; then
+      fire "u2-itunes-rate" "Pull.fm iTunes calls over budget" \
+        "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+        "iTunes measured at ${per_min} calls/min against a ceiling of
+${ITUNES_PER_MIN_MAX}. Apple's limit is unstated and their enforcement has no
+appeals process."
+    else
+      clear_alert "u2-itunes-rate" "Pull.fm iTunes calls over budget"
+    fi
+  fi
+fi
+
+# ===========================================================================
+# 7. U2/U4  upstream refusals and breakers
+# ===========================================================================
+CHECKED=$((CHECKED + 1))
+while read -r line; do
+  [ -n "${line}" ] || continue
+  provider=${line%%=*}
+  age=${line##*=}
+  status=$(metric "pullfm_upstream_provider_status{provider=\"${provider}\"}")
+  [ "${status}" = "1" ] || {
+    clear_alert "u4-breaker-${provider}" "Pull.fm ${provider} breaker open"
+    continue
+  }
+  if [ "${age%%.*}" -gt "${DEGRADED_MAX_S}" ] 2>/dev/null; then
+    fire "u4-breaker-${provider}" "Pull.fm ${provider} breaker open" \
+      "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+      "${provider} has been degraded for ${age}s (threshold ${DEGRADED_MAX_S}s).
+The affected feed section is being omitted and responses carry degraded: true,
+so users are being served a smaller product rather than an error."
+  fi
+done <<EOF
+$(printf '%s\n' "${SCRAPE}" | awk '
+  /^pullfm_upstream_provider_status_age_seconds\{/ {
+    match($0, /provider="[^"]*"/)
+    p = substr($0, RSTART + 10, RLENGTH - 11)
+    print p "=" $NF
+  }')
+EOF
+
+# ===========================================================================
+# 8. U3  the Last.fm 100 MB licence cap
+# ===========================================================================
+CHECKED=$((CHECKED + 1))
+lf=$(metric 'pullfm_cache_bytes{provider="lastfm"}')
+if [ -n "${lf}" ] && [ "${lf}" != "-1" ]; then
+  if gt "${lf}" "${LASTFM_BYTES_MAX}"; then
+    mb_used=$(awk -v b="${lf}" 'BEGIN { printf "%.1f", b / 1048576 }')
+    fire "u3-lastfm-cap" "Pull.fm Last.fm cache approaching the licence cap" \
+      "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+      "Last.fm cached data is ${mb_used} MB. ToS 4.3.4 caps it at 100 MB without
+written consent, so this is a LICENCE breach and not a disk problem. Remediation
+is LRU eviction of Last.fm rows, never a bigger disk."
+  else
+    clear_alert "u3-lastfm-cap" "Pull.fm Last.fm cache approaching the licence cap"
+  fi
+fi
+
+# ===========================================================================
+# 9. Gate 7  pool saturation
+# ===========================================================================
+CHECKED=$((CHECKED + 1))
+waiting=$(metric "pullfm_db_pool_waiting")
+if [ -n "${waiting}" ]; then
+  prev=$(state_get pool_waiting_streak || echo 0)
+  if gt "${waiting}" "${POOL_WAITING_MAX}"; then
+    streak=$((prev + 1))
+    state_put pool_waiting_streak "${streak}"
+    # Three consecutive samples, because a single burst of queueing is normal
+    # and sustained queueing is the exhaustion Gate 7 asserts does not happen.
+    if [ "${streak}" -ge 3 ]; then
+      max=$(metric "pullfm_db_pool_max")
+      fire "pool-saturation" "Pull.fm database pool is saturated" \
+        "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+        "${waiting} caller(s) queued for a connection on ${streak} consecutive
+checks, against DATABASE_POOL_MAX=${max:-unknown}. This is OUR ceiling, not
+Neon's: the transaction pooler is upstream of this number. It presents to a user
+as latency with no error anywhere."
+    fi
+  else
+    state_put pool_waiting_streak 0
+    clear_alert "pool-saturation" "Pull.fm database pool is saturated"
+  fi
+fi
+
+# ===========================================================================
+# 10. Gate 2  warm cache hit rate
+# ===========================================================================
+CHECKED=$((CHECKED + 1))
+xw=$(metric "pullfm_crosswalk_warm_hit_ratio")
+if [ -n "${xw}" ] && gt "${xw}" 0; then
+  if lt "${xw}" "${CACHE_HIT_MIN}"; then
+    fire "gate2-warm-hit" "Pull.fm warm cache hit rate below the Gate 2 floor" \
+      "${RUNBOOK}/RUNBOOK-INCIDENT.md" \
+      "Crosswalk warm hit ratio is ${xw}, below the Gate 2 floor of
+${CACHE_HIT_MIN}. Every miss is a remote MusicBrainz call, so this is an upstream
+budget problem before it is a latency one." "default"
+  else
+    clear_alert "gate2-warm-hit" "Pull.fm warm cache hit rate below the Gate 2 floor"
+  fi
+fi
+
+# ===========================================================================
+# 11. J1-J4 backstop  a job alert that was recorded and NOT delivered
+#
+# The job units deliver through their own OnFailure handler. This does not
+# duplicate that; it catches the case where the handler ran and its delivery
+# FAILED, which the spool records as delivered:false. Without this, a channel
+# outage during a job failure means the failure is never mentioned again.
+# ===========================================================================
+CHECKED=$((CHECKED + 1))
+if [ -f "${JOB_SPOOL}" ]; then
+  lines=$(wc -l <"${JOB_SPOOL}" 2>/dev/null | tr -d ' ')
+  prev=$(state_get job_spool_lines || echo "")
+  state_put job_spool_lines "${lines}"
+  if [ -n "${prev}" ] && [ "${lines}" -gt "${prev}" ] 2>/dev/null; then
+    undelivered=$(tail -n "$((lines - prev))" "${JOB_SPOOL}" 2>/dev/null |
+      grep -c '"delivered":false' || true)
+    if [ "${undelivered:-0}" -gt 0 ] 2>/dev/null; then
+      fire "job-alert-undelivered" "Pull.fm job failed AND the alert did not send" \
+        "${RUNBOOK}/RUNBOOK-JOBS.md" \
+        "${undelivered} scheduled-job failure(s) were recorded in ${JOB_SPOOL}
+with delivered:false. A retention job could not run AND nobody was told at the
+time. Read the spool: tail ${JOB_SPOOL}"
+    fi
+  fi
+fi
+
+# ===========================================================================
+# 12. Any failed pullfm unit, which covers A5 and anything not modelled above
+# ===========================================================================
+if command -v systemctl >/dev/null 2>&1; then
+  CHECKED=$((CHECKED + 1))
+  failed=$(systemctl list-units --state=failed --no-legend 'pullfm-*' 2>/dev/null |
+    awk '{ print $1 }' | tr '\n' ' ' | sed 's/ *$//')
+  if [ -n "${failed}" ]; then
+    fire "failed-units" "Pull.fm systemd units are in a failed state" \
+      "${RUNBOOK}/RUNBOOK-JOBS.md" \
+      "systemctl --failed lists: ${failed}
+A unit stays failed until someone resets it, so this repeats until handled.
+journalctl -t pullfm-job-alert -p err"
+  else
+    clear_alert "failed-units" "Pull.fm systemd units are in a failed state"
+  fi
+fi
+
+# ===========================================================================
+# 13. C4  staging left running
+#
+# The alert that substitutes for the spend cap Hetzner does not sell (C3).
+# Node uptime is the reading, because in staging the node's whole life IS the
+# billing window: `staging-env.sh up` creates it and `down` destroys it.
+# ===========================================================================
+if [ "${PULLFM_ALERT_ENV_LABEL:-}" = "staging" ] || [ "${PULLFM_DEPLOY_ENV:-}" = "staging" ]; then
+  CHECKED=$((CHECKED + 1))
+  if [ -r /proc/uptime ]; then
+    up=$(awk '{ printf "%d", $1 }' /proc/uptime)
+    if [ "${up}" -gt "${STAGING_MAX_UPTIME_S}" ]; then
+      hours=$((up / 3600))
+      fire "c4-staging-running" "Pull.fm staging has been up for ${hours}h" \
+        "${RUNBOOK}/RUNBOOK-COST.md" \
+        "This node has been running ${hours} hours. Staging is ephemeral and
+billed by the hour, and Hetzner sells no spend cap (C3 is a recorded vendor
+limitation), so this alert is the control that replaces one.
+Destroy it with: ./infra/staging-env.sh down" "default"
+    else
+      clear_alert "c4-staging-running" "Pull.fm staging has been up too long"
+    fi
+  fi
+fi
+
+state_flush
+echo "pullfm-watchdog: ${CHECKED} checks, ${FIRED} fired, elapsed since last run ${ELAPSED}s"
+exit 0

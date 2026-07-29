@@ -16,6 +16,9 @@ import type { Config } from "./config.js";
 import { AuditLog } from "./lib/audit.js";
 import { Database } from "./lib/db.js";
 import { SigningKeys } from "./lib/keys.js";
+import { createMaintenanceGate } from "./lib/maintenance.js";
+import { Registry } from "./lib/metrics.js";
+import { installCollectors, recordProviderEvent } from "./lib/observability.js";
 import { createRedis } from "./lib/redis.js";
 import { SessionCookieCipher } from "./lib/session-cookie.js";
 import {
@@ -149,11 +152,57 @@ export function buildServices(
     providers: overrides.providers ?? buildProviderRegistry(cfg),
   });
 
+  /**
+   * The metrics registry, created BEFORE the upstream layer because it has to
+   * be: `ProviderClient` takes its observer as a construction option, so a
+   * registry built afterwards could only ever be attached to a second set of
+   * clients. Every process that calls `buildServices` gets one, including the
+   * four scheduled jobs, which is deliberate - a job container is where the
+   * MusicBrainz pacer actually does its work.
+   */
+  const metrics = new Registry();
+
+  /**
+   * The maintenance gate. One object, consulted by the request hook, by
+   * `GET /v1/config` and by `/metrics`, so those three can never disagree about
+   * whether the service is refusing traffic. Three independent reads of the
+   * same environment variable is how a status endpoint ends up cheerfully
+   * reporting "available" during an outage it is itself serving 503s for.
+   */
+  const maintenance = createMaintenanceGate({
+    envFlag: cfg.MAINTENANCE_MODE,
+    flagFile: cfg.MAINTENANCE_FLAG_FILE,
+    pollMs: cfg.MAINTENANCE_POLL_MS,
+  });
+
   const upstream = buildUpstream(cfg, db, {
     ...(overrides.upstreamFetch === undefined
       ? {}
       : { fetchImpl: overrides.upstreamFetch }),
     log,
+    onEvent: (event) => {
+      recordProviderEvent(metrics, event);
+    },
+  });
+
+  installCollectors(metrics, {
+    buildSha: cfg.BUILD_SHA,
+    deployEnv: cfg.DEPLOY_ENV,
+    maintenance: () => maintenance.active(),
+    poolStats: () => {
+      const s = db.stats();
+      return { total: s.total, idle: s.idle, waiting: s.waiting, max: s.max };
+    },
+    cacheStats: (provider) => upstream.cache.stats(provider as never),
+    cacheCoalescing: () => upstream.cache.coalescing,
+    crosswalkStats: () => upstream.crosswalk.stats(),
+    pacerStats: () => ({
+      ...upstream.musicbrainzLimiter.stats,
+      queueDepth: upstream.musicbrainzLimiter.queueDepth,
+    }),
+    providerStatus: () => upstream.status(),
+    cacheBytes: async (provider) =>
+      (await upstream.cacheStore.sizeOf(provider as never)).bytes,
   });
 
   const discovery = new DiscoveryService(upstream, connections, keys);
@@ -166,6 +215,8 @@ export function buildServices(
   return {
     cfg,
     db,
+    metrics,
+    maintenance,
     cacheRedis,
     quotaRedis,
     keys,

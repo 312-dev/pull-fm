@@ -30,10 +30,27 @@ import type { UserService } from "../services/users.js";
 import type { UpstreamBundle } from "../services/upstream.js";
 import type { WishlistService } from "../services/wishlist.js";
 import type { WorkOsClient } from "../services/workos.js";
+import type { MaintenanceGate } from "../lib/maintenance.js";
+import type { Registry } from "../lib/metrics.js";
 
 export interface Services {
   readonly cfg: Config;
   readonly db: Database;
+  /**
+   * The metrics registry for this process.
+   *
+   * On the bundle rather than a module singleton so a test can build two
+   * applications without their counters bleeding into each other, and so a job
+   * container has its own - which matters, because the MusicBrainz pacer's
+   * numbers are produced in the job process, not the API one.
+   */
+  readonly metrics: Registry;
+  /**
+   * Whether the service is refusing application traffic, and which lever says
+   * so. The request hook, `GET /v1/config` and `/metrics` all read THIS, so
+   * they cannot disagree.
+   */
+  readonly maintenance: MaintenanceGate;
   readonly cacheRedis: Redis;
   readonly quotaRedis: Redis;
   readonly keys: SigningKeys;

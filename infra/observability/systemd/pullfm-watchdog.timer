@@ -1,0 +1,26 @@
+[Unit]
+Description=Run the Pull.fm watchdog every minute
+
+[Timer]
+# EVERY MINUTE, and the number is load-bearing in two directions.
+#
+# Gate 5 asks for a synthetic trigger to reach ntfy within 60 seconds. A polling
+# watchdog cannot beat its own interval, so any period longer than a minute
+# would fail the gate by construction for every condition on this path.
+#
+# It is not shorter than a minute because the sender deduplicates on a one-hour
+# window and the rate checks divide a counter delta by elapsed wall time. At a
+# ten second interval the MusicBrainz rate would be computed over a window
+# shorter than the pacer's own one-second spacing, and a single burst would read
+# as a sustained breach of a limit that was never exceeded.
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+# FALSE. A missed minute is a minute of not-watching that has already passed;
+# re-running it on boot would evaluate the previous boot's counters against this
+# boot's zeroed ones, which the rate code would discard anyway.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

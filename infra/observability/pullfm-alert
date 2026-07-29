@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# Pull.fm alert sender. THE notification channel, and the only one.
+#
+#   pullfm-alert --key <dedupe-key> --title <title> [options] [--message <text>]
+#
+# Everything that wants to tell the operator something goes through this file,
+# so there is exactly one place that knows what the channel is, one place that
+# knows how to authenticate to it, and one place to change when it moves.
+#
+# ---------------------------------------------------------------------------
+# WHY THE CHANNEL IS NOT IN THIS FILE
+#
+# The transport is ntfy. The INSTANCE and the TOPIC are not, and must never be,
+# committed: this repository is public, and on ntfy the topic name is the
+# capability. Anyone who learns the topic can read every alert it carries and
+# publish forgeries into it. So the endpoint arrives at runtime, from
+# /etc/pullfm/alert.env, which is written by infra/observability/install-alert-env.sh
+# out of 1Password and never touches git.
+#
+# See infra/observability/README.md for the reasoning about which ntfy instance
+# should be behind that URL, which is a security decision rather than a
+# preference.
+#
+# ---------------------------------------------------------------------------
+# THE FOUR SURFACES, IN ORDER OF HOW MUCH CONFIGURATION THEY NEED
+#
+#   1. The journal, at error priority, tagged `pullfm-alert`, always. Costs
+#      nothing and exists on any node.
+#   2. The spool, /var/log/pullfm/alerts.jsonl, always. One JSON object per
+#      alert including whether delivery worked, so "nobody was told" is itself
+#      a recorded fact rather than an absence of one.
+#   3. ntfy, when alert.env configures it.
+#   4. The caller's exit code, so a watchdog can tell a delivered alert from an
+#      undelivered one and does not have to guess.
+#
+# ---------------------------------------------------------------------------
+# DEDUPLICATION IS NOT A NICETY HERE
+#
+# The watchdog runs every minute. A condition that stays true for a day is 1440
+# notifications, and an operator who mutes the topic has exactly the same
+# coverage as an operator who never armed it. Every alert therefore carries a
+# --key, and a key that fired inside PULLFM_ALERT_REPEAT_S (default 3600) is
+# suppressed, with the suppression recorded in the spool so the record stays
+# complete. --resolve clears the key and sends one recovery notice, so a
+# condition that fixes itself says so rather than going quiet in a way that is
+# indistinguishable from the alerter dying.
+#
+# EXIT CODES
+#   0  delivered
+#   3  no channel configured (journal and spool were still written)
+#   4  a channel is configured and delivery FAILED
+#   5  suppressed as a duplicate inside the repeat window
+#
+# Never non-zero for a bad argument once the message exists: an alerter that
+# refuses to alert because of its own argument handling is the failure mode this
+# whole file exists to avoid.
+# ---------------------------------------------------------------------------
+set -uo pipefail
+
+ALERT_ENV=${PULLFM_ALERT_ENV:-/etc/pullfm/alert.env}
+SPOOL_DIR=${PULLFM_ALERT_SPOOL_DIR:-/var/log/pullfm}
+STATE_DIR=${PULLFM_ALERT_STATE_DIR:-/var/lib/pullfm/alerts}
+SPOOL=${SPOOL_DIR}/alerts.jsonl
+
+KEY=""
+TITLE=""
+MESSAGE=""
+PRIORITY=high
+TAGS=rotating_light
+RUNBOOK=""
+RESOLVE=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --key) KEY=${2:-}; shift 2 ;;
+    --title) TITLE=${2:-}; shift 2 ;;
+    --message) MESSAGE=${2:-}; shift 2 ;;
+    --priority) PRIORITY=${2:-high}; shift 2 ;;
+    --tags) TAGS=${2:-rotating_light}; shift 2 ;;
+    --runbook) RUNBOOK=${2:-}; shift 2 ;;
+    --resolve) RESOLVE=true; shift ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+
+[ -n "${TITLE}" ] || TITLE="Pull.fm alert"
+[ -n "${KEY}" ] || KEY=$(printf '%s' "${TITLE}" | tr -c 'a-zA-Z0-9' '_')
+# Only the characters that are safe in a filename. The key reaches the
+# filesystem, so it is sanitised rather than trusted.
+SAFE_KEY=$(printf '%s' "${KEY}" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-96)
+
+# stdin is accepted so a caller can pipe a long body without quoting it.
+if [ -z "${MESSAGE}" ] && [ ! -t 0 ]; then
+  MESSAGE=$(cat 2>/dev/null || true)
+fi
+[ -n "${MESSAGE}" ] || MESSAGE="(no detail)"
+
+WHEN=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+NOW=$(date -u +%s)
+HOST=$(hostname 2>/dev/null || echo unknown)
+
+if [ -f "${ALERT_ENV}" ]; then
+  # shellcheck disable=SC1090
+  . "${ALERT_ENV}" 2>/dev/null || true
+fi
+
+REPEAT_S=${PULLFM_ALERT_REPEAT_S:-3600}
+ENVLABEL=${PULLFM_ALERT_ENV_LABEL:-unknown}
+STATE_FILE="${STATE_DIR}/${SAFE_KEY}"
+
+mkdir -p "${STATE_DIR}" 2>/dev/null || true
+mkdir -p "${SPOOL_DIR}" 2>/dev/null || true
+
+# --- spool writer, used on every path -------------------------------------
+# Values are JSON-escaped through the same helper so a journal tail containing a
+# quote cannot produce a spool line that no parser will read. A spool nothing
+# can parse is a spool that does not exist.
+esc() {
+  printf '%s' "${1:-}" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read())[1:-1])' 2>/dev/null ||
+    printf '%s' "${1:-}" | tr -d '"\\' | tr '\n\r\t' '   '
+}
+
+spool() {
+  printf '{"ts":"%s","host":"%s","env":"%s","key":"%s","title":"%s","priority":"%s","resolve":%s,"delivered":%s,"delivery":"%s"}\n' \
+    "${WHEN}" "$(esc "${HOST}")" "$(esc "${ENVLABEL}")" "$(esc "${KEY}")" \
+    "$(esc "${TITLE}")" "${PRIORITY}" "${RESOLVE}" "${1}" "${2}" \
+    >>"${SPOOL}" 2>/dev/null || true
+  chmod 0640 "${SPOOL}" 2>/dev/null || true
+}
+
+# --- resolve path ----------------------------------------------------------
+if [ "${RESOLVE}" = true ]; then
+  # Nothing was firing, so there is nothing to recover from and no notice is
+  # owed. Staying silent here is what keeps the channel worth reading.
+  [ -f "${STATE_FILE}" ] || exit 0
+  rm -f "${STATE_FILE}" 2>/dev/null || true
+  PRIORITY=default
+  TAGS=white_check_mark
+  TITLE="RESOLVED: ${TITLE}"
+else
+  # --- dedupe ---------------------------------------------------------------
+  if [ -f "${STATE_FILE}" ]; then
+    LAST=$(cat "${STATE_FILE}" 2>/dev/null || echo 0)
+    case "${LAST}" in ''|*[!0-9]*) LAST=0 ;; esac
+    if [ $((NOW - LAST)) -lt "${REPEAT_S}" ]; then
+      echo "PULLFM-ALERT suppressed key=${KEY} (last sent $((NOW - LAST))s ago, repeat ${REPEAT_S}s)" >&2
+      spool false suppressed-duplicate
+      exit 5
+    fi
+  fi
+fi
+
+# --- 1. the journal --------------------------------------------------------
+{
+  echo "PULLFM-ALERT env=${ENVLABEL} host=${HOST} key=${KEY} priority=${PRIORITY}"
+  echo "${TITLE}"
+  echo "${MESSAGE}"
+  [ -n "${RUNBOOK}" ] && echo "runbook: ${RUNBOOK}"
+} >&2
+
+# --- 3. delivery -----------------------------------------------------------
+DELIVERED=false
+DELIVERY=none-configured
+
+if [ -n "${PULLFM_NTFY_URL:-}" ]; then
+  DELIVERY=attempted
+
+  # An array, not `${VAR:+-H "..."}`. The inline form looks like it works and
+  # does not: an unquoted expansion word-splits on the spaces inside the header
+  # value, so curl receives four broken arguments instead of two.
+  auth=()
+  [ -n "${PULLFM_NTFY_TOKEN:-}" ] &&
+    auth=(-H "Authorization: Bearer ${PULLFM_NTFY_TOKEN}")
+
+  BODY="${MESSAGE}"
+  [ -n "${RUNBOOK}" ] && BODY="${BODY}
+
+runbook: ${RUNBOOK}"
+  BODY="${BODY}
+
+env=${ENVLABEL} host=${HOST} key=${KEY} at=${WHEN}"
+
+  # --max-time 10 twice over: an alerter that blocks is a watchdog that stops
+  # watching. Two attempts, because a single dropped SYN should not be the
+  # difference between told and not told, and no more than two because the
+  # spool is already the durable record.
+  for attempt in 1 2; do
+    if printf '%s' "${BODY}" | curl -fsS --max-time 10 \
+      -H "Title: ${TITLE}" \
+      -H "Priority: ${PRIORITY}" \
+      -H "Tags: ${TAGS}" \
+      ${RUNBOOK:+-H "Actions: view, Runbook, ${RUNBOOK}"} \
+      "${auth[@]+"${auth[@]}"}" \
+      --data-binary @- \
+      "${PULLFM_NTFY_URL}" >/dev/null 2>&1; then
+      DELIVERED=true
+      DELIVERY=ntfy
+      break
+    fi
+    [ "${attempt}" = 1 ] && sleep 2
+  done
+
+  [ "${DELIVERED}" = true ] || {
+    DELIVERY=ntfy-failed
+    echo "PULLFM-ALERT delivery FAILED. The journal and ${SPOOL} are the only record." >&2
+  }
+fi
+
+# --- 2. the spool ----------------------------------------------------------
+# Written after the attempt so `delivered` is a fact rather than an intention.
+spool "${DELIVERED}" "${DELIVERY}"
+
+# The dedupe stamp is only set for a firing alert, and only once the attempt is
+# over. Setting it earlier would let a delivery failure consume the whole repeat
+# window, so a transient network fault would silence a real condition for an
+# hour.
+if [ "${RESOLVE}" != true ]; then
+  printf '%s' "${NOW}" >"${STATE_FILE}" 2>/dev/null || true
+fi
+
+[ "${DELIVERED}" = true ] && exit 0
+[ "${DELIVERY}" = none-configured ] && exit 3
+exit 4

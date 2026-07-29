@@ -49,8 +49,10 @@ export interface DatabaseOptions {
  */
 export class Database implements Queryable {
   readonly #pool: pg.Pool;
+  readonly #max: number;
 
   constructor(opts: DatabaseOptions) {
+    this.#max = opts.max;
     this.#pool = new pg.Pool({
       connectionString: opts.connectionString,
       max: opts.max,
@@ -136,6 +138,29 @@ export class Database implements Queryable {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Pool occupancy, for `/metrics`.
+   *
+   * `waiting` is the field that matters and the one a dashboard usually omits.
+   * `total` and `idle` can both look comfortable while every caller is queueing
+   * behind a slow query, and pool exhaustion presents to a user as latency with
+   * no error anywhere - the failure mode Gate 7 asserts does not happen.
+   *
+   * `max` is reported alongside so saturation is computable from the scrape by
+   * itself, without a dashboard having to know how this deployment is
+   * configured. That matters more since the database became Neon behind a
+   * transaction pooler: this number is now OUR concurrency ceiling, not the
+   * server's, and the two are easy to confuse during an incident.
+   */
+  stats(): { total: number; idle: number; waiting: number; max: number } {
+    return {
+      total: this.#pool.totalCount,
+      idle: this.#pool.idleCount,
+      waiting: this.#pool.waitingCount,
+      max: this.#max,
+    };
   }
 
   /** Liveness probe for /readyz. Deliberately trivial. */

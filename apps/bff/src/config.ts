@@ -362,11 +362,47 @@ const schema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   RATE_LIMIT_WINDOW: z.string().default("1 minute"),
 
-  /** Serves 503 with Retry-After on every route except health. */
+  /** Serves 503 with Retry-After on every route except health and metrics. */
   MAINTENANCE_MODE: z
     .enum(["true", "false"])
     .default("false")
     .transform((v) => v === "true"),
+
+  /**
+   * A path whose EXISTENCE also means maintenance, checked at runtime.
+   *
+   * The environment variable needs a restart to change; this does not. Gate 6
+   * asserts a flip in both directions inside sixty seconds, and a restart
+   * cannot honestly claim the "cleared -> 200" half, because the gap between
+   * container stop and container ready is connection failures rather than an
+   * honest 503. Empty disables the lever. See lib/maintenance.ts.
+   */
+  MAINTENANCE_FLAG_FILE: z.string().default(""),
+
+  /** How long a filesystem answer for the flag file may be reused. */
+  MAINTENANCE_POLL_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(60_000)
+    .default(1_000),
+
+  /**
+   * Bearer token required to scrape `/metrics`.
+   *
+   * `/metrics` reports pool depth, breaker state, upstream budgets and cache
+   * ratios. None of that is a credential and all of it is reconnaissance, and
+   * the origin's nginx serves `location /` to the edge, so without this the
+   * endpoint is public the moment it stops being a stub.
+   *
+   * Loopback callers are exempt, checked against the SOCKET's peer address
+   * rather than `req.ip`. That distinction is the whole control: `trustProxy`
+   * is on, so `req.ip` is the leftmost `X-Forwarded-For` entry and any client
+   * on earth can set it to 127.0.0.1. The socket address cannot be forged by an
+   * HTTP header. It is what lets the node-local watchdog scrape with no
+   * credential at all while the same endpoint stays shut from the edge.
+   */
+  METRICS_TOKEN: z.string().default(""),
 });
 
 export type RawConfig = z.infer<typeof schema>;

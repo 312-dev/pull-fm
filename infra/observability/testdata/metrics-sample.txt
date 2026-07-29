@@ -1,0 +1,145 @@
+# HELP pullfm_build_info Build information. Always 1; the labels are the payload.
+# TYPE pullfm_build_info gauge
+pullfm_build_info{env="local",version="unknown"} 1
+# HELP pullfm_cache_bytes Cached bytes per provider. Last.fm is capped at 100 MB by ToS 4.3.4 (U3).
+# TYPE pullfm_cache_bytes gauge
+pullfm_cache_bytes{provider="lastfm"} -1
+# HELP pullfm_cache_fills_joined_total Callers that joined an in-flight fill instead of making a second call.
+# TYPE pullfm_cache_fills_joined_total counter
+pullfm_cache_fills_joined_total 0
+# HELP pullfm_cache_fills_started_total Cache fills that actually called a provider.
+# TYPE pullfm_cache_fills_started_total counter
+pullfm_cache_fills_started_total 0
+# HELP pullfm_cache_hit_ratio Cache hit ratio in [0,1], or -1 when nothing has been looked up yet.
+# TYPE pullfm_cache_hit_ratio gauge
+pullfm_cache_hit_ratio{provider="listenbrainz"} -1
+pullfm_cache_hit_ratio{provider="lastfm"} -1
+pullfm_cache_hit_ratio{provider="musicbrainz"} -1
+pullfm_cache_hit_ratio{provider="itunes"} -1
+pullfm_cache_hit_ratio{provider="deezer"} -1
+pullfm_cache_hit_ratio{provider="seatgeek"} -1
+pullfm_cache_hit_ratio{provider="reccobeats"} -1
+# HELP pullfm_cache_hits_total Cache hits, mirrored from CachedUpstream.
+# TYPE pullfm_cache_hits_total counter
+pullfm_cache_hits_total{provider="listenbrainz"} 0
+pullfm_cache_hits_total{provider="lastfm"} 0
+pullfm_cache_hits_total{provider="musicbrainz"} 0
+pullfm_cache_hits_total{provider="itunes"} 0
+pullfm_cache_hits_total{provider="deezer"} 0
+pullfm_cache_hits_total{provider="seatgeek"} 0
+pullfm_cache_hits_total{provider="reccobeats"} 0
+# HELP pullfm_cache_misses_total Cache misses, mirrored from CachedUpstream.
+# TYPE pullfm_cache_misses_total counter
+pullfm_cache_misses_total{provider="listenbrainz"} 0
+pullfm_cache_misses_total{provider="lastfm"} 0
+pullfm_cache_misses_total{provider="musicbrainz"} 0
+pullfm_cache_misses_total{provider="itunes"} 0
+pullfm_cache_misses_total{provider="deezer"} 0
+pullfm_cache_misses_total{provider="seatgeek"} 0
+pullfm_cache_misses_total{provider="reccobeats"} 0
+# HELP pullfm_cache_poisoned_total Cached payloads that no longer parse. A schema drift signal.
+# TYPE pullfm_cache_poisoned_total counter
+pullfm_cache_poisoned_total{provider="listenbrainz"} 0
+pullfm_cache_poisoned_total{provider="lastfm"} 0
+pullfm_cache_poisoned_total{provider="musicbrainz"} 0
+pullfm_cache_poisoned_total{provider="itunes"} 0
+pullfm_cache_poisoned_total{provider="deezer"} 0
+pullfm_cache_poisoned_total{provider="seatgeek"} 0
+pullfm_cache_poisoned_total{provider="reccobeats"} 0
+# HELP pullfm_cache_stale_total Stale reads served because the provider failed.
+# TYPE pullfm_cache_stale_total counter
+pullfm_cache_stale_total{provider="listenbrainz"} 0
+pullfm_cache_stale_total{provider="lastfm"} 0
+pullfm_cache_stale_total{provider="musicbrainz"} 0
+pullfm_cache_stale_total{provider="itunes"} 0
+pullfm_cache_stale_total{provider="deezer"} 0
+pullfm_cache_stale_total{provider="seatgeek"} 0
+pullfm_cache_stale_total{provider="reccobeats"} 0
+# HELP pullfm_crosswalk_resolutions_total Crosswalk resolutions by how they were resolved.
+# TYPE pullfm_crosswalk_resolutions_total counter
+pullfm_crosswalk_resolutions_total{kind="exact"} 0
+pullfm_crosswalk_resolutions_total{kind="fuzzy"} 0
+pullfm_crosswalk_resolutions_total{kind="remote"} 0
+pullfm_crosswalk_resolutions_total{kind="unresolved"} 0
+# HELP pullfm_crosswalk_warm_hit_ratio Share of crosswalk resolutions served without a remote call. Gate 2.
+# TYPE pullfm_crosswalk_warm_hit_ratio gauge
+pullfm_crosswalk_warm_hit_ratio 0
+# HELP pullfm_db_pool_connections Postgres pool connections held by this process, by state.
+# TYPE pullfm_db_pool_connections gauge
+pullfm_db_pool_connections{state="total"} 1
+pullfm_db_pool_connections{state="idle"} 1
+# HELP pullfm_db_pool_max Configured DATABASE_POOL_MAX, so saturation is computable from the scrape alone.
+# TYPE pullfm_db_pool_max gauge
+pullfm_db_pool_max 10
+# HELP pullfm_db_pool_waiting Callers queued for a Postgres connection. Sustained non-zero is saturation.
+# TYPE pullfm_db_pool_waiting gauge
+pullfm_db_pool_waiting 0
+# HELP pullfm_dependency_up 1 ok, 0 fail, -1 not checked. Written by the last /readyz probe (A2).
+# TYPE pullfm_dependency_up gauge
+pullfm_dependency_up{dependency="database"} 1
+pullfm_dependency_up{dependency="redis"} 1
+# HELP pullfm_http_request_duration_seconds HTTP response time in seconds, by route template. A6 alerts on p95 over 0.8.
+# TYPE pullfm_http_request_duration_seconds histogram
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="0.005"} 0
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="0.01"} 0
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="0.025"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="0.05"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="0.1"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="0.25"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="0.5"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="0.8"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="1"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="2"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="5"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="10"} 1
+pullfm_http_request_duration_seconds_bucket{route="/readyz",le="+Inf"} 1
+pullfm_http_request_duration_seconds_sum{route="/readyz"} 0.012281124999999974
+pullfm_http_request_duration_seconds_count{route="/readyz"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="0.005"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="0.01"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="0.025"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="0.05"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="0.1"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="0.25"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="0.5"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="0.8"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="1"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="2"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="5"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="10"} 1
+pullfm_http_request_duration_seconds_bucket{route="/v1/config",le="+Inf"} 1
+pullfm_http_request_duration_seconds_sum{route="/v1/config"} 0.0004064590000000408
+pullfm_http_request_duration_seconds_count{route="/v1/config"} 1
+# HELP pullfm_http_requests_total HTTP responses by route template, method and status.
+# TYPE pullfm_http_requests_total counter
+pullfm_http_requests_total{method="GET",route="/readyz",status="200"} 1
+pullfm_http_requests_total{method="GET",route="/v1/config",status="200"} 1
+# HELP pullfm_maintenance_mode 1 while the service is deliberately refusing application traffic.
+# TYPE pullfm_maintenance_mode gauge
+pullfm_maintenance_mode 0
+# HELP pullfm_musicbrainz_pacer_dispatched_total Requests released by the MusicBrainz pacer. rate() of this is our egress.
+# TYPE pullfm_musicbrainz_pacer_dispatched_total counter
+pullfm_musicbrainz_pacer_dispatched_total 0
+# HELP pullfm_musicbrainz_pacer_queue_depth Requests waiting for a MusicBrainz slot right now.
+# TYPE pullfm_musicbrainz_pacer_queue_depth gauge
+pullfm_musicbrainz_pacer_queue_depth 0
+# HELP pullfm_musicbrainz_pacer_rejected_total Requests refused because the pacer queue was full.
+# TYPE pullfm_musicbrainz_pacer_rejected_total counter
+pullfm_musicbrainz_pacer_rejected_total 0
+# HELP pullfm_process_uptime_seconds Seconds since this process started serving.
+# TYPE pullfm_process_uptime_seconds gauge
+pullfm_process_uptime_seconds 0
+# HELP pullfm_upstream_provider_status 0 ok, 1 degraded (breaker not closed), 2 disabled.
+# TYPE pullfm_upstream_provider_status gauge
+pullfm_upstream_provider_status{provider="listenbrainz"} 0
+pullfm_upstream_provider_status{provider="lastfm"} 0
+pullfm_upstream_provider_status{provider="musicbrainz"} 0
+pullfm_upstream_provider_status{provider="previews"} 0
+pullfm_upstream_provider_status{provider="events"} 0
+# HELP pullfm_upstream_provider_status_age_seconds Seconds the provider has held its current status. U4 alerts on degraded for over 900.
+# TYPE pullfm_upstream_provider_status_age_seconds gauge
+pullfm_upstream_provider_status_age_seconds{provider="listenbrainz"} 0
+pullfm_upstream_provider_status_age_seconds{provider="lastfm"} 0
+pullfm_upstream_provider_status_age_seconds{provider="musicbrainz"} 0
+pullfm_upstream_provider_status_age_seconds{provider="previews"} 0
+pullfm_upstream_provider_status_age_seconds{provider="events"} 0

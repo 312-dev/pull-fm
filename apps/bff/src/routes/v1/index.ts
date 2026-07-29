@@ -83,7 +83,10 @@ export async function registerV1Routes(
     },
     () => ({
       minSupportedBuild: 1,
-      maintenance: services.cfg.MAINTENANCE_MODE,
+      // The GATE, not the environment variable. A client that is told
+      // `maintenance: false` while every other route is answering 503 has been
+      // given the one piece of information it exists to receive, wrongly.
+      maintenance: services.maintenance.active(),
       features: {
         personalApiTokens: true,
         wishlist: true,

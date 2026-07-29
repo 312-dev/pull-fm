@@ -55,9 +55,11 @@ import {
   SeatGeekClient,
   SeatGeekEventsProvider,
   lastfmCap,
+  type CacheStore,
   type CrosswalkStore,
   type EventsProvider,
   type FetchLike,
+  type ProviderEvent,
   type ProviderName,
   type ProviderStatus,
   type Queryable as UpstreamQueryable,
@@ -78,6 +80,21 @@ export interface UpstreamOptions {
    */
   readonly fetchImpl?: FetchLike | undefined;
   readonly log?: UpstreamLogger | undefined;
+  /**
+   * Metrics sink. Called for every provider request, success, failure, retry
+   * and short circuit.
+   *
+   * `ProviderEvent` was designed to be safe for exactly this: it carries the
+   * provider, a TEMPLATE path, the attempt number, a status and an error kind,
+   * and deliberately no URL, no query string and no headers. That is what makes
+   * it usable as a Prometheus label source without the label cardinality
+   * becoming a function of user input.
+   *
+   * Optional and un-awaited by the caller, because a metrics sink must never be
+   * able to fail a request. `buildUpstream` wraps it so a throw here cannot
+   * escape into the provider path.
+   */
+  readonly onEvent?: ((event: ProviderEvent) => void) | undefined;
 }
 
 export interface UpstreamBundle {
@@ -107,6 +124,29 @@ export interface UpstreamBundle {
   readonly previewWarmer: PreviewResolver;
   /** Undefined when SeatGeek is unconfigured or switched off. */
   readonly events: EventsProvider | undefined;
+  /**
+   * The MusicBrainz pacer, exposed for `/metrics` and for nothing else.
+   *
+   * It was previously an anonymous argument to the client constructor, which
+   * meant its `dispatched` / `rejected` / `queueDepth` counters existed and
+   * were unreachable. U1 in docs/RUNBOOK-INCIDENT.md ("MusicBrainz egress over
+   * 1.0 req/s") is an alert on a number this object already keeps, so the whole
+   * gap between "we pace MusicBrainz" and "we can prove we pace MusicBrainz"
+   * was one missing reference.
+   *
+   * Read-only by convention. Nothing outside the metrics collector may call
+   * `acquire` or `drainAndReject` on it; the client owns the scheduling.
+   */
+  readonly musicbrainzLimiter: RateLimiter;
+  /**
+   * The cache store, exposed so `/metrics` can report per-provider cache SIZE.
+   *
+   * U3 is the Last.fm 100 MB licence cap and it is the one alert here whose
+   * threshold is contractual rather than operational. `CacheGovernor.onAlert`
+   * only fires when an eviction happens, so it can report a breach and cannot
+   * report the approach to one; `sizeOf` is the only steady-state reading.
+   */
+  readonly cacheStore: CacheStore;
   /** Coarse per-provider health for `GET /v1/config`. Never internal detail. */
   status(): Record<string, ProviderStatus>;
 }
@@ -118,6 +158,29 @@ export function buildUpstream(
 ): UpstreamBundle {
   const fetchImpl = opts.fetchImpl;
   const withFetch = fetchImpl === undefined ? {} : { fetch: fetchImpl };
+
+  /**
+   * The metrics sink, wrapped so it cannot reach the request path.
+   *
+   * `ProviderClient` calls `onEvent` inline, on the same tick as the request it
+   * describes. An observer that throws would therefore turn a successful
+   * upstream call into a failed one, which is the classic way an observability
+   * change becomes an outage. Swallowing here is deliberate and is the only
+   * place in this file where a bare catch is the right answer: the alternative
+   * to a lost metric is a lost response.
+   */
+  const withEvents =
+    opts.onEvent === undefined
+      ? {}
+      : {
+          onEvent: (event: ProviderEvent): void => {
+            try {
+              opts.onEvent?.(event);
+            } catch {
+              /* a metrics sink may never fail a request */
+            }
+          },
+        };
 
   const killSwitch = new KillSwitch();
   const queryable = asUpstreamQueryable(db);
@@ -143,7 +206,11 @@ export function buildUpstream(
 
   const cache = new CachedUpstream(cacheStore, { governor });
 
-  const listenbrainz = new ListenBrainzClient({ killSwitch, ...withFetch });
+  const listenbrainz = new ListenBrainzClient({
+    killSwitch,
+    ...withFetch,
+    ...withEvents,
+  });
 
   const lastfm =
     cfg.LASTFM_API_KEY === undefined
@@ -155,19 +222,25 @@ export function buildUpstream(
             ? {}
             : { sharedSecret: cfg.LASTFM_SHARED_SECRET }),
           ...withFetch,
+          ...withEvents,
         });
+
+  // One limiter, shared. See the header. HELD IN A LOCAL rather than passed
+  // anonymously: it is the only object that knows the real MusicBrainz egress
+  // rate, and U1 is an alert on that number.
+  const musicbrainzLimiter = new RateLimiter({
+    minIntervalMs: MUSICBRAINZ_MIN_INTERVAL_MS,
+    // A deep queue would let requests wait far past their own timeout for a
+    // slot. Rejecting is the honest answer, and the caller degrades.
+    maxQueueDepth: 64,
+  });
 
   const musicbrainz = new MusicBrainzClient({
     userAgent: cfg.MUSICBRAINZ_USER_AGENT,
-    // One limiter, shared. See the header.
-    rateLimiter: new RateLimiter({
-      minIntervalMs: MUSICBRAINZ_MIN_INTERVAL_MS,
-      // A deep queue would let requests wait far past their own timeout for a
-      // slot. Rejecting is the honest answer, and the caller degrades.
-      maxQueueDepth: 64,
-    }),
+    rateLimiter: musicbrainzLimiter,
     killSwitch,
     ...withFetch,
+    ...withEvents,
   });
 
   const crosswalkStore = new PgCrosswalkStore(queryable);
@@ -182,12 +255,12 @@ export function buildUpstream(
   // of two. A second ItunesClient would double the spend against a provider
   // that blocks with no appeals process.
   const previewStore = new PgPreviewStore(queryable);
-  const itunes = new ItunesClient({ killSwitch, ...withFetch });
+  const itunes = new ItunesClient({ killSwitch, ...withFetch, ...withEvents });
 
   const previews = new PreviewResolver({
     store: previewStore,
     itunes,
-    deezer: new DeezerClient({ killSwitch, ...withFetch }),
+    deezer: new DeezerClient({ killSwitch, ...withFetch, ...withEvents }),
   });
 
   // No Deezer. See the field comment on UpstreamBundle.previewWarmer.
@@ -204,6 +277,7 @@ export function buildUpstream(
               : { clientSecret: cfg.SEATGEEK_CLIENT_SECRET }),
             killSwitch,
             ...withFetch,
+            ...withEvents,
           }),
           cache,
         });
@@ -219,6 +293,8 @@ export function buildUpstream(
     previews,
     previewWarmer,
     events,
+    musicbrainzLimiter,
+    cacheStore,
     status() {
       // Deliberately coarse. `GET /v1/config` is a reconnaissance endpoint
       // (API9): it says whether a shelf will render, never which providers hold
