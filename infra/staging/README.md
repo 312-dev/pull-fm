@@ -136,6 +136,12 @@ sudo bash bootstrap.sh
 sudo bash bootstrap.sh   # needs /etc/pullfm/bff.env and /etc/ssl/pullfm/*
 ```
 
+**In normal operation nobody runs the above by hand.**
+`./infra/staging-env.sh converge` does exactly this over the tailnet, with the
+secrets rendered from 1Password into a self-deleting `0700` directory. The
+manual form is documented because it is what converge does, not because it is
+the procedure.
+
 ### Files that are never in git
 
 | Path                                   | Contents                                        | Source                                            |
@@ -166,58 +172,65 @@ redis-cli -h 10.20.1.21 -p 6380 -a "$QUOTA_PW" config get maxmemory-policy  # no
 
 ---
 
-## CRITICAL: `staging-env.sh up` does not produce a working environment
+## Rebuilding: `up` produces a serving node, unattended
 
-**Measured 2026-07-29, by actually doing it.** Staging was torn down, rebuilt
-from IaC, and did not come back healthy. It is currently left **DOWN**, which is
-the correct end state for an environment that cannot rebuild itself: up and
-broken is worse than down.
+`./infra/staging-env.sh up` is one command and there is no human step in it:
 
-What happened, in order:
+```
+terraform apply          19 resources, about 45 seconds
+wait for cloud-init      packages, docker, nginx, Tailscale, directory layout
+converge                 secrets from 1Password over SSH, then bootstrap.sh
+verify                   poll https://api-staging.pull.fm/healthz for HEAD
+```
 
-| Step                                       | Result                                                                                                            |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `./infra/staging-env.sh down`              | destroyed 19 resources, run rate to **EUR 0.00/mo**. R2 backup bucket survived. Out-of-band TXT records survived. |
-| `./infra/staging-env.sh up`                | **45 seconds**, 19 resources created, load balancer even reclaimed the same IPv4                                  |
-| `curl https://api-staging.pull.fm/healthz` | **HTTP 525 for five straight minutes** (Cloudflare could not complete a TLS handshake with the origin)            |
-| Hetzner load balancer target health        | **unhealthy on both 80 and 443**                                                                                  |
+### The division of labour, and why it falls where it does
 
-**Why.** Terraform's job ends at a booted node. Everything in this directory -
-nginx, the origin certificate, the BFF container, the deploy timer, the Redis
-and Postgres services - is applied by a **human over SSH**, per
-[Bootstrapping a node](#bootstrapping-a-node). cloud-init deliberately installs
-none of it, because doing so would put `/etc/pullfm/bff.env` (the KEK, the
-WorkOS key, `DATABASE_URL`) into `user_data`, which is persisted in Terraform
-state and readable from the Hetzner API for the life of the server. That
-decision is right. What is missing is the automated, secret-free path that
-should have replaced it.
+The split is by **secrecy**, not by convenience.
 
-**And there is no way in.** The rebuilt node has no public SSH: the firewall
-carries no rule for port 22, and Tailscale is not installed, because
-`tailscale_auth_key` is empty in every committed configuration. Bootstrapping
-the rebuilt environment requires putting an operator `/32` into
-`ssh_allowlist_cidrs` in a local `terraform.tfvars`, applying, bootstrapping by
-hand, and taking it back out. That is the documented break-glass procedure, and
-it is currently the **only** procedure.
+| Stage          | Carries                                             | Why there                                                                                                                                                              |
+| -------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **cloud-init** | packages, docker, nginx, the tailnet, `/etc/pullfm` | `user_data` is persisted in Terraform state and readable from the Hetzner API for the life of the server. Everything here is a public fact and none of it is a secret. |
+| **converge**   | `bff.env`, `db.env`, the origin certificate and key | Secrets. Shipped over SSH after the node exists, straight from 1Password, installed root-owned `0600`. Never in git, never in state, never in an image.                |
+| **verify**     | nothing                                             | Reads the public URL. It cannot pass by reporting its own success.                                                                                                     |
 
-**What this means for the gates.**
+The one secret in `user_data` is a Tailscale auth key, and it is minted fresh
+per apply, **single use**, pre-authorised, and **ephemeral**. It is spent the
+instant the first node claims it, so the copy left in state authorises nothing
+afterwards, and ephemeral means a torn-down environment does not leave dead
+nodes in the tailnet after every drill.
 
-- **Gate 4 ("restore from scratch in under 30 minutes") cannot pass today.**
-  The infrastructure half rebuilds in 45 seconds. The half that makes it serve
-  traffic is a manual runbook of unmeasured length, and it has never been timed.
-- **Gate 0's zero-drift and auto-deploy criteria still hold**, because they
-  describe a running environment and say nothing about recreating one.
-- The claim in `docs/PLAN.md` section 10c that tearing down "exercises the
-  capability we have to prove anyway" is true, and this is the result of
-  exercising it: the capability is not there yet.
+### What the previous drill found, and what changed
 
-**The fix is config management, not more Terraform.** The node needs to
-converge on its own from a signed, secret-free artifact, pulling its secrets at
-first boot the same way `pullfm-deploy` already pulls images. Setting
-`tailscale_auth_key` would restore a way in, but a way in for a human is not the
-same as a rebuild, and treating it as one is how this gap stayed invisible.
+**Measured 2026-07-29.** Staging was torn down and rebuilt from IaC, and did
+not come back:
 
----
+| Step                                       | Result                                                                                  |
+| ------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `./infra/staging-env.sh down`              | destroyed 19 resources, run rate to **EUR 0.00/mo**. R2 backup bucket survived.         |
+| `./infra/staging-env.sh up`                | **45 seconds**, 19 resources created, load balancer even reclaimed the same IPv4        |
+| `curl https://api-staging.pull.fm/healthz` | **HTTP 525 for five straight minutes** (Cloudflare could not handshake with the origin) |
+| Hetzner load balancer target health        | **unhealthy on both 80 and 443**                                                        |
+
+Terraform's job ended at a booted node. nginx, the origin certificate, the BFF
+container, the deploy timer, Postgres and Redis had all been applied **by a
+human over SSH** during Gate 0 and existed nowhere else. And there was no way
+in: the firewall carries no rule for port 22 and Tailscale was never installed,
+because `tailscale_auth_key` was empty in every committed configuration.
+Recovering meant putting an operator `/32` into `ssh_allowlist_cidrs`, applying,
+bootstrapping by hand, and taking it back out.
+
+Three changes close that:
+
+1. **cloud-init installs Tailscale**, from a key minted per apply, so a rebuilt
+   node is reachable without touching the firewall. Break-glass SSH remains,
+   unused, for the case where the tailnet itself is the problem.
+2. **cloud-init installs everything secret-free**, so converge only ever places
+   secrets and runs a committed script.
+3. **`up` runs all four stages**, so "rebuild" is one command whose exit code
+   means the public URL served the current commit.
+
+Break-glass SSH via `ssh_allowlist_cidrs` is still documented and still empty in
+every committed configuration. It is now a fallback rather than the procedure.
 
 ## Not here yet
 
@@ -227,7 +240,4 @@ Deliberate omissions, each owned by a later phase:
   pool of 10 in the meantime.
 - **pgBackRest to R2** (Phase 1, Gate 4). `wal_level` and `archive_mode` are
   already set so enabling it is a config reload rather than a restart.
-- **Tailscale** on the nodes. The plan makes it the only SSH path;
-  bootstrapping needed break-glass access first (see
-  `ssh_allowlist_cidrs` in `infra/terraform/modules/firewall`).
 - **Second application node**, which is what Gate 6's rolling deploy needs.

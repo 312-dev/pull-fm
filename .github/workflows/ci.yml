@@ -80,6 +80,15 @@ jobs:
       - name: install
         run: pnpm install --frozen-lockfile
 
+      # BEFORE typecheck, not after. The workspace packages publish types from
+      # `dist`, so on a clean checkout - which is the only kind CI ever has -
+      # `@pull-fm/crypto` and `@pull-fm/upstream` do not resolve until they are
+      # built. Running typecheck first passed locally for months purely because
+      # a developer's `dist` was left over from an earlier run, which is
+      # exactly the class of green-locally-red-in-CI this ordering causes.
+      - name: build
+        run: pnpm build
+
       - name: typecheck
         run: pnpm typecheck
 
@@ -88,9 +97,6 @@ jobs:
 
       - name: format check
         run: pnpm format:check
-
-      - name: build
-        run: pnpm build
 
       - name: unit tests
         run: pnpm test

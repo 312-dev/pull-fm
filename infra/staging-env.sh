@@ -8,10 +8,37 @@
 # a Gate 4 requirement, so tearing down exercises the thing we have to prove
 # anyway rather than avoiding it.
 #
-#   ./infra/staging-env.sh up       provision and print the endpoints
-#   ./infra/staging-env.sh down     destroy compute, KEEP the backup bucket
-#   ./infra/staging-env.sh status   what is running and what it costs
-#   ./infra/staging-env.sh cost     current monthly run rate
+#   ./infra/staging-env.sh up        provision, converge, and verify. One step.
+#   ./infra/staging-env.sh converge  re-apply configuration to running nodes
+#   ./infra/staging-env.sh verify    poll the PUBLIC url until it serves 200
+#   ./infra/staging-env.sh down      destroy compute, KEEP the backup bucket
+#   ./infra/staging-env.sh status    what is running and what it costs
+#   ./infra/staging-env.sh cost      current monthly run rate
+#
+# `up` PRODUCES A SERVING NODE, AND IT DID NOT USED TO.
+#
+# A rebuild drill on 2026-07-29 measured what `up` actually produced: a booted
+# node in 45 seconds, HTTP 525 for five minutes, and no way in - no inbound rule
+# for port 22 and no Tailscale, because `tailscale_auth_key` was empty in every
+# committed configuration. nginx, the origin certificate, the container and the
+# deploy timer had all been applied by hand over SSH during Gate 0 and existed
+# nowhere else. That is a Gate 4 blocker: the infrastructure half rebuilt in
+# under a minute and the half that makes it serve traffic was an untimed manual
+# runbook.
+#
+# `up` now runs terraform, waits for the nodes to reach the tailnet, ships the
+# secrets from 1Password over SSH, runs the committed bootstrap scripts, and
+# polls the public URL until it answers 200. No human step, and no secret in
+# the repository, in Terraform state, or in a container image:
+#
+#   cloud-init  (in state, therefore PUBLIC facts only) packages, docker,
+#               nginx, the tailnet, the directory layout
+#   converge    (over SSH, therefore secrets) bff.env, db.env, the origin
+#               certificate and key, then `bash bootstrap.sh`
+#
+# The one secret cloud-init carries is a Tailscale auth key, and it is minted
+# fresh per apply, single use, and ephemeral - spent the moment the node joins,
+# so the copy left in state authorises nothing.
 #
 # CREDENTIALS: per-environment scoped tokens only, loaded from 1Password by
 # infra/lib/credentials.sh. The Cloudflare global API key is bootstrap-only and
@@ -57,6 +84,10 @@ readonly ENV_DIR="${ROOT}/infra/terraform/envs/staging"
 # of infra/lib/credentials.sh.
 # shellcheck source=lib/credentials.sh
 source "${ROOT}/infra/lib/credentials.sh"
+# Staging secret material, rendered from 1Password into a self-deleting 0700
+# directory. Nothing it produces is ever committed or passed to Terraform.
+# shellcheck source=lib/secrets.sh
+source "${ROOT}/infra/lib/secrets.sh"
 
 # Resources deliberately excluded from teardown. See the header.
 #
@@ -84,14 +115,233 @@ assert_correct_project() {
   pullfm_assert_cloudflare_scope || exit 1
 }
 
+readonly API_HOSTNAME="${PULLFM_API_HOSTNAME:-api-staging.pull.fm}"
+readonly APP_NODE="pullfm-staging-app-1"
+readonly DB_NODE="pullfm-staging-db-1"
+readonly SSH_USER="${PULLFM_SSH_USER:-pullfm}"
+readonly SSH_KEY="${PULLFM_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
+
+# StrictHostKeyChecking=accept-new rather than `no`: a freshly built node has no
+# known host key and refusing to learn one would make an unattended rebuild
+# impossible, but silently accepting a CHANGED key would hide a real
+# man-in-the-middle. accept-new learns once and refuses a change afterwards.
+ssh_node() {
+  local host="$1"; shift
+  ssh -i "${SSH_KEY}" \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+    -o ConnectTimeout=10 \
+    -o BatchMode=yes \
+    "${SSH_USER}@${host}" "$@"
+}
+
+# Tailnet address for a node, by the hostname cloud-init set.
+#
+# Resolved from `tailscale status` rather than trusting MagicDNS, because
+# MagicDNS resolution depends on the operator's own DNS configuration and a
+# rebuild must not fail on how somebody's laptop is set up.
+tailnet_ip() {
+  local name="$1"
+  tailscale status --json 2>/dev/null | python3 -c "
+import json, sys
+want = sys.argv[1]
+peers = json.load(sys.stdin).get('Peer') or {}
+for peer in peers.values():
+    if peer.get('HostName') == want or peer.get('DNSName', '').split('.')[0] == want:
+        ips = peer.get('TailscaleIPs') or []
+        if ips:
+            print(ips[0])
+            break
+" "${name}"
+}
+
+# Mints a single-use, pre-authorised, EPHEMERAL Tailscale auth key.
+#
+# All three properties matter and none is decoration:
+#   single use    the key is spent by the first node that claims it, so the
+#                 copy persisted in Terraform state authorises nothing
+#                 afterwards. A fresh one is minted per apply.
+#   pre-authorised the node must be usable the moment it boots; waiting for a
+#                 human to approve a device is exactly the manual step this
+#                 whole change exists to remove.
+#   ephemeral     staging is destroyed after every gate run. Without this, each
+#                 drill leaves two dead nodes in the tailnet forever.
+#
+# Reusable is on ONLY because two nodes boot from one apply; the one hour expiry
+# is what bounds that.
+mint_tailscale_key() {
+  local token response
+  token="$(op item get 'Tailscale API' --vault "${PULLFM_SECRETS_VAULT}" \
+    --fields label=password --reveal 2>/dev/null)" ||
+    die "could not read the Tailscale API token from 1Password"
+
+  # `Authorization: Bearer` rather than curl's `-u`, for the same reason
+  # infra/lib/credentials.sh uses it: the basic-auth form is a credential in a
+  # command line, which lands in a process list and in shell history.
+  response="$(curl -sS \
+    -H "Authorization: Bearer ${token}" \
+    -H 'Content-Type: application/json' \
+    --data '{"capabilities":{"devices":{"create":{"reusable":true,"ephemeral":true,"preauthorized":true,"tags":[]}}},"expirySeconds":3600,"description":"pull-fm staging bootstrap"}' \
+    'https://api.tailscale.com/api/v2/tailnet/-/keys')" ||
+    die "Tailscale API refused the key request"
+
+  printf '%s' "${response}" | python3 -c "
+import json, sys
+body = json.load(sys.stdin)
+key = body.get('key')
+if not key:
+    sys.exit('Tailscale did not return a key: ' + json.dumps(body)[:200])
+print(key)
+"
+}
+
+# Waits for cloud-init to finish. It writes a marker rather than us sleeping,
+# because apt on a fresh node takes anywhere from 40 seconds to four minutes and
+# a fixed sleep is either flaky or slow.
+wait_for_node() {
+  local name="$1" deadline=$((SECONDS + 600)) ip=""
+  log "  waiting for ${name} to reach the tailnet"
+  while ((SECONDS < deadline)); do
+    ip="$(tailnet_ip "${name}")"
+    if [[ -n "${ip}" ]] && ssh_node "${ip}" \
+      "test -f /var/lib/pullfm/cloud-init-done" 2>/dev/null; then
+      printf '%s' "${ip}"
+      return 0
+    fi
+    sleep 10
+  done
+  die "${name} did not finish cloud-init within 10 minutes"
+}
+
+# Ships a directory and the secrets it needs, then runs its bootstrap script.
+#
+# tar over ssh rather than rsync: rsync is not guaranteed present on a minimal
+# cloud image, and installing it to copy six files is a dependency bought for
+# nothing.
+converge_node() {
+  local ip="$1" src="$2" secrets_dir="$3" env_name="$4"
+  shift 4
+
+  ssh_node "${ip}" "rm -rf /tmp/pullfm-config && mkdir -p /tmp/pullfm-config"
+  tar czf - -C "${src}" . | ssh_node "${ip}" "tar xzf - -C /tmp/pullfm-config"
+
+  # Secrets go to a private staging path, are installed root-owned 0600, and
+  # the copy in /tmp is removed in the same command. There is no window in
+  # which the plaintext sits in a world-readable place.
+  ssh_node "${ip}" "install -d -m 0700 /tmp/pullfm-secrets"
+  scp -q -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+    "$@" "${SSH_USER}@${ip}:/tmp/pullfm-secrets/"
+
+  ssh_node "${ip}" "sudo install -d -m 0751 /etc/pullfm \
+    && sudo install -m 0600 -o root -g root /tmp/pullfm-secrets/${env_name} /etc/pullfm/${env_name} \
+    && rm -rf /tmp/pullfm-secrets"
+}
+
+cmd_converge() {
+  local app_ip db_ip secrets
+  app_ip="${1:-$(tailnet_ip "${APP_NODE}")}"
+  db_ip="${2:-$(tailnet_ip "${DB_NODE}")}"
+  [[ -n "${app_ip}" && -n "${db_ip}" ]] ||
+    die "both staging nodes must be on the tailnet before converging (run 'up')"
+
+  log "rendering secrets from 1Password"
+  secrets="$(pullfm_secret_workdir)"
+  pullfm_render_staging_secrets "${secrets}" || die "could not render secrets"
+
+  # The database first. The application node runs forward migrations as part of
+  # its first deploy, so converging it against a Postgres that does not exist
+  # yet turns a correct ordering problem into a confusing deploy failure.
+  log "converging ${DB_NODE} (${db_ip})"
+  converge_node "${db_ip}" "${ROOT}/infra/staging/db" "${secrets}" "db.env" \
+    "${secrets}/db.env"
+  ssh_node "${db_ip}" "cd /tmp/pullfm-config && sudo bash bootstrap.sh"
+
+  log "converging ${APP_NODE} (${app_ip})"
+  converge_node "${app_ip}" "${ROOT}/infra/staging/app" "${secrets}" "bff.env" \
+    "${secrets}/bff.env" "${secrets}/origin.pem" "${secrets}/origin.key" \
+    "${secrets}/origin-pull-ca.pem"
+
+  # The TLS material is placed separately: it is group readable by www-data
+  # rather than root-only, which is a different mode from the env file and
+  # collapsing the two would loosen one of them.
+  ssh_node "${app_ip}" "sudo install -d -m 0750 -o root -g www-data /etc/ssl/pullfm"
+  scp -q -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+    "${secrets}/origin.pem" "${secrets}/origin.key" "${secrets}/origin-pull-ca.pem" \
+    "${SSH_USER}@${app_ip}:/tmp/"
+  ssh_node "${app_ip}" "sudo install -m 0644 -o root -g www-data /tmp/origin.pem /etc/ssl/pullfm/origin.pem \
+    && sudo install -m 0640 -o root -g www-data /tmp/origin.key /etc/ssl/pullfm/origin.key \
+    && sudo install -m 0644 -o root -g www-data /tmp/origin-pull-ca.pem /etc/ssl/pullfm/origin-pull-ca.pem \
+    && rm -f /tmp/origin.pem /tmp/origin.key /tmp/origin-pull-ca.pem"
+
+  ssh_node "${app_ip}" "cd /tmp/pullfm-config && sudo bash bootstrap.sh"
+  # The deploy timer fires within 60 seconds anyway; forcing it here removes a
+  # minute of avoidable waiting from every rebuild.
+  ssh_node "${app_ip}" "sudo systemctl start pullfm-deploy.service" || true
+
+  log "converged"
+}
+
+# Proves the environment serves traffic FROM THE PUBLIC URL.
+#
+# Not from the node, and not from the deployer's own exit code. A job that
+# connects to a box and reports success proves the deployer ran. Polling
+# https://api-staging.pull.fm/healthz proves the commit is serving real traffic
+# through Cloudflare, the load balancer, nginx and the container - which is the
+# only claim Gate 0 and Gate 4 are actually interested in.
+cmd_verify() {
+  local expected deadline body actual
+  expected="${1:-$(git -C "${ROOT}" rev-parse HEAD)}"
+  deadline=$((SECONDS + 900))
+
+  log "polling https://${API_HOSTNAME}/healthz for ${expected:0:12}"
+  while ((SECONDS < deadline)); do
+    body="$(curl -sf --max-time 10 "https://${API_HOSTNAME}/healthz" || true)"
+    actual="$(printf '%s' "${body}" |
+      python3 -c 'import json,sys;
+try: print(json.load(sys.stdin).get("version",""))
+except Exception: print("")' 2>/dev/null || true)"
+    if [[ -n "${actual}" ]]; then
+      if [[ "${actual}" == "${expected}" ]]; then
+        log "healthy on ${actual}"
+        return 0
+      fi
+      printf '  serving %s, waiting for %s\n' "${actual:0:12}" "${expected:0:12}"
+    fi
+    sleep 10
+  done
+  die "https://${API_HOSTNAME}/healthz never reported ${expected:0:12} within 15 minutes"
+}
+
 cmd_up() {
   load_credentials
   assert_correct_project
+
+  # Minted per apply. A key already spent by a previous boot would leave a
+  # rebuilt node off the tailnet and therefore unreachable, which is the exact
+  # failure this whole command exists to prevent.
+  log "minting a single-use ephemeral Tailscale key"
+  TF_VAR_tailscale_auth_key="$(mint_tailscale_key)" || exit 1
+  export TF_VAR_tailscale_auth_key
+
   log "provisioning staging..."
   terraform -chdir="${ENV_DIR}" apply -input=false -auto-approve
+
   echo
   log "endpoints"
   terraform -chdir="${ENV_DIR}" output 2>/dev/null | grep -E "hostname|ipv4|bucket" || true
+
+  echo
+  log "waiting for cloud-init"
+  local app_ip db_ip
+  db_ip="$(wait_for_node "${DB_NODE}")"
+  app_ip="$(wait_for_node "${APP_NODE}")"
+
+  echo
+  cmd_converge "${app_ip}" "${db_ip}"
+
+  echo
+  cmd_verify "$(git -C "${ROOT}" rev-parse HEAD)"
+
   echo
   warn "The meter is running. Tear down with: ./infra/staging-env.sh down"
 }
@@ -201,9 +451,11 @@ PY
 }
 
 case "${1:-}" in
-  up)     cmd_up ;;
-  down)   cmd_down ;;
-  status) cmd_status ;;
-  cost)   cmd_cost ;;
-  *)      die "usage: $0 {up|down|status|cost}" ;;
+  up)       cmd_up ;;
+  converge) cmd_converge ;;
+  verify)   shift; cmd_verify "$@" ;;
+  down)     cmd_down ;;
+  status)   cmd_status ;;
+  cost)     cmd_cost ;;
+  *)        die "usage: $0 {up|converge|verify|down|status|cost}" ;;
 esac

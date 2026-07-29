@@ -1,9 +1,33 @@
 #cloud-config
-# Rendered by Terraform. Deliberately minimal: this brings a node to the point
-# where config management can reach it over Tailscale and does nothing else.
-# Anything that needs a secret belongs in a Nomad variable, not here, because
-# user_data is persisted in Terraform state and stays readable from the Hetzner
-# API for the life of the server.
+# Rendered by Terraform.
+#
+# WHAT THIS FILE MAY AND MAY NOT DO
+# ---------------------------------
+# `user_data` is persisted in Terraform state and stays readable from the
+# Hetzner API for the entire life of the server. So this file installs
+# everything a node needs that is NOT a secret, and nothing that is. The
+# database URL, the KEK, the WorkOS key and the origin certificate are shipped
+# afterwards over an encrypted channel by `./infra/staging-env.sh converge`,
+# straight from 1Password, and never touch disk on the operator's machine
+# outside a temporary directory.
+#
+# The `tailscale_auth_key` below is the one exception and it is deliberately
+# single-use, pre-authorised and ephemeral: it is spent the instant the node
+# joins, so the copy left in state is a key that no longer authorises anything.
+# `staging-env.sh` mints a fresh one per apply for exactly that reason.
+#
+# WHY THIS IS NOT MINIMAL ANY MORE
+# --------------------------------
+# It used to stop at "a node config management can reach". A rebuild drill on
+# 2026-07-29 proved what that produced: 45 seconds to a booted node, HTTP 525
+# for five minutes, and no way in at all, because the firewall carries no rule
+# for port 22 and Tailscale was never installed. Everything that made the node
+# serve traffic had been applied by hand over SSH and existed nowhere else.
+#
+# The division now is by SECRECY, not by convenience: packages, the container
+# runtime, the tailnet and the directory layout are public facts and belong
+# here, because a node that boots without them needs a human before it can be
+# reached at all.
 hostname: ${hostname}
 fqdn: ${hostname}
 preserve_hostname: false
@@ -15,13 +39,21 @@ packages:
   - ca-certificates
   - curl
   - gnupg
+  - jq
   - unattended-upgrades
   - fail2ban
   - chrony
+  # Ubuntu's own packages rather than Docker's apt repository: one fewer third
+  # party signing key trusted on a node that holds every user's credentials.
+  - docker.io
+  - docker-compose-v2
+%{ if role == "app" ~}
+  - nginx
+%{ endif ~}
 
 users:
   - name: ${admin_user}
-    groups: [sudo]
+    groups: [sudo, docker]
     shell: /bin/bash
     sudo: "ALL=(ALL) NOPASSWD:ALL"
     lock_passwd: true
@@ -55,7 +87,31 @@ write_files:
 runcmd:
   - [systemctl, restart, ssh]
   - [systemctl, enable, --now, fail2ban]
+  - [systemctl, enable, --now, docker]
+
+  # Directory layout, created here so the converge step only ever has to place
+  # files. 0751 rather than 0750: the redis container runs as uid 999 and needs
+  # the traverse bit to reach its own config, while the directory stays
+  # unlistable to everyone else.
+  - [install, -d, -m, "0751", /etc/pullfm]
+  - [install, -d, -m, "0750", /etc/ssl/pullfm]
+  - [install, -d, -m, "0755", /opt/pullfm]
+  - [install, -d, -m, "0755", /var/lib/pullfm]
+
 %{ if tailscale_auth_key != "" ~}
+  # Tailscale, so break-glass SSH is not the only way in. Without this a
+  # rebuilt node is unreachable: there is no inbound rule for port 22 and
+  # recovering one means editing ssh_allowlist_cidrs, applying, and taking it
+  # back out again by hand.
+  #
+  # --accept-dns=false because MagicDNS rewrites /etc/resolv.conf, and a server
+  # whose name resolution depends on the tailnet fails in a new and confusing
+  # way the moment the tailnet does.
   - curl -fsSL https://tailscale.com/install.sh | sh
-  - tailscale up --authkey "${tailscale_auth_key}" --hostname "${hostname}" --ssh=false --accept-routes=false
+  - tailscale up --authkey "${tailscale_auth_key}" --hostname "${hostname}" --ssh=false --accept-routes=false --accept-dns=false
 %{ endif ~}
+
+  # The completion marker. `converge` polls for this rather than sleeping,
+  # because apt on a fresh node takes anywhere between 40 seconds and four
+  # minutes and a fixed sleep is either flaky or slow.
+  - ["/bin/sh", "-c", "echo ${hostname} >/var/lib/pullfm/cloud-init-done"]

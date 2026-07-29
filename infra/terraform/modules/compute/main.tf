@@ -60,6 +60,7 @@ resource "hcloud_server" "app" {
 
   user_data = templatefile("${path.module}/templates/cloud-init.yaml.tftpl", {
     hostname           = "${var.name_prefix}-app-${count.index + 1}"
+    role               = "app"
     admin_user         = var.admin_user
     ssh_public_keys    = values(var.ssh_public_keys)
     tailscale_auth_key = local.tailscale_auth_key
@@ -97,6 +98,7 @@ resource "hcloud_server" "db" {
 
   user_data = templatefile("${path.module}/templates/cloud-init.yaml.tftpl", {
     hostname           = "${var.name_prefix}-db-1"
+    role               = "db"
     admin_user         = var.admin_user
     ssh_public_keys    = values(var.ssh_public_keys)
     tailscale_auth_key = local.tailscale_auth_key
@@ -135,6 +137,12 @@ resource "hcloud_server" "db" {
     # user_data is ignored here but not on the BFF nodes: replacing a stateless
     # node to pick up a cloud-init change is routine, replacing the database to
     # do the same is never the right move.
+    #
+    # A LIVE node therefore keeps the cloud-init it booted with, which is
+    # correct and is also why `converge` re-applies the bootstrap script rather
+    # than trusting that cloud-init already did. A REBUILT node - the case Gate
+    # 4 measures - gets the current template, because it is created rather than
+    # updated and this argument only suppresses updates.
     ignore_changes = [image, user_data]
   }
 }

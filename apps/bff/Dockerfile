@@ -24,14 +24,25 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/bff/package.json apps/bff/
 COPY packages/crypto/package.json packages/crypto/
 COPY packages/db/package.json packages/db/
+COPY packages/discovery/package.json packages/discovery/
 COPY packages/upstream/package.json packages/upstream/
 
 RUN pnpm install --frozen-lockfile --filter @pull-fm/bff...
 
 COPY tsconfig.base.json ./
 COPY apps/bff apps/bff
+# The workspace packages' SOURCE, not just their manifests. They publish types
+# and JavaScript from `dist`, which is gitignored and therefore does not exist
+# in a build context: without these lines the BFF build fails with "cannot find
+# module @pull-fm/crypto", which is exactly how this image stopped building.
+COPY packages/crypto packages/crypto
+COPY packages/discovery packages/discovery
+COPY packages/upstream packages/upstream
 
-RUN pnpm --filter @pull-fm/bff build
+# `@pull-fm/bff...` with the trailing dots builds the dependencies too, in
+# topological order. Filtering to the app alone builds it against packages that
+# have no `dist` yet.
+RUN pnpm --filter @pull-fm/bff... build
 
 # Produces a self-contained tree with a real node_modules and only production
 # dependencies.
