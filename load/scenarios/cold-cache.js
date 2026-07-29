@@ -52,6 +52,12 @@ import {
   logUpstreamReport,
   resetMock,
 } from "../lib/mock-control.js";
+import { recordGuardMetrics } from "../lib/guard.js";
+import {
+  upstreamCalls,
+  upstreamCallsPerKey,
+  upstreamRefused,
+} from "../lib/metrics.js";
 
 assertSafeTarget();
 
@@ -112,6 +118,10 @@ export default function () {
 }
 
 export function teardown(data) {
+  // Upstream fan-out, measured inside the BFF process. Must run in teardown:
+  // handleSummary cannot make HTTP calls, and without this the shared
+  // upstream_calls_per_key gate has no samples and passes by default.
+  recordGuardMetrics({ upstreamCalls, upstreamCallsPerKey, upstreamRefused });
   if (!data || !data.mockAvailable) {
     console.warn(
       "mock control plane unavailable: upstream quota was not verified",

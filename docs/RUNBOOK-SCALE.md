@@ -285,6 +285,23 @@ Staircase to 200 concurrent VUs against `DATABASE_POOL_MAX=10`, direct endpoint.
 200 concurrent clients multiplexed onto 10 connections queued and stayed
 correct. Roughly **2,000 req/s** sustained on one node.
 
+### `chaos` (the Gate 7 matrix) — **FAIL on recovery, PASS on everything else**
+
+ListenBrainz forced to 429, then 500, then timeout. 25 s hold per cell.
+
+| Gate 7 criterion       | Measured    | Verdict  |
+| ---------------------- | ----------- | -------- |
+| `/feed` returns 200    | yes         | PASS     |
+| with degraded sections | 0 empty     | PASS     |
+| p95 < 800 ms           | **32.5 ms** | PASS     |
+| errors < 1%            | **0%**      | PASS     |
+| no pool exhaustion     | 0           | PASS     |
+| **recovery < 60 s**    | > window    | **FAIL** |
+
+4,952 requests, 51 upstream calls, worst key 1, zero refused hosts. Five of the
+six Gate 7 criteria hold comfortably. The sixth is section 6.1 and is the same
+defect the `breaker` scenario isolates.
+
 ### `breaker` — **FAIL on recovery**
 
 | Metric                                  | Measured   | Gate       |

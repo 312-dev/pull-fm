@@ -52,6 +52,12 @@ import {
   logUpstreamReport,
 } from "../lib/mock-control.js";
 import { chaosRecoverySeconds } from "../lib/metrics.js";
+import { recordGuardMetrics } from "../lib/guard.js";
+import {
+  upstreamCalls,
+  upstreamCallsPerKey,
+  upstreamRefused,
+} from "../lib/metrics.js";
 
 assertSafeTarget();
 
@@ -203,6 +209,10 @@ function sleepUntil(targetSeconds) {
 }
 
 export function teardown(data) {
+  // Upstream fan-out, measured inside the BFF process. Must run in teardown:
+  // handleSummary cannot make HTTP calls, and without this the shared
+  // upstream_calls_per_key gate has no samples and passes by default.
+  recordGuardMetrics({ upstreamCalls, upstreamCallsPerKey, upstreamRefused });
   // Non-negotiable: leaving a fault set would poison every later run against
   // this mock, and the symptom would look like a real regression.
   clearFaults("idle");
