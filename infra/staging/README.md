@@ -199,6 +199,46 @@ instant the first node claims it, so the copy left in state authorises nothing
 afterwards, and ephemeral means a torn-down environment does not leave dead
 nodes in the tailnet after every drill.
 
+### Measured, 2026-07-29
+
+The drill is `down` then `up`, timed, with no human step in between:
+
+| Step                                       | Result                                                                           |
+| ------------------------------------------ | -------------------------------------------------------------------------------- |
+| `./infra/staging-env.sh down`              | 19 resources destroyed, **51 seconds**, run rate to EUR 0.00/mo                  |
+| `./infra/staging-env.sh up`                | **6 minutes 1 second**, exit 0, no interaction                                   |
+| `curl https://api-staging.pull.fm/healthz` | **200**, `version` = the commit at HEAD                                          |
+| `curl https://api-staging.pull.fm/readyz`  | **200**, `database: ok`, `redis: ok` - migrations applied, both stores reachable |
+
+Six minutes against a thirty minute budget. Staging was then torn down again,
+because that is what an ephemeral environment is for; `up` is how it comes back.
+
+Three bugs were found by running it rather than by reading it, which is the
+argument for drilling in one paragraph:
+
+1. **The secret directory deleted itself.** `pullfm_secret_workdir` installed its
+   own `EXIT` trap, and the caller captured its output with a command
+   substitution - so the trap fired when that subshell exited, removing the
+   directory before a single byte was written into it. The caller owns the trap
+   now, and `pullfm_render_staging_secrets` refuses to write into a directory
+   that is not present and 0700.
+
+2. **A rebuild SSHed to the previous node's corpse for ten minutes.** Tailscale
+   dedups the DNS name of a device claiming a taken hostname
+   (`pullfm-staging-app-1-1`) but leaves `HostName` identical on both, and
+   ephemeral reaping is not prompt: the destroyed pair was still listed fifteen
+   minutes later. Node lookup now prefers an ONLINE peer and accepts the `-N`
+   suffix, and `up` deletes stale `pullfm-staging-*` devices before minting a
+   key, which turns the race into a precondition.
+
+3. **A progress message became part of an IP address.** `wait_for_node` returns
+   the address on stdout and also logged there, so the caller got
+   `"  waiting for ...\n100.76.161.103"` and SSH answered "hostname contains
+   invalid characters". Progress goes to stderr.
+
+None of the three is exotic. All three are invisible to review and fatal to an
+unattended rebuild.
+
 ### What the previous drill found, and what changed
 
 **Measured 2026-07-29.** Staging was torn down and rebuilt from IaC, and did

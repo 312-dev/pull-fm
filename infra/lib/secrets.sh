@@ -5,7 +5,8 @@
 # SOURCE this file. It defines functions and exports nothing by itself.
 #
 #   source "${ROOT}/infra/lib/secrets.sh"
-#   dir="$(pullfm_secret_workdir)"       # 0700, removed by the trap it installs
+#   dir="$(pullfm_secret_workdir)"       # 0700; the CALLER owns the cleanup trap
+#   trap 'rm -rf "${dir}"' EXIT INT TERM
 #   pullfm_render_staging_secrets "${dir}"
 #
 # ---------------------------------------------------------------------------
@@ -14,8 +15,8 @@
 #
 #   1. NOTHING RENDERED HERE MAY EVER BE COMMITTED. The repository is public
 #      and gitleaks blocks CI. Every file this writes goes into a 0700
-#      directory under the system temporary directory, which is removed by an
-#      EXIT trap even when the caller fails.
+#      directory under the system temporary directory, which the caller removes
+#      with an EXIT trap even when it fails partway.
 #
 #   2. NOTHING RENDERED HERE MAY REACH TERRAFORM STATE. `user_data` is
 #      persisted in state and readable from the Hetzner API for the life of the
@@ -61,17 +62,24 @@ _pullfm_document() {
     _pullfm_secret_die "1Password: document '${item}' is empty" || return 1
 }
 
-# A 0700 scratch directory that removes itself.
+# A 0700 scratch directory for rendered plaintext.
 #
-# The trap is installed on the CALLER's shell deliberately: a caller that dies
-# between rendering and shipping must not leave plaintext behind, and asking
-# every caller to remember a cleanup is how one of them eventually forgets.
+# It does NOT install its own cleanup trap, and that is a correction rather than
+# an omission. A trap set here runs when the COMMAND SUBSTITUTION that captured
+# the path exits, which is immediately, so the directory was deleted before a
+# single byte could be written into it. The caller owns the trap because the
+# caller is the shell that has to still be alive when the files are used:
+#
+#   secrets="$(pullfm_secret_workdir)"
+#   trap 'rm -rf "${secrets}"' EXIT INT TERM
+#
+# `pullfm_render_staging_secrets` refuses to run against a directory that is not
+# 0700, so a caller who invents their own path cannot accidentally render
+# credentials somewhere world readable.
 pullfm_secret_workdir() {
   local dir
   dir="$(mktemp -d "${TMPDIR:-/tmp}/pullfm-secrets.XXXXXXXX")" || return 1
   chmod 0700 "${dir}"
-  # shellcheck disable=SC2064
-  trap "rm -rf '${dir}'" EXIT INT TERM
   printf '%s' "${dir}"
 }
 
@@ -90,6 +98,18 @@ pullfm_render_staging_secrets() {
 
   command -v op >/dev/null ||
     _pullfm_secret_die "1Password CLI (op) not found" || return 1
+
+  # Fail loudly rather than writing plaintext into a directory that does not
+  # exist or that other users can read. The first version of this file lost the
+  # directory to a trap and every write failed one line at a time; a single
+  # check up front turns that into one legible error.
+  [[ -d "${dir}" ]] ||
+    _pullfm_secret_die "secret directory '${dir}' does not exist" || return 1
+  local mode
+  mode="$(stat -f '%Lp' "${dir}" 2>/dev/null || stat -c '%a' "${dir}" 2>/dev/null)"
+  [[ "${mode}" == "700" ]] ||
+    _pullfm_secret_die "secret directory '${dir}' is mode ${mode}, refusing to render credentials into it" ||
+    return 1
 
   local postgres_pw redis_cache_pw redis_quota_pw kek kek_id
   local workos_key workos_webhook seatgeek_id seatgeek_secret

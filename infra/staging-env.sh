@@ -140,19 +140,71 @@ ssh_node() {
 # Resolved from `tailscale status` rather than trusting MagicDNS, because
 # MagicDNS resolution depends on the operator's own DNS configuration and a
 # rebuild must not fail on how somebody's laptop is set up.
+#
+# ONLINE PEERS WIN, AND THAT IS NOT A TIE-BREAK - IT IS THE WHOLE FUNCTION.
+# Tailscale dedups the DNS name of a second device claiming a taken hostname
+# (`pullfm-staging-app-1-1`) but leaves `HostName` identical on both. A rebuild
+# therefore sees the previous, dead node and the new one under the same name
+# until the ephemeral reaper catches up, which took well over fifteen minutes in
+# a measured drill. Matching on HostName alone picked whichever the JSON
+# happened to list first, so the rebuild spent ten minutes SSHing to a machine
+# that no longer existed and then failed. Preferring an online peer makes it
+# deterministic; accepting the `-N` suffix makes it find the new node at all.
 tailnet_ip() {
   local name="$1"
   tailscale status --json 2>/dev/null | python3 -c "
-import json, sys
+import json, re, sys
+
 want = sys.argv[1]
-peers = json.load(sys.stdin).get('Peer') or {}
-for peer in peers.values():
-    if peer.get('HostName') == want or peer.get('DNSName', '').split('.')[0] == want:
-        ips = peer.get('TailscaleIPs') or []
-        if ips:
-            print(ips[0])
-            break
+# The dedup suffix Tailscale appends when a hostname is already claimed.
+pattern = re.compile(r'^' + re.escape(want) + r'(-\d+)?$')
+peers = (json.load(sys.stdin).get('Peer') or {}).values()
+
+matches = [
+    p for p in peers
+    if p.get('HostName') == want
+    or pattern.match((p.get('DNSName') or '').split('.')[0])
+]
+# Online first. A dead peer with the right name is the trap this exists to
+# avoid, and there is no useful thing to do with its address.
+matches.sort(key=lambda p: not p.get('Online', False))
+for peer in matches:
+    ips = peer.get('TailscaleIPs') or []
+    if ips and peer.get('Online', False):
+        print(ips[0])
+        break
 " "${name}"
+}
+
+# Removes staging devices left behind by a previous environment.
+#
+# Ephemeral keys are supposed to make this unnecessary and eventually do, but
+# the reaper is not prompt enough to rely on inside a rebuild: a measured drill
+# still saw the previous pair fifteen minutes after they were destroyed. Purging
+# up front turns a race into a precondition. Only ever touches devices whose
+# hostname starts with the staging prefix, so a stray match cannot reach the
+# personal fleet.
+purge_stale_tailnet_devices() {
+  local token
+  token="$(op item get 'Tailscale API' --vault "${PULLFM_SECRETS_VAULT}" \
+    --fields label=password --reveal 2>/dev/null)" || return 0
+
+  curl -sS -H "Authorization: Bearer ${token}" \
+    'https://api.tailscale.com/api/v2/tailnet/-/devices' |
+    python3 -c "
+import json, sys
+prefix = sys.argv[1]
+for d in json.load(sys.stdin).get('devices', []):
+    if (d.get('hostname') or '').startswith(prefix):
+        print(d['nodeId'])
+" "pullfm-staging" |
+    while read -r node_id; do
+      [[ -z "${node_id}" ]] && continue
+      warn "removing stale tailnet device ${node_id}"
+      curl -sS -o /dev/null -X DELETE \
+        -H "Authorization: Bearer ${token}" \
+        "https://api.tailscale.com/api/v2/device/${node_id}" || true
+    done
 }
 
 # Mints a single-use, pre-authorised, EPHEMERAL Tailscale auth key.
@@ -200,7 +252,11 @@ print(key)
 # a fixed sleep is either flaky or slow.
 wait_for_node() {
   local name="$1" deadline=$((SECONDS + 600)) ip=""
-  log "  waiting for ${name} to reach the tailnet"
+  # STDERR, not stdout. This function's stdout IS its return value - the caller
+  # captures it with a command substitution - so a progress line printed there
+  # is concatenated onto the address and the next SSH fails with "hostname
+  # contains invalid characters".
+  log "  waiting for ${name} to reach the tailnet" >&2
   while ((SECONDS < deadline)); do
     ip="$(tailnet_ip "${name}")"
     if [[ -n "${ip}" ]] && ssh_node "${ip}" \
@@ -245,7 +301,11 @@ cmd_converge() {
     die "both staging nodes must be on the tailnet before converging (run 'up')"
 
   log "rendering secrets from 1Password"
-  secrets="$(pullfm_secret_workdir)"
+  secrets="$(pullfm_secret_workdir)" || die "could not create a secret directory"
+  # The trap belongs HERE, not inside the helper: set there it would run when
+  # the command substitution above exits, which is before anything is written.
+  # shellcheck disable=SC2064
+  trap "rm -rf '${secrets}'" EXIT INT TERM
   pullfm_render_staging_secrets "${secrets}" || die "could not render secrets"
 
   # The database first. The application node runs forward migrations as part of
@@ -319,6 +379,12 @@ cmd_up() {
   # Minted per apply. A key already spent by a previous boot would leave a
   # rebuilt node off the tailnet and therefore unreachable, which is the exact
   # failure this whole command exists to prevent.
+  # Before the key is minted, not after: a node that boots into a tailnet still
+  # holding its predecessor's registration inherits a deduped DNS name and is
+  # then indistinguishable from the corpse by hostname alone.
+  log "purging stale staging devices from the tailnet"
+  purge_stale_tailnet_devices
+
   log "minting a single-use ephemeral Tailscale key"
   TF_VAR_tailscale_auth_key="$(mint_tailscale_key)" || exit 1
   export TF_VAR_tailscale_auth_key
