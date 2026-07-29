@@ -41,40 +41,18 @@
 
 import { loadConfig } from "../config.js";
 import { buildServices, closeServices } from "../wiring.js";
-import {
-  AuditRetention,
-  AUDIT_RETENTION_DEFAULTS,
-} from "../services/audit-retention.js";
-import { intFromEnv, jobLogger, runJob } from "./job-env.js";
+import { jobLogger, runJob } from "./job-env.js";
 
 async function main(): Promise<number> {
   const cfg = loadConfig();
   const log = jobLogger();
-  const d = AUDIT_RETENTION_DEFAULTS;
 
   const services = buildServices(cfg, log);
   try {
-    const job = new AuditRetention(services.db, {
-      fullFidelityDays: intFromEnv(
-        "AUDIT_FULL_FIDELITY_DAYS",
-        d.fullFidelityDays,
-      ),
-      postDeletionDays: intFromEnv(
-        "AUDIT_POST_DELETION_DAYS",
-        d.postDeletionDays,
-      ),
-      hardDeleteDays: intFromEnv("AUDIT_HARD_DELETE_DAYS", d.hardDeleteDays),
-      tokenIpDays: intFromEnv("AUDIT_TOKEN_IP_DAYS", d.tokenIpDays),
-      usersPerBatch: intFromEnv("AUDIT_USERS_PER_BATCH", d.usersPerBatch),
-      rowsPerBatch: intFromEnv("AUDIT_ROWS_PER_BATCH", d.rowsPerBatch),
-      maxBatchesPerStatement: intFromEnv(
-        "AUDIT_MAX_BATCHES",
-        d.maxBatchesPerStatement,
-      ),
-      freshnessHours: intFromEnv("AUDIT_FRESHNESS_HOURS", d.freshnessHours),
-    });
-
-    const outcome = await job.run();
+    // From the bundle, not constructed here. The windows still come from the
+    // AUDIT_* variables; `wiring.ts` resolves them, so the numbers this
+    // entrypoint enforces are the ones the suites assert against.
+    const outcome = await services.auditRetention.run();
     process.stdout.write(`${JSON.stringify(outcome)}\n`);
 
     if (!outcome.ran) return 0;

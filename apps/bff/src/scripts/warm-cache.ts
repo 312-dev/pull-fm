@@ -45,12 +45,8 @@
 
 import { loadConfig } from "../config.js";
 import { buildServices, closeServices } from "../wiring.js";
-import {
-  CacheWarmer,
-  CACHE_WARMER_DEFAULTS,
-  type PhaseOutcome,
-} from "../services/cache-warmer.js";
-import { intFromEnv, jobLogger, runJob } from "./job-env.js";
+import type { PhaseOutcome } from "../services/cache-warmer.js";
+import { jobLogger, runJob } from "./job-env.js";
 
 /** True when a phase stopped short of finishing its candidate list. */
 function backedOff(phase: PhaseOutcome): boolean {
@@ -65,37 +61,14 @@ function backedOff(phase: PhaseOutcome): boolean {
 async function main(): Promise<number> {
   const cfg = loadConfig();
   const log = jobLogger();
-  const d = CACHE_WARMER_DEFAULTS;
 
   const services = buildServices(cfg, log);
   try {
-    const job = new CacheWarmer(
-      services.db,
-      services.discovery,
-      services.upstream.previewWarmer,
-      {
-        musicbrainzIntervalMs: intFromEnv(
-          "WARM_MUSICBRAINZ_INTERVAL_MS",
-          d.musicbrainzIntervalMs,
-        ),
-        musicbrainzMaxCalls: intFromEnv(
-          "WARM_MUSICBRAINZ_MAX_CALLS",
-          d.musicbrainzMaxCalls,
-        ),
-        itunesIntervalMs: intFromEnv(
-          "WARM_ITUNES_INTERVAL_MS",
-          d.itunesIntervalMs,
-        ),
-        itunesMaxCalls: intFromEnv("WARM_ITUNES_MAX_CALLS", d.itunesMaxCalls),
-        runDeadlineMs: intFromEnv("WARM_RUN_DEADLINE_MS", d.runDeadlineMs),
-        maxConsecutiveFailures: intFromEnv(
-          "WARM_MAX_CONSECUTIVE_FAILURES",
-          d.maxConsecutiveFailures,
-        ),
-      },
-    );
-
-    const outcome = await job.run();
+    // From the bundle, not constructed here. That is what guarantees the warmer
+    // fills the same cache the request path reads, and that it holds
+    // `upstream.previewWarmer` rather than `upstream.previews`. The pacing
+    // still comes from the WARM_* variables; `wiring.ts` resolves them.
+    const outcome = await services.cacheWarmer.run();
     process.stdout.write(`${JSON.stringify(outcome)}\n`);
 
     if (!outcome.ran) return 0;

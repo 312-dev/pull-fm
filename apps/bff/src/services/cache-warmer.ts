@@ -130,6 +130,7 @@ import {
   type Database,
   type Queryable,
 } from "../lib/db.js";
+import { intFromEnv } from "../lib/job-env.js";
 
 /** Advisory-lock key, inside the shared namespace registry in lib/db.ts. */
 export const CACHE_WARM_LOCK_KEY = "upstream:cache-warm";
@@ -191,6 +192,46 @@ export const CACHE_WARMER_DEFAULTS: Omit<CacheWarmerOptions, "now" | "sleep"> =
     runDeadlineMs: 20 * 60_000,
     maxConsecutiveFailures: 5,
   };
+
+/**
+ * Resolves the options from the environment, falling back to the defaults.
+ *
+ * Lives beside the defaults rather than in `wiring.ts` so the variable names
+ * and the pacing arithmetic they override are one screen apart. See
+ * lib/job-env.ts for why these are not in `config.ts`. `now` and `sleep` are
+ * absent on purpose: they are test seams, not operator knobs, and an
+ * environment that could shorten the pacing sleep could turn this job into a
+ * terms violation without touching the interval it appears to respect.
+ */
+export function cacheWarmerOptionsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): Omit<CacheWarmerOptions, "now" | "sleep"> {
+  const d = CACHE_WARMER_DEFAULTS;
+  return {
+    musicbrainzIntervalMs: intFromEnv(
+      "WARM_MUSICBRAINZ_INTERVAL_MS",
+      d.musicbrainzIntervalMs,
+      env,
+    ),
+    musicbrainzMaxCalls: intFromEnv(
+      "WARM_MUSICBRAINZ_MAX_CALLS",
+      d.musicbrainzMaxCalls,
+      env,
+    ),
+    itunesIntervalMs: intFromEnv(
+      "WARM_ITUNES_INTERVAL_MS",
+      d.itunesIntervalMs,
+      env,
+    ),
+    itunesMaxCalls: intFromEnv("WARM_ITUNES_MAX_CALLS", d.itunesMaxCalls, env),
+    runDeadlineMs: intFromEnv("WARM_RUN_DEADLINE_MS", d.runDeadlineMs, env),
+    maxConsecutiveFailures: intFromEnv(
+      "WARM_MAX_CONSECUTIVE_FAILURES",
+      d.maxConsecutiveFailures,
+      env,
+    ),
+  };
+}
 
 /**
  * Failure kinds that mean "someone else needs this budget more than we do".

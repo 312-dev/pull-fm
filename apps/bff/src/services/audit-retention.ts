@@ -137,6 +137,7 @@ import {
   type Database,
   type Queryable,
 } from "../lib/db.js";
+import { intFromEnv } from "../lib/job-env.js";
 
 /** Advisory-lock key, inside the shared namespace registry in lib/db.ts. */
 export const AUDIT_RETENTION_LOCK_KEY = "audit:retention-purge";
@@ -182,6 +183,44 @@ export const AUDIT_RETENTION_DEFAULTS: AuditRetentionOptions = {
   maxBatchesPerStatement: 20,
   freshnessHours: 48,
 };
+
+/**
+ * Resolves the options from the environment, falling back to the defaults.
+ *
+ * Lives beside the defaults rather than in `wiring.ts` so the variable names
+ * and the published retention figures they override are one screen apart. See
+ * lib/job-env.ts for why these are not in `config.ts`, and note the reader
+ * THROWS on a value that is present but not a positive integer: a silently
+ * ignored override here would change a window that
+ * docs/compliance/data-retention-policy.md states as fact.
+ */
+export function auditRetentionOptionsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): AuditRetentionOptions {
+  const d = AUDIT_RETENTION_DEFAULTS;
+  return {
+    fullFidelityDays: intFromEnv(
+      "AUDIT_FULL_FIDELITY_DAYS",
+      d.fullFidelityDays,
+      env,
+    ),
+    postDeletionDays: intFromEnv(
+      "AUDIT_POST_DELETION_DAYS",
+      d.postDeletionDays,
+      env,
+    ),
+    hardDeleteDays: intFromEnv("AUDIT_HARD_DELETE_DAYS", d.hardDeleteDays, env),
+    tokenIpDays: intFromEnv("AUDIT_TOKEN_IP_DAYS", d.tokenIpDays, env),
+    usersPerBatch: intFromEnv("AUDIT_USERS_PER_BATCH", d.usersPerBatch, env),
+    rowsPerBatch: intFromEnv("AUDIT_ROWS_PER_BATCH", d.rowsPerBatch, env),
+    maxBatchesPerStatement: intFromEnv(
+      "AUDIT_MAX_BATCHES",
+      d.maxBatchesPerStatement,
+      env,
+    ),
+    freshnessHours: intFromEnv("AUDIT_FRESHNESS_HOURS", d.freshnessHours, env),
+  };
+}
 
 export interface AuditRetentionOutcome {
   /** False when another run held the lock. Not an error. */

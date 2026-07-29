@@ -199,6 +199,15 @@ export const TEST_WEBHOOK_SECRET = "whsec_test_not_a_real_secret_value";
 export interface TestAppOptions {
   readonly maintenanceMode?: boolean;
   readonly env?: Record<string, string>;
+  /**
+   * Overrides for the scheduled jobs' knobs.
+   *
+   * Separate from `env` because it is a separate mechanism: `env` feeds
+   * `loadConfig`, and the job windows are deliberately not in that schema (see
+   * src/lib/job-env.ts). This reaches `buildServices`, so a suite can assert
+   * that an operator's override lands on the instance the entrypoint runs.
+   */
+  readonly jobEnv?: NodeJS.ProcessEnv;
 }
 
 export async function buildTestApp(
@@ -265,6 +274,11 @@ export async function buildTestApp(
       // convenience: MusicBrainz blocks IPs and Apple has no appeals process,
       // so a suite that reached them could cost the project its API access.
       upstreamFetch: upstreams.fetch,
+      // An EMPTY environment by default, not `process.env`: a suite must assert
+      // the shipped defaults, and a stray WARM_* or AUDIT_* variable in a
+      // developer's shell would otherwise silently retune a retention window
+      // mid-run and turn a real failure into a green test.
+      jobEnv: opts.jobEnv ?? {},
     },
   );
 

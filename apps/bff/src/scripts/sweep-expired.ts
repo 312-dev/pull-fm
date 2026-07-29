@@ -37,29 +37,18 @@
 
 import { loadConfig } from "../config.js";
 import { buildServices, closeServices } from "../wiring.js";
-import {
-  ExpirySweeper,
-  EXPIRY_SWEEPER_DEFAULTS,
-} from "../services/expiry-sweeper.js";
-import { intFromEnv, jobLogger, runJob } from "./job-env.js";
+import { jobLogger, runJob } from "./job-env.js";
 
 async function main(): Promise<number> {
   const cfg = loadConfig();
   const log = jobLogger();
-  const d = EXPIRY_SWEEPER_DEFAULTS;
 
   const services = buildServices(cfg, log);
   try {
-    const job = new ExpirySweeper(services.db, {
-      slackSeconds: intFromEnv("EXPIRY_SWEEP_SLACK_S", d.slackSeconds),
-      rowsPerBatch: intFromEnv("EXPIRY_SWEEP_ROWS_PER_BATCH", d.rowsPerBatch),
-      maxBatchesPerTable: intFromEnv(
-        "EXPIRY_SWEEP_MAX_BATCHES",
-        d.maxBatchesPerTable,
-      ),
-    });
-
-    const outcome = await job.run();
+    // From the bundle, not constructed here. The options still come from the
+    // EXPIRY_SWEEP_* variables; `wiring.ts` resolves them, so this entrypoint
+    // and the suites run the same object.
+    const outcome = await services.expirySweeper.run();
     process.stdout.write(`${JSON.stringify(outcome)}\n`);
 
     if (!outcome.ran) return 0;

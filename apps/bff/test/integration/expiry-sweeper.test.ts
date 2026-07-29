@@ -44,6 +44,16 @@ afterAll(async () => {
   await ctx.close();
 });
 
+/**
+ * A sweeper with tuned options.
+ *
+ * Every default-configured run in this file goes through
+ * `ctx.services.expirySweeper`, which is the object `pnpm sweep:expired`
+ * actually runs, so a wiring mistake fails here rather than in production. This
+ * helper exists only for the two cases the bundle cannot express: a per-test
+ * option tuning that would otherwise cost a whole second application, and a
+ * substituted database that fails on demand.
+ */
 const sweeper = (over: Partial<ExpirySweeperOptions> = {}): ExpirySweeper =>
   new ExpirySweeper(ctx.services.db, { ...EXPIRY_SWEEPER_DEFAULTS, ...over });
 
@@ -122,7 +132,7 @@ describe("what the sweeper refuses to delete", () => {
     const userId = await makeUser();
     const key = await idempotencyKey(userId, -3600);
 
-    await sweeper().run();
+    await ctx.services.expirySweeper.run();
 
     expect(await keyExists(userId, key)).toBe(true);
   });
@@ -134,7 +144,7 @@ describe("what the sweeper refuses to delete", () => {
     const userId = await makeUser();
     const key = await idempotencyKey(userId, 60);
 
-    const outcome = await sweeper().run();
+    const outcome = await ctx.services.expirySweeper.run();
 
     expect(outcome.ran).toBe(true);
     expect(await keyExists(userId, key)).toBe(true);
@@ -144,7 +154,7 @@ describe("what the sweeper refuses to delete", () => {
     const userId = await makeUser();
     const hash = await connectState(userId, -60);
 
-    await sweeper().run();
+    await ctx.services.expirySweeper.run();
 
     expect(await stateExists(hash)).toBe(true);
   });
@@ -153,7 +163,7 @@ describe("what the sweeper refuses to delete", () => {
     const userId = await makeUser();
     const hash = await connectState(userId, 60);
 
-    await sweeper().run();
+    await ctx.services.expirySweeper.run();
 
     expect(await stateExists(hash)).toBe(true);
   });
@@ -166,7 +176,7 @@ describe("what the sweeper refuses to delete", () => {
     const doomedState = await connectState(stale, 7200);
     const keptState = await connectState(live, -7200);
 
-    await sweeper().run();
+    await ctx.services.expirySweeper.run();
 
     expect(await keyExists(stale, doomed)).toBe(false);
     expect(await keyExists(live, kept)).toBe(true);
@@ -181,7 +191,7 @@ describe("what the sweeper does delete", () => {
     const userId = await makeUser();
     const key = await idempotencyKey(userId, 7200);
 
-    const outcome = await sweeper().run();
+    const outcome = await ctx.services.expirySweeper.run();
 
     expect(outcome.idempotencyKeysDeleted).toBeGreaterThan(0);
     expect(await keyExists(userId, key)).toBe(false);
@@ -195,7 +205,7 @@ describe("what the sweeper does delete", () => {
     const userId = await makeUser();
     await idempotencyKey(userId, 7200);
 
-    await sweeper().run();
+    await ctx.services.expirySweeper.run();
 
     const { rows } = await ctx.services.db.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM idempotency_keys
@@ -209,7 +219,7 @@ describe("what the sweeper does delete", () => {
     const userId = await makeUser();
     const hash = await connectState(userId, 7200);
 
-    const outcome = await sweeper().run();
+    const outcome = await ctx.services.expirySweeper.run();
 
     expect(outcome.connectStatesDeleted).toBeGreaterThan(0);
     expect(await stateExists(hash)).toBe(false);
@@ -220,8 +230,8 @@ describe("what the sweeper does delete", () => {
     await idempotencyKey(userId, 7200);
     await connectState(userId, 7200);
 
-    await sweeper().run();
-    const second = await sweeper().run();
+    await ctx.services.expirySweeper.run();
+    const second = await ctx.services.expirySweeper.run();
 
     expect(second.idempotencyKeysDeleted).toBe(0);
     expect(second.connectStatesDeleted).toBe(0);
@@ -249,7 +259,7 @@ describe("bounds", () => {
     expect(outcome.capped).toBe(true);
 
     // And the rest go on subsequent runs rather than being stranded.
-    await sweeper().run();
+    await ctx.services.expirySweeper.run();
     const { rows } = await ctx.services.db.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM idempotency_keys WHERE user_id = $1`,
       [userId],
@@ -278,7 +288,7 @@ describe("concurrency", () => {
       expect(acquired).toBe(true);
 
       try {
-        const outcome = await sweeper().run();
+        const outcome = await ctx.services.expirySweeper.run();
 
         expect(outcome.ran).toBe(false);
         expect(outcome.idempotencyKeysDeleted).toBe(0);
@@ -294,8 +304,8 @@ describe("concurrency", () => {
   });
 
   test("releases the lock, so the next run can proceed", async () => {
-    expect((await sweeper().run()).ran).toBe(true);
-    expect((await sweeper().run()).ran).toBe(true);
+    expect((await ctx.services.expirySweeper.run()).ran).toBe(true);
+    expect((await ctx.services.expirySweeper.run()).ran).toBe(true);
   });
 });
 
@@ -349,7 +359,7 @@ describe("failure", () => {
     // The state is untouched, not half-deleted, and the retry finishes it.
     expect(await stateExists(hash)).toBe(true);
 
-    const retry = await sweeper().run();
+    const retry = await ctx.services.expirySweeper.run();
     expect(retry.failed).toBe(0);
     expect(await stateExists(hash)).toBe(false);
   });
@@ -378,7 +388,54 @@ describe("failure", () => {
       EXPIRY_SWEEPER_DEFAULTS,
     ).run();
 
-    expect((await sweeper().run()).ran).toBe(true);
+    expect((await ctx.services.expirySweeper.run()).ran).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Registration.
+//
+// `pnpm sweep:expired` reads the sweeper off the service bundle rather than
+// building one beside the scheduler. That is what makes every assertion above a
+// statement about the job that actually runs, instead of about a second
+// construction of it that happens to share a class.
+// ---------------------------------------------------------------------------
+describe("registration", () => {
+  test("the bundled sweeper is stable, not rebuilt per read", () => {
+    // A getter that constructed one per access would satisfy the type and
+    // defeat the point: two callers would hold two jobs, and the advisory lock
+    // would be doing work the wiring was supposed to make unnecessary.
+    expect(ctx.services.expirySweeper).toBeInstanceOf(ExpirySweeper);
+    expect(ctx.services.expirySweeper).toBe(ctx.services.expirySweeper);
+  });
+
+  test("its batch ceiling comes from the environment", async () => {
+    // The sweep knobs are deliberately absent from `config.ts` (see
+    // src/lib/job-env.ts), so this is the only place the path from an
+    // operator's variable to the object the entrypoint runs is checked end to
+    // end. Before the job was on the bundle there was nothing to check: the
+    // entrypoint read the variable and built its own sweeper, so a wiring
+    // mistake was invisible until production.
+    const tuned = await buildTestApp({
+      jobEnv: {
+        EXPIRY_SWEEP_ROWS_PER_BATCH: "1",
+        EXPIRY_SWEEP_MAX_BATCHES: "1",
+      },
+    });
+    try {
+      const userId = await makeUser();
+      await idempotencyKey(userId, 7200);
+      await idempotencyKey(userId, 7200);
+
+      const outcome = await tuned.services.expirySweeper.run();
+      expect(outcome.ran).toBe(true);
+      expect(outcome.idempotencyKeysDeleted).toBe(1);
+      expect(outcome.capped).toBe(true);
+    } finally {
+      await tuned.close();
+      // The remainder is not stranded: the default-configured job drains it.
+      await ctx.services.expirySweeper.run();
+    }
   });
 });
 

@@ -145,6 +145,17 @@ function virtualClock(): {
   };
 }
 
+/**
+ * A warmer over substituted providers and a virtual clock.
+ *
+ * Unlike the other two scheduled jobs, this one cannot be exercised through
+ * `ctx.services.cacheWarmer` for most of what is worth asserting, and that is
+ * by design rather than an oversight in the wiring. The properties under test
+ * are the pacing and the yield rules, which need a clock that does not really
+ * wait and a provider that counts calls; neither is an operator knob, so
+ * neither is reachable from the environment `wiring.ts` reads. The bundled
+ * instance is asserted separately, under "registration".
+ */
 function warmer(
   mb: MusicBrainzWarmTarget,
   previews: PreviewWarmTarget,
@@ -693,4 +704,35 @@ describe("reachability", () => {
       ctx.services.upstream.previews,
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// Registration.
+//
+// `pnpm warm:cache` reads the warmer off the service bundle rather than
+// building one beside the scheduler. That is what makes the assertions in this
+// file statements about the job that actually runs: a warmer constructed at the
+// entrypoint could be handed `upstream.previews` instead of
+// `upstream.previewWarmer`, or a discovery service built over a different
+// cache, and nothing here would notice.
+// ---------------------------------------------------------------------------
+describe("registration", () => {
+  test("the warmer is on the bundle, built once with the rest of the graph", () => {
+    expect(ctx.services.cacheWarmer).toBeInstanceOf(CacheWarmer);
+  });
+
+  test("the bundled warmer is stable, not rebuilt per read", () => {
+    // A getter that constructed a new warmer on every access would satisfy the
+    // type and defeat the point: two callers would hold two jobs, and the
+    // advisory lock would be doing work the wiring was supposed to make
+    // unnecessary.
+    expect(ctx.services.cacheWarmer).toBe(ctx.services.cacheWarmer);
+  });
+
+  // Not run here. Every run in this file needs a clock that does not really
+  // wait, and the bundled warmer paces itself for real, on purpose: the pacing
+  // is the control that keeps the service inside MusicBrainz's one-request-
+  // per-second limit, so it is not something the environment may switch off.
+  // The environment-to-options half is covered by the resolver's own tests in
+  // src/services/job-options.test.ts.
 });

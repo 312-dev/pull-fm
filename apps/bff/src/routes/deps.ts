@@ -15,9 +15,12 @@ import type { AuditLog } from "../lib/audit.js";
 import type { Database } from "../lib/db.js";
 import type { SigningKeys } from "../lib/keys.js";
 import type { SessionCookieCipher } from "../lib/session-cookie.js";
+import type { AuditRetention } from "../services/audit-retention.js";
+import type { CacheWarmer } from "../services/cache-warmer.js";
 import type { ConnectionService } from "../services/connections.js";
 import type { DeletionService } from "../services/deletion.js";
 import type { DirectoryReaper } from "../services/directory-reaper.js";
+import type { ExpirySweeper } from "../services/expiry-sweeper.js";
 import type { DiscoveryService } from "../services/discovery.js";
 import type { EventsService } from "../services/events.js";
 import type { ExportService } from "../services/export.js";
@@ -48,6 +51,35 @@ export interface Services {
    * it enumerates the entire user directory and deletes identities.
    */
   readonly directoryReaper: DirectoryReaper;
+  /**
+   * Deletes expired idempotency records and connect states.
+   *
+   * On the bundle for the same reason as `directoryReaper`: the scheduled
+   * entrypoint builds the identical object graph, so the job it runs is the one
+   * the tests exercise rather than a second construction of it written next to
+   * the scheduler. Never invoked by a route, and nothing in routes/ may: it
+   * deletes rows in bulk on a table the request path writes to.
+   */
+  readonly expirySweeper: ExpirySweeper;
+  /**
+   * Anonymizes and expires the audit trail.
+   *
+   * On the bundle for the wiring reason above, NOT because any route may call
+   * it. It rewrites and deletes audit rows, which is the one table whose whole
+   * value is that the request path cannot edit it.
+   */
+  readonly auditRetention: AuditRetention;
+  /**
+   * Fills the MusicBrainz cache and the iTunes preview store ahead of demand.
+   *
+   * On the bundle for the wiring reason above, and with a second reason of its
+   * own: it must be constructed from the same `upstream.previewWarmer` and
+   * `discovery` the application uses, or it would warm a different cache than
+   * the one requests read. Never invoked by a route. A request that reached it
+   * would spend the entire service's per-IP MusicBrainz budget on one render;
+   * cache-warmer.test.ts asserts no route can.
+   */
+  readonly cacheWarmer: CacheWarmer;
   readonly tokens: TokenService;
   readonly connections: ConnectionService;
   readonly wishlist: WishlistService;

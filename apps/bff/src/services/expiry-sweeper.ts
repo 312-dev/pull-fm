@@ -95,6 +95,7 @@ import {
   tryAdvisoryLock,
   type Database,
 } from "../lib/db.js";
+import { intFromEnv } from "../lib/job-env.js";
 
 /** Advisory-lock key, inside the shared namespace registry in lib/db.ts. */
 export const EXPIRY_SWEEP_LOCK_KEY = "retention:expiry-sweep";
@@ -118,6 +119,34 @@ export const EXPIRY_SWEEPER_DEFAULTS: ExpirySweeperOptions = {
   rowsPerBatch: 5000,
   maxBatchesPerTable: 20,
 };
+
+/**
+ * Resolves the options from the environment, falling back to the defaults.
+ *
+ * Lives beside the defaults rather than in `wiring.ts` so the variable names
+ * and the numbers they override are one screen apart. See lib/job-env.ts for
+ * why these are not in `config.ts`, and note the reader THROWS on a value that
+ * is present but not a positive integer: a silently ignored override on a job
+ * that deletes rows is how a stated retention window quietly stops being true.
+ */
+export function expirySweeperOptionsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): ExpirySweeperOptions {
+  const d = EXPIRY_SWEEPER_DEFAULTS;
+  return {
+    slackSeconds: intFromEnv("EXPIRY_SWEEP_SLACK_S", d.slackSeconds, env),
+    rowsPerBatch: intFromEnv(
+      "EXPIRY_SWEEP_ROWS_PER_BATCH",
+      d.rowsPerBatch,
+      env,
+    ),
+    maxBatchesPerTable: intFromEnv(
+      "EXPIRY_SWEEP_MAX_BATCHES",
+      d.maxBatchesPerTable,
+      env,
+    ),
+  };
+}
 
 export interface ExpirySweepOutcome {
   /** False when another run held the lock. Not an error. */

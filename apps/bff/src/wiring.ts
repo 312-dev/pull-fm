@@ -18,7 +18,19 @@ import { Database } from "./lib/db.js";
 import { SigningKeys } from "./lib/keys.js";
 import { createRedis } from "./lib/redis.js";
 import { SessionCookieCipher } from "./lib/session-cookie.js";
+import {
+  AuditRetention,
+  auditRetentionOptionsFromEnv,
+} from "./services/audit-retention.js";
+import {
+  CacheWarmer,
+  cacheWarmerOptionsFromEnv,
+} from "./services/cache-warmer.js";
 import { DirectoryReaper } from "./services/directory-reaper.js";
+import {
+  ExpirySweeper,
+  expirySweeperOptionsFromEnv,
+} from "./services/expiry-sweeper.js";
 import { MagicAuthService } from "./services/magic-auth.js";
 import {
   ConnectionService,
@@ -57,6 +69,17 @@ export interface WiringOverrides {
    * MusicBrainz and Apple have no appeals process.
    */
   readonly upstreamFetch?: FetchLike;
+  /**
+   * Environment the scheduled jobs read their knobs from. Defaults to
+   * `process.env`.
+   *
+   * A seam, not a feature. The job windows are deliberately absent from
+   * `config.ts` (see lib/job-env.ts), so without this there would be no way to
+   * prove that an operator's override actually reaches the instance on the
+   * bundle rather than a second one built next to the scheduler, which is the
+   * exact class of bug putting the jobs on the bundle is meant to end.
+   */
+  readonly jobEnv?: NodeJS.ProcessEnv;
 }
 
 export function buildServices(
@@ -133,6 +156,13 @@ export function buildServices(
     log,
   });
 
+  const discovery = new DiscoveryService(upstream, connections, keys);
+
+  // The scheduled jobs read their windows from the environment rather than from
+  // `cfg`; lib/job-env.ts explains why. Resolved here, once, so that the job an
+  // operator's override reaches is the same object the entrypoint runs.
+  const jobEnv = overrides.jobEnv ?? process.env;
+
   return {
     cfg,
     db,
@@ -153,6 +183,26 @@ export function buildServices(
       maxDeletionsPerRun: cfg.AUTH_UNVERIFIED_REAP_MAX_DELETIONS,
       maxPagesPerRun: cfg.AUTH_UNVERIFIED_REAP_MAX_PAGES,
     }),
+    // The other three scheduled jobs, registered the same way and for the same
+    // reason: one construction of the object graph, so the entrypoints in
+    // scripts/ run the job the suites exercise. None of them is reachable from
+    // a route, and none should be; see the doc comments on `Services`.
+    expirySweeper: new ExpirySweeper(db, expirySweeperOptionsFromEnv(jobEnv)),
+    auditRetention: new AuditRetention(
+      db,
+      auditRetentionOptionsFromEnv(jobEnv),
+    ),
+    // Built from the same `discovery` and `upstream.previewWarmer` the request
+    // path uses. Constructing it anywhere else risks warming a cache nothing
+    // reads. `previewWarmer` is deliberately not `previews`: it has no Deezer
+    // fallback, because a Deezer URL is signed and expiring and so warms
+    // nothing.
+    cacheWarmer: new CacheWarmer(
+      db,
+      discovery,
+      upstream.previewWarmer,
+      cacheWarmerOptionsFromEnv(jobEnv),
+    ),
     // Every counter goes to the quota instance, never the cache: on an
     // `allkeys-lru` instance a cache-fill event would silently disable the
     // send and verify budgets, which on this route means an open mail relay.
@@ -173,7 +223,7 @@ export function buildServices(
     }),
     workos,
     upstream,
-    discovery: new DiscoveryService(upstream, connections, keys),
+    discovery,
     events: new EventsService(upstream),
   };
 }

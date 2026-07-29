@@ -71,6 +71,16 @@ afterEach(async () => {
   );
 });
 
+/**
+ * A retention job with tuned windows.
+ *
+ * Every run under the real policy windows goes through
+ * `ctx.services.auditRetention`, which is the object `pnpm purge:audit`
+ * actually runs, so a wiring mistake fails here rather than the first time a
+ * retention window is enforced in production. This helper exists only for the
+ * cases the bundle cannot express: a per-test window that would otherwise cost
+ * a whole second application, and a substituted database that fails on demand.
+ */
 const job = (over: Partial<AuditRetentionOptions> = {}): AuditRetention =>
   new AuditRetention(ctx.services.db, { ...AUDIT_RETENTION_DEFAULTS, ...over });
 
@@ -151,7 +161,7 @@ describe("what the purge refuses to anonymize", () => {
     const userId = await makeUser();
     const fresh = await audit({ userId, ageDays: 89 });
 
-    await job().run();
+    await ctx.services.auditRetention.run();
 
     const row = await read(fresh);
     expect(row.user_id).toBe(userId);
@@ -169,7 +179,7 @@ describe("what the purge refuses to anonymize", () => {
     const old = await audit({ userId, ageDays: 91 });
     const yesterday = await audit({ userId, ageDays: 1 });
 
-    await job().run();
+    await ctx.services.auditRetention.run();
 
     expect((await read(old)).anonymized_at).not.toBeNull();
 
@@ -191,7 +201,7 @@ describe("what the purge refuses to anonymize", () => {
     const old = await audit({ userId, ageDays: 45 });
     const recent = await audit({ userId, ageDays: 3 });
 
-    await job().run();
+    await ctx.services.auditRetention.run();
 
     expect((await read(old)).anonymized_at).not.toBeNull();
     expect(
@@ -205,7 +215,7 @@ describe("what the purge refuses to anonymize", () => {
     await markDeleted(userId);
     const row = await audit({ userId, ageDays: 10 });
 
-    await job().run();
+    await ctx.services.auditRetention.run();
 
     const after = await read(row);
     expect(after.user_id).toBe(userId);
@@ -221,7 +231,7 @@ describe("anonymization", () => {
     await markDeleted(userId);
     const id = await audit({ userId, ageDays: 31 });
 
-    const outcome = await job().run();
+    const outcome = await ctx.services.auditRetention.run();
     expect(outcome.ran).toBe(true);
     expect(outcome.anonymizedDeleted).toBeGreaterThan(0);
 
@@ -242,7 +252,7 @@ describe("anonymization", () => {
     const a2 = await audit({ userId: alice, ageDays: 120 });
     const b1 = await audit({ userId: bob, ageDays: 95 });
 
-    await job().run();
+    await ctx.services.auditRetention.run();
 
     const [ra1, ra2, rb1] = [await read(a1), await read(a2), await read(b1)];
     expect(ra1.subject_pseudonym).not.toBeNull();
@@ -258,7 +268,7 @@ describe("anonymization", () => {
       ip: "2001:db8:abcd:1234::1",
     });
 
-    await job().run();
+    await ctx.services.auditRetention.run();
 
     expect((await read(id)).ip).toBe("2001:db8:abcd::/48");
   });
@@ -267,7 +277,7 @@ describe("anonymization", () => {
     const userId = await makeUser();
     const id = await audit({ userId, ageDays: 95, ip: null });
 
-    await job().run();
+    await ctx.services.auditRetention.run();
 
     const row = await read(id);
     expect(row.ip).toBeNull();
@@ -283,7 +293,7 @@ describe("anonymization", () => {
     // pseudonym for them would fabricate a subject rather than protect one.
     const id = await audit({ userId: null, ageDays: 95 });
 
-    const outcome = await job().run();
+    const outcome = await ctx.services.auditRetention.run();
 
     const row = await read(id);
     expect(outcome.anonymizedOrphan).toBeGreaterThan(0);
@@ -300,10 +310,10 @@ describe("anonymization", () => {
     await markDeleted(userId);
     const id = await audit({ userId, ageDays: 40 });
 
-    await job().run();
+    await ctx.services.auditRetention.run();
     const first = await read(id);
 
-    const second = await job().run();
+    const second = await ctx.services.auditRetention.run();
 
     expect(second.anonymizedDeleted).toBe(0);
     expect(second.anonymizedAged).toBe(0);
@@ -321,7 +331,7 @@ describe("the hard delete", () => {
     const userId = await makeUser();
     const id = await audit({ userId, ageDays: 401 });
 
-    const outcome = await job().run();
+    const outcome = await ctx.services.auditRetention.run();
 
     expect(outcome.hardDeleted).toBeGreaterThan(0);
     expect(await exists(id)).toBe(false);
@@ -346,14 +356,16 @@ describe("the hard delete", () => {
     // And the row is still visible to the standing invariant under the real
     // policy window, so a broken anonymizer surfaces as a violation rather than
     // as a table that quietly got smaller.
-    expect((await job().invariant()).pending).toBeGreaterThan(0);
+    expect(
+      (await ctx.services.auditRetention.invariant()).pending,
+    ).toBeGreaterThan(0);
   });
 
   test("a row inside the tail window is kept even though it is anonymized", async () => {
     const userId = await makeUser();
     const id = await audit({ userId, ageDays: 399 });
 
-    await job().run();
+    await ctx.services.auditRetention.run();
 
     expect(await exists(id)).toBe(true);
     expect((await read(id)).anonymized_at).not.toBeNull();
@@ -375,7 +387,7 @@ describe("personal API token IPs", () => {
     const tokenId = rows[0]?.id;
     expect(tokenId).toBeDefined();
 
-    const outcome = await job().run();
+    const outcome = await ctx.services.auditRetention.run();
     expect(outcome.tokenIpsCleared).toBeGreaterThan(0);
 
     const after = await ctx.services.db.query<{
@@ -408,7 +420,7 @@ describe("personal API token IPs", () => {
     );
     const tokenId = rows[0]?.id;
 
-    await job().run();
+    await ctx.services.auditRetention.run();
 
     const after = await ctx.services.db.query<{ last_used_ip: string | null }>(
       `SELECT host(last_used_ip) AS last_used_ip FROM api_tokens WHERE id = $1`,
@@ -432,7 +444,7 @@ describe("the standing invariant and the freshness signal", () => {
     await audit({ userId, ageDays: 200 });
     await audit({ userId: null, ageDays: 200 });
 
-    const outcome = await job().run();
+    const outcome = await ctx.services.auditRetention.run();
 
     expect(outcome.pendingBeyondWindow).toBe(0);
   });
@@ -444,7 +456,7 @@ describe("the standing invariant and the freshness signal", () => {
     const userId = await makeUser();
     await audit({ userId, ageDays: 200 });
 
-    const outcome = await job().run();
+    const outcome = await ctx.services.auditRetention.run();
 
     expect(outcome.stale).toBe(true);
     expect(outcome.failed).toBe(0);
@@ -455,9 +467,9 @@ describe("the standing invariant and the freshness signal", () => {
   test("a healthy run is not reported as stale", async () => {
     const userId = await makeUser();
     await audit({ userId, ageDays: 95 });
-    await job().run();
+    await ctx.services.auditRetention.run();
 
-    const outcome = await job().run();
+    const outcome = await ctx.services.auditRetention.run();
 
     expect(outcome.stale).toBe(false);
   });
@@ -484,7 +496,7 @@ describe("concurrency", () => {
       expect(acquired).toBe(true);
 
       try {
-        const outcome = await job().run();
+        const outcome = await ctx.services.auditRetention.run();
 
         expect(outcome.ran).toBe(false);
         expect(outcome.anonymizedDeleted).toBe(0);
@@ -505,8 +517,8 @@ describe("concurrency", () => {
     // A pooled connection still holding the lock after the job returns would
     // wedge every subsequent run, and the symptom would be "retention silently
     // stopped" rather than an error.
-    expect((await job().run()).ran).toBe(true);
-    expect((await job().run()).ran).toBe(true);
+    expect((await ctx.services.auditRetention.run()).ran).toBe(true);
+    expect((await ctx.services.auditRetention.run()).ran).toBe(true);
   });
 });
 
@@ -577,7 +589,7 @@ describe("failure", () => {
     expect((await read(underAge)).anonymized_at).not.toBeNull();
 
     // And a healthy run afterwards finishes the job.
-    const retry = await job().run();
+    const retry = await ctx.services.auditRetention.run();
     expect(retry.failed).toBe(0);
     expect((await read(underDeletion)).anonymized_at).not.toBeNull();
   });
@@ -604,7 +616,7 @@ describe("failure", () => {
       AUDIT_RETENTION_DEFAULTS,
     ).run();
 
-    expect((await job().run()).ran).toBe(true);
+    expect((await ctx.services.auditRetention.run()).ran).toBe(true);
   });
 });
 
@@ -638,6 +650,46 @@ describe("the structural guarantee", () => {
         paths.filter((p) => p.includes(forbidden)),
         `a route mentioning "${forbidden}" appeared`,
       ).toEqual([]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Registration.
+//
+// `pnpm purge:audit` reads the job off the service bundle rather than building
+// one beside the scheduler. That is what makes every assertion above a
+// statement about the windows production actually enforces.
+// ---------------------------------------------------------------------------
+describe("registration", () => {
+  test("the bundled job is stable, not rebuilt per read", () => {
+    expect(ctx.services.auditRetention).toBeInstanceOf(AuditRetention);
+    expect(ctx.services.auditRetention).toBe(ctx.services.auditRetention);
+  });
+
+  test("its windows come from the environment", async () => {
+    // The retention windows are deliberately absent from `config.ts` (see
+    // src/lib/job-env.ts), so this is the only place the path from an
+    // operator's variable to the object the entrypoint runs is checked end to
+    // end. Before the job was on the bundle there was nothing to check: the
+    // entrypoint read the variable and built its own job, so a wiring mistake
+    // was invisible until a window was already being enforced wrongly.
+    const userId = await makeUser();
+    const id = await audit({ userId, ageDays: 3 });
+
+    // Three days old is far inside the shipped 90-day window, so the bundled
+    // job under the real policy must leave it alone.
+    await ctx.services.auditRetention.run();
+    expect((await read(id)).anonymized_at).toBeNull();
+
+    const tuned = await buildTestApp({
+      jobEnv: { AUDIT_FULL_FIDELITY_DAYS: "1" },
+    });
+    try {
+      await tuned.services.auditRetention.run();
+      expect((await read(id)).anonymized_at).not.toBeNull();
+    } finally {
+      await tuned.close();
     }
   });
 });
