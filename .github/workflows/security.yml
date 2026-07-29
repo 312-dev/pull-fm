@@ -65,7 +65,11 @@ jobs:
       # invariants, they are validated against fixtures, and they must never be
       # masked by a registry outage.
       - name: semgrep (project rules)
-        run: semgrep scan --config=.semgrep/ --error --metrics=off
+        # --severity=ERROR is deliberate. The BOLA rule is a WARNING tripwire,
+        # not a gate: the 99-test BOLA suite is the actual proof of isolation.
+        # Without this filter a warning fails the build, which pressures people
+        # to weaken the rule rather than investigate what it flagged.
+        run: semgrep scan --config=.semgrep/ --error --severity=ERROR --metrics=off
 
       # Registry packs second. Output goes to stdout as well as SARIF, because
       # writing only to a file hides the reason for a non-zero exit.

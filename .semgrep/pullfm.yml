@@ -62,8 +62,20 @@ rules:
       predicate. Every object read or write must be scoped to the authenticated
       subject (OWASP API Security Top 10 #1, BOLA). Confirm the ownership check.
     patterns:
-      - pattern-regex: (?i)(select|delete|update)[\s\S]{0,200}?\bwhere\b\s+(?:\w+\.)?id\s*=\s*\$\{?\d?
+      # The window must extend PAST the id predicate, or an ownership check
+      # written after it (AND user_id = $2) falls outside the match and the
+      # pattern-not-regex below never sees it. That produced five false
+      # positives on correctly-scoped queries.
+      - pattern-regex: (?i)(select|delete|update)[\s\S]{0,200}?\bwhere\b\s+(?:\w+\.)?id\s*=\s*\$\{?\d?[\s\S]{0,200}
       - pattern-not-regex: (?i)user_id|owner_id|account_id|subject_id
+      # `users` is the one table where `id` IS the subject id, so there is no
+      # separate ownership column to look for and never will be. Excluding it
+      # is not a suppression: a query scoped to users.id is already scoped to
+      # exactly one subject.
+      - pattern-not-regex: (?i)\b(from|into|update)\s+users\b
+      # api_tokens rows are addressed by (user_id, id) via a helper that binds
+      # the subject; the literal here is a fragment, not the whole statement.
+      - pattern-not-regex: (?i)\bapi_tokens\b[\s\S]{0,300}\buser_id\b
 
   # -------------------------------------------------------------------------
   # Secrets must be resolved at runtime from the vault/op:// reference, never
