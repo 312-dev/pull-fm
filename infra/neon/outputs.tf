@@ -99,13 +99,27 @@ output "main_host_pooled" {
 }
 
 output "staging_host_direct" {
-  description = "Staging endpoint host, no pooler."
+  description = "Staging endpoint host, no pooler. Built from the endpoint id and proxy_host, NOT from neon_endpoint.host, which becomes the POOLED host once pooling is enabled. See the locals in main.tf."
   value       = local.staging_direct_host
+
+  precondition {
+    condition     = !strcontains(local.staging_direct_host, "-pooler")
+    error_message = "Refusing to publish '${local.staging_direct_host}' as a DIRECT host: it contains '-pooler'. Migrations use this endpoint and need session-scoped advisory locks, which a transaction pooler breaks silently."
+  }
 }
 
 output "staging_host_pooled" {
-  description = "Staging endpoint host via the pooler."
+  description = "Staging endpoint host via the pooler. Application traffic."
   value       = local.staging_pooled_host
+
+  # Hard gate on the derivation, at the point the value leaves the module. A
+  # `check` block only warns (see checks.tf), and a hostname that does not
+  # resolve must not be readable out of `terraform output` at all, because that
+  # is where the runbook copies connection strings from.
+  precondition {
+    condition     = local.staging_pooled_host == replace(local.staging_direct_host, "/^([^.]+)\\./", "$1-pooler.") && !strcontains(local.staging_pooled_host, "-pooler-pooler")
+    error_message = "Refusing to publish '${local.staging_pooled_host}' as a POOLED host. It must be the direct host ('${local.staging_direct_host}') with exactly one '-pooler' appended to its first label, and must never contain '-pooler-pooler'. A doubled marker means it was derived from an attribute that was already pooled, which is the bug this precondition exists to catch."
+  }
 }
 
 # ---------------------------------------------------------------------------

@@ -17,20 +17,52 @@
 # managed a slice of it, every apply of one would fight the other.
 
 locals {
-  # Neon's pooled endpoint host is the direct host with "-pooler" appended to
-  # its FIRST label, and nothing else changes. This is not inferred from the
-  # naming convention: it is the algorithm the provider itself uses
-  # (provider/resource_project.go, newPooledHost), and it agrees with what the
-  # live API returns for the main branch's endpoint:
+  # ---------------------------------------------------------------------------
+  # STAGING ENDPOINT HOSTNAMES
   #
-  #   read_write_host:        ep-red-wave-as1i96ei.c-4.eu-central-1.aws.neon.tech
-  #   read_write_pooled_host: ep-red-wave-as1i96ei-pooler.c-4.eu-central-1.aws.neon.tech
+  # Built from the endpoint ID and its proxy host. DO NOT DERIVE THEM FROM
+  # `neon_endpoint.staging.host`. An earlier revision did, and it was wrong in a
+  # way that only appears once the pooler is switched on.
   #
-  # The project resource exposes database_host_pooler for the DEFAULT endpoint
-  # already, so this local exists only for the staging endpoint, which has no
-  # such attribute.
-  staging_direct_host = neon_endpoint.staging.host
-  staging_pooled_host = replace(neon_endpoint.staging.host, "/^([^.]+)\\./", "$1-pooler.")
+  # `neon_endpoint.host` DOES NOT MEAN THE SAME THING BEFORE AND AFTER
+  # `pooler_enabled` BECOMES TRUE. The Neon API always returns the direct host;
+  # the provider rewrites it (provider/resource_endpoint.go):
+  #
+  #     host := v.Host
+  #     if v.PoolerEnabled {
+  #         host = newPooledHost(host)
+  #     }
+  #     d.Set("host", host)
+  #
+  # Verified against both at once on 2026-07-29. The API says
+  #
+  #     host       ep-super-wind-asbuczm7.c-4.eu-central-1.aws.neon.tech
+  #     proxy_host c-4.eu-central-1.aws.neon.tech
+  #
+  # while Terraform state for the same endpoint says
+  #
+  #     host       ep-super-wind-asbuczm7-pooler.c-4.eu-central-1.aws.neon.tech
+  #
+  # So appending "-pooler" to `host` produced `-pooler-pooler`, a name that does
+  # not resolve, and labelled the pooled host as the direct one. Both errors are
+  # invisible at plan time and surface as a connection failure.
+  #
+  # `id` and `proxy_host` do not have that problem. Neither is rewritten by the
+  # provider, and neither changes meaning when pooling is toggled, so this is
+  # correct both before and after the pooler is enabled. That matters because
+  # the two-step apply below means BOTH states genuinely occur.
+  #
+  # The composition is the provider's own, not a guess: `newPooledHost` splits
+  # the host on its first "." and appends "-pooler" to the left part, and the
+  # left part is exactly the endpoint id while the right part is exactly
+  # proxy_host.
+  #
+  # The main branch is unaffected and needs no equivalent: `neon_project`
+  # exposes `database_host` and `database_host_pooler` as separate attributes,
+  # and computes both from the RAW API host, so neither is self-referential.
+  # `neon_endpoint` exposes only `host`, which is why this local exists at all.
+  staging_direct_host = "${neon_endpoint.staging.id}.${neon_endpoint.staging.proxy_host}"
+  staging_pooled_host = "${neon_endpoint.staging.id}-pooler.${neon_endpoint.staging.proxy_host}"
 
   # sslmode=require is not optional and is not decoration. Neon terminates TLS
   # at the proxy and refuses plaintext, and a connection string that omits it
@@ -254,6 +286,20 @@ resource "neon_endpoint" "staging" {
   branch_id  = neon_branch.staging.id
   type       = "read_write"
 
+  # NEON IGNORES pooler_enabled WHEN AN ENDPOINT IS CREATED. It honours it on
+  # update. Observed on the first real apply, 2026-07-29: this endpoint was
+  # created with pooler_enabled false despite the provider sending true in the
+  # create request (provider/resource_endpoint.go builds
+  # EndpointCreateRequestEndpoint.PoolerEnabled from this attribute, so the
+  # request is correct and the API drops it). The next plan detected the drift
+  # and a second apply set it to true.
+  #
+  # A SINGLE APPLY THEREFORE PRODUCES AN UNPOOLED ENDPOINT that every output,
+  # runbook and connection string in this repository calls pooled. It is not
+  # caught by a postcondition on pooler_enabled, because state is not where the
+  # lie is; see checks.tf. Re-plan after applying and require zero drift, which
+  # is what Gate 0 already asks for, and verify against the API as the runbook's
+  # post-apply step says.
   pooler_enabled = true
   pooler_mode    = "transaction"
 
@@ -262,6 +308,17 @@ resource "neon_endpoint" "staging" {
   suspend_timeout_seconds  = var.staging_suspend_timeout_seconds
 
   compute_provisioner = var.compute_provisioner
+
+  lifecycle {
+    # Guards the two INPUTS the hostname locals are built from. If either ever
+    # carried a "-pooler" of its own, the derivation in locals would silently
+    # double it, which is the bug this file already had once. A postcondition
+    # rather than a check block because this must fail the run, not warn.
+    postcondition {
+      condition     = !endswith(self.id, "-pooler") && !strcontains(self.proxy_host, "pooler")
+      error_message = "Endpoint id '${self.id}' or proxy_host '${self.proxy_host}' already contains a pooler marker. The hostname locals in main.tf append '-pooler' to the endpoint id, so this would produce a name like 'x-pooler-pooler' that does not resolve. Do not paper over this by stripping the suffix; work out why Neon returned it."
+    }
+  }
 }
 
 # --- credentials -------------------------------------------------------------
