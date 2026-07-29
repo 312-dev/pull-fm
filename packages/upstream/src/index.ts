@@ -22,6 +22,7 @@ export * from "./rate-limiter.js";
 export * from "./circuit-breaker.js";
 export * from "./quota.js";
 export * from "./kill-switch.js";
+export * from "./single-flight.js";
 export * from "./provider-client.js";
 
 export * from "./cache/store.js";

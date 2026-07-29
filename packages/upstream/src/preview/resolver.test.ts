@@ -335,3 +335,118 @@ describe("Apple licence condition (ii): the store badge", () => {
     expect(appleStoreUrl("")).toBeNull();
   });
 });
+
+/**
+ * The stampede control on the preview path.
+ *
+ * This is where a cold cache is most dangerous, because the track at the top of
+ * everyone's feed is ONE recording MBID that many clients ask for inside the
+ * same second. Apple documents about twenty calls a MINUTE with no stated scope
+ * and no appeals process, so the count of calls is the compliance property, not
+ * a latency one.
+ */
+describe("PreviewResolver: concurrent resolution is coalesced", () => {
+  it("resolves one preview per recording however many callers arrive at once", async () => {
+    const itunes = new FakeHttp().always({ body: itunesResult() });
+    const { resolver, store } = build(itunes);
+
+    const previews = await Promise.all(
+      Array.from({ length: 50 }, () => resolver.resolve(TRACK)),
+    );
+
+    // Fifty callers, one call to Apple. Without this the preview route is a
+    // remote kill switch operated by whoever refreshes fastest.
+    expect(itunes.callCount).toBe(1);
+    expect(resolver.coalescing).toEqual({ started: 1, joined: 49 });
+    for (const preview of previews) expect(preview?.provider).toBe("itunes");
+    expect(store.size).toBe(1);
+  });
+
+  it("re-resolves Deezer once per playback burst without persisting it", async () => {
+    const deezer = new FakeHttp().always({
+      body: deezerResult(Math.floor(NOW / 1000) + 3600),
+    });
+    const { resolver, store } = build(undefined, deezer);
+
+    const previews = await Promise.all(
+      Array.from({ length: 40 }, () => resolver.refreshForPlayback(TRACK)),
+    );
+
+    expect(deezer.callCount).toBe(1);
+    for (const preview of previews) {
+      expect(preview?.provider).toBe("deezer");
+      // Sharing the URL is not a compromise: it is the same signed URL Deezer
+      // would have minted for each caller, with the same expiry.
+      expect(preview?.cacheable).toBe(false);
+      expect(preview?.expiresAt).toBe(previews[0]?.expiresAt);
+    }
+    // And it is still never persisted, which is the rule the whole file exists
+    // to enforce.
+    expect(store.size).toBe(0);
+  });
+
+  it("keeps different recordings independent", async () => {
+    const itunes = new FakeHttp().always({ body: itunesResult() });
+    const { resolver } = build(itunes);
+    const other = {
+      recordingMbid: "30000000-0000-4000-8000-000000000002",
+      artistName: "Blur",
+      title: "Beetlebum",
+    };
+
+    await Promise.all([resolver.resolve(TRACK), resolver.resolve(other)]);
+
+    // Coalescing two different recordings would serve one track's preview for
+    // another, which is a worse bug than the rate limit it was avoiding.
+    expect(itunes.callCount).toBe(2);
+  });
+
+  it("does not let a playback refresh join a full resolve", async () => {
+    // The two methods are not interchangeable: `resolve` may persist an iTunes
+    // row and `refreshForPlayback` is Deezer only. A shared key would hand one
+    // caller the other's semantics.
+    const itunes = new FakeHttp().always({ body: itunesResult() });
+    const deezer = new FakeHttp().always({
+      body: deezerResult(Math.floor(NOW / 1000) + 3600),
+    });
+    const { resolver } = build(itunes, deezer);
+
+    const [resolved, refreshed] = await Promise.all([
+      resolver.resolve(TRACK),
+      resolver.refreshForPlayback(TRACK),
+    ]);
+
+    expect(resolved?.provider).toBe("itunes");
+    expect(refreshed?.provider).toBe("deezer");
+  });
+
+  it("shares one upstream failure instead of retrying per caller", async () => {
+    const itunes = new FakeHttp().always({ status: 503 });
+    const deezer = new FakeHttp().always({ status: 503 });
+    const { resolver } = build(itunes, deezer);
+
+    const previews = await Promise.all(
+      Array.from({ length: 30 }, () => resolver.resolve(TRACK)),
+    );
+
+    // A degradation, not an error: no preview right now renders as a disabled
+    // play button. Thirty retries against a provider that just returned 503
+    // would be the stampede again.
+    for (const preview of previews) expect(preview).toBeNull();
+    expect(itunes.callCount).toBe(1);
+    expect(deezer.callCount).toBe(1);
+  });
+
+  it("admits a new resolution after the previous one settled", async () => {
+    const itunes = new FakeHttp().always({ status: 503 });
+    const deezer = new FakeHttp().always({ status: 503 });
+    const { resolver } = build(itunes, deezer);
+
+    await resolver.resolve(TRACK);
+    await resolver.resolve(TRACK);
+
+    // The in-flight map must not become a negative cache: a failed resolve that
+    // never cleared its key would make the recording permanently unresolvable.
+    expect(itunes.callCount).toBe(2);
+  });
+});

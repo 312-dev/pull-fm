@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -535,5 +536,189 @@ describe("GET /v1/config", () => {
     for (const status of Object.values(body.providers)) {
       expect(["ok", "degraded", "disabled"]).toContain(status);
     }
+  });
+});
+
+/**
+ * COLD-CACHE STAMPEDE, end to end.
+ *
+ * The cache-first architecture assumes a miss is rare. That assumption is false
+ * for exactly one shape of traffic, and it is the shape a launch produces: one
+ * cold key that many users want in the same second. None of those requests has
+ * returned yet, so none of them has written the row the others would have hit,
+ * and a read-through cache alone suppresses nothing at all.
+ *
+ * These assertions count UPSTREAM CALLS rather than measuring latency, because
+ * the count is the compliance property. MusicBrainz permits one request per
+ * second across the whole service and iTunes about twenty a minute, neither with
+ * an appeals process, so a hundred-to-one fan-out is a revoked integration
+ * rather than a slow page.
+ */
+describe("a cold cache does not stampede", () => {
+  // Real providers answer in tens to hundreds of milliseconds against a cache
+  // read of about one. That gap IS the stampede window, so a zero-latency fake
+  // would let every request serialise behind its own database read and these
+  // tests would pass while measuring nothing.
+  beforeEach(() => {
+    ctx.upstreams.setLatency(40);
+  });
+  afterEach(() => {
+    ctx.upstreams.setLatency(0);
+  });
+
+  test("a hundred concurrent requests for the same cold artist make one call", async () => {
+    // A never-seen MBID, so every layer is genuinely cold. Reusing a fixture
+    // would let a row warmed by an earlier test pass this vacuously.
+    const cold = randomUUID();
+
+    const responses = await Promise.all(
+      Array.from({ length: 100 }, () => get(`/v1/artists/${cold}/similar`)),
+    );
+
+    for (const res of responses) expect(res.statusCode).toBe(200);
+    // The whole point: one hundred requests, one upstream call.
+    expect(ctx.upstreams.callsTo("labs.api.listenbrainz.org")).toHaveLength(1);
+  });
+
+  test("a burst of feed renders costs a constant, not one call each", async () => {
+    const burst = await provisionSubject(ctx, "stampede-feed");
+    await connect(burst);
+    ctx.upstreams.reset();
+
+    const responses = await Promise.all(
+      Array.from({ length: 40 }, () => get("/v1/feed", burst)),
+    );
+    for (const res of responses) expect(res.statusCode).toBe(200);
+
+    // A feed render touches several distinct keys, and the blend fetches some
+    // of them in sequence, so the figure is a small constant rather than one.
+    // What must hold is that it does not scale with the request count: without
+    // coalescing this is several hundred calls.
+    expect(ctx.upstreams.calls.length).toBeLessThan(10);
+    // And still nothing may reach the two rate-limited providers.
+    expect(ctx.upstreams.callsTo("musicbrainz")).toEqual([]);
+    expect(ctx.upstreams.callsTo("itunes")).toEqual([]);
+  });
+
+  test("concurrent play requests resolve one preview, not one each", async () => {
+    await ctx.services.discovery.warmRecording(FIXTURE_RECORDING_MBID);
+    // Any iTunes row left by an earlier test would make this pass vacuously by
+    // never reaching a provider at all.
+    await ctx.services.db.query(
+      "DELETE FROM track_previews WHERE recording_mbid = $1",
+      [FIXTURE_RECORDING_MBID],
+    );
+    ctx.upstreams.reset();
+
+    const responses = await Promise.all(
+      Array.from({ length: 50 }, () =>
+        get(`/v1/tracks/${FIXTURE_RECORDING_MBID}/preview`),
+      ),
+    );
+
+    for (const res of responses) expect(res.statusCode).toBe(200);
+    expect(ctx.upstreams.callsTo("deezer")).toHaveLength(1);
+    // A shared signed URL is correct: it is the same one Deezer would have
+    // minted for each caller. What must never happen is persisting it.
+    const stored = await ctx.services.db.query(
+      "SELECT provider FROM track_previews WHERE recording_mbid = $1",
+      [FIXTURE_RECORDING_MBID],
+    );
+    expect(stored.rows).toEqual([]);
+  });
+
+  test("a shared upstream failure is not retried once per caller", async () => {
+    const cold = randomUUID();
+    ctx.upstreams.breakEverything();
+
+    const responses = await Promise.all(
+      Array.from({ length: 30 }, () => get(`/v1/artists/${cold}/similar`)),
+    );
+
+    // labs.api has no SLA and contributes nothing rather than degrading the
+    // response, so this is still a 200 with an empty list.
+    for (const res of responses) expect(res.statusCode).toBe(200);
+    // Thirty retries against a provider that just failed is the stampede again,
+    // wearing the costume of resilience.
+    expect(
+      ctx.upstreams.callsTo("labs.api.listenbrainz.org").length,
+    ).toBeLessThanOrEqual(1);
+  });
+});
+
+/**
+ * Pathological identifiers.
+ *
+ * An identifier reaches upstream URL construction, so anything that is not a
+ * canonical UUID has to die at the schema rather than inside a client
+ * (THREAT-MODEL T15/M31). A value containing `@`, `/`, `?`, `#` or CRLF is the
+ * cheapest known path from a request to a redirected, credentialed upstream
+ * call.
+ */
+describe("pathological identifiers are rejected before any upstream call", () => {
+  const hostile: Record<string, string> = {
+    "unicode digits": "١٢٣٤٥٦٧٨-٩٠١٢-٤٣٤٥-٨٦٧٨-٩٠١٢٣٤٥٦٧٨٩٠",
+    "homoglyph hex": "b10bbff0-5354-4e2c-95a5-4b6b0d1a2Ь11",
+    "CRLF injection": "b10bbff0-5354-4e2c-95a5-4b6b0d1a2b11%0d%0aX:1",
+    "path traversal": "..%2f..%2fadmin",
+    "url in the id": "https://evil.example/a",
+    "at-sign host swap": "b10bbff0%40evil.example",
+    "null byte": "b10bbff0-5354-4e2c-95a5-4b6b0d1a2b11%00",
+    "zero width joiner": "b10bbff0-5354-4e2c-95a5-4b6b0d1a2b1‍1",
+    "combining marks": "b10bbff0-5354-4e2c-95a5-4b6b0d1a2b1é",
+    "right to left override": "b10bbff0-5354-4e2c-95a5-4b6b0d1a2b‮11",
+    "sql-ish": "b10bbff0-5354-4e2c-95a5-4b6b0d1a2b11' OR '1'='1",
+  };
+
+  for (const [label, mbid] of Object.entries(hostile)) {
+    test(`${label} is a 400 on every catalogue route and spends nothing`, async () => {
+      const encoded = encodeURIComponent(mbid);
+      for (const path of [
+        `/v1/artists/${encoded}`,
+        `/v1/artists/${encoded}/similar`,
+        `/v1/tracks/${encoded}`,
+        `/v1/tracks/${encoded}/preview`,
+        `/v1/albums/${encoded}`,
+      ]) {
+        const res = await get(path);
+        expect(res.statusCode).toBe(400);
+        // RFC 9457, like every other error on this surface.
+        expect(res.headers["content-type"]).toContain(
+          "application/problem+json",
+        );
+      }
+      expect(ctx.upstreams.calls).toEqual([]);
+    });
+  }
+
+  test("an identifier longer than the URI limit is refused at the edge", async () => {
+    // Rejected by the HTTP layer before routing rather than by the schema, so
+    // the status is 414. Asserted separately because the assertion that matters
+    // is the same either way: it never reaches a handler and never becomes part
+    // of an upstream URL.
+    const res = await get(`/v1/artists/${"0".repeat(8192)}`);
+    expect([400, 414]).toContain(res.statusCode);
+    expect(ctx.upstreams.calls).toEqual([]);
+  });
+
+  test("a unicode search term is served from the crosswalk without calling out", async () => {
+    // Search takes free text by design, so the control here is not rejection:
+    // it is that no user-supplied string can reach a provider at all.
+    for (const q of [
+      "Björk",
+      "米津玄師",
+      "🎵🎶",
+      "'; DROP TABLE users; --",
+      "a".repeat(256),
+    ]) {
+      const res = await get(`/v1/search?q=${encodeURIComponent(q)}`);
+      expect(res.statusCode).toBe(200);
+    }
+    expect(ctx.upstreams.calls).toEqual([]);
+  });
+
+  test("a search term past the schema limit is a 400, not a truncated query", async () => {
+    const res = await get(`/v1/search?q=${"a".repeat(257)}`);
+    expect(res.statusCode).toBe(400);
   });
 });

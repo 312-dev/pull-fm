@@ -53,6 +53,7 @@
  */
 
 import { isUpstreamError } from "../errors.js";
+import { SingleFlight } from "../single-flight.js";
 import type { DeezerClient, DeezerPreview } from "../deezer/client.js";
 import { DEEZER_ATTRIBUTION } from "../deezer/client.js";
 import type { ItunesClient } from "../itunes/client.js";
@@ -231,12 +232,29 @@ export class PreviewResolver {
   readonly #itunes: ItunesClient | undefined;
   readonly #deezer: DeezerClient | undefined;
   readonly #now: () => number;
+  /**
+   * Coalesces concurrent resolutions of the SAME recording.
+   *
+   * The preview route is where a cold cache hurts most, because the track at
+   * the top of everyone's feed is one recording MBID that many clients ask for
+   * within the same second. Each of those is an uncached `resolveCached`,
+   * therefore a live provider call, and iTunes is documented at about twenty
+   * calls a MINUTE with no stated scope and no appeals process. Sharing the
+   * flight turns a hundred callers into one call; see ../single-flight.ts for
+   * the per-process bound.
+   */
+  readonly #flights = new SingleFlight();
 
   constructor(opts: PreviewResolverOptions) {
     this.#store = opts.store;
     this.#itunes = opts.itunes;
     this.#deezer = opts.deezer;
     this.#now = opts.now ?? (() => Date.now());
+  }
+
+  /** Resolutions started versus callers that joined one already running. */
+  get coalescing(): { started: number; joined: number } {
+    return this.#flights.stats;
   }
 
   /**
@@ -282,7 +300,16 @@ export class PreviewResolver {
   async resolve(track: TrackIdentity): Promise<ResolvedPreview | null> {
     const cached = await this.resolveCached(track.recordingMbid);
     if (cached !== null) return cached;
+    // Namespaced by method because `resolve` and `refreshForPlayback` are not
+    // interchangeable: one may persist an iTunes row and the other is Deezer
+    // only. A shared key would hand a caller the other method's semantics. Both
+    // halves are fixed literals and a UUID, so `:` cannot collide.
+    return this.#flights.run(`resolve:${track.recordingMbid}`, () =>
+      this.#resolveLive(track),
+    );
+  }
 
+  async #resolveLive(track: TrackIdentity): Promise<ResolvedPreview | null> {
     if (this.#itunes !== undefined) {
       try {
         const preview = await this.#itunes.resolvePreview(
@@ -347,14 +374,21 @@ export class PreviewResolver {
   ): Promise<ResolvedPreview | null> {
     const cached = await this.resolveCached(track.recordingMbid);
     if (cached !== null) return cached;
-    if (this.#deezer === undefined) return null;
-    const preview = await this.#deezer.resolvePreview(
-      track.artistName,
-      track.title,
-    );
-    return preview === null
-      ? null
-      : this.#fromDeezer(track.recordingMbid, preview);
+    const deezer = this.#deezer;
+    if (deezer === undefined) return null;
+    // One live resolve per recording however many clients press play at once.
+    // Sharing the URL is not a compromise here: it is the same signed URL
+    // Deezer would have minted for each of them, with the same expiry, and it
+    // is still never persisted.
+    return this.#flights.run(`playback:${track.recordingMbid}`, async () => {
+      const preview = await deezer.resolvePreview(
+        track.artistName,
+        track.title,
+      );
+      return preview === null
+        ? null
+        : this.#fromDeezer(track.recordingMbid, preview);
+    });
   }
 
   #fromDeezer(

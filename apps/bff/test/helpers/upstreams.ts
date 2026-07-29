@@ -35,6 +35,20 @@ export interface FakeUpstreams {
   /** Forces every subsequent call to fail, for the degradation assertions. */
   breakEverything(): void;
   heal(): void;
+  /**
+   * Holds every response open for `ms`, which is the ONLY way to test request
+   * coalescing honestly.
+   *
+   * A stampede is defined by a window: the time between the first caller
+   * dispatching a request and that request returning, during which every other
+   * caller finds no cached row and dispatches its own. An instantaneous fake has
+   * no such window - each caller's own database read is slower than the
+   * "upstream" call, so the requests serialise and never overlap - and a
+   * coalescing test against one measures nothing while appearing to pass. Real
+   * providers answer in tens to hundreds of milliseconds against a cache read of
+   * about one, so latency is the property that makes the window real.
+   */
+  setLatency(ms: number): void;
 }
 
 /** A ListenBrainz artist MBID the fixtures agree on. */
@@ -64,10 +78,13 @@ function json(body: unknown, status = 200): HttpResponse {
 export function fakeUpstreams(): FakeUpstreams {
   const calls: RecordedUpstreamCall[] = [];
   let broken = false;
+  let latencyMs = 0;
 
-  const fetch: FetchLike = (rawUrl) => {
+  const sleep = (ms: number): Promise<void> =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  const respond = (rawUrl: string): Promise<HttpResponse> => {
     const url = new URL(rawUrl);
-    calls.push({ url: rawUrl, host: url.hostname, path: url.pathname });
 
     if (broken) {
       return Promise.resolve(json({ error: "fixture outage" }, 503));
@@ -333,6 +350,17 @@ export function fakeUpstreams(): FakeUpstreams {
     return Promise.resolve(json({ error: "unknown provider" }, 500));
   };
 
+  // The call is RECORDED immediately and only the RESPONSE is delayed. Counting
+  // dispatches rather than completions is the whole point: a coalescing test
+  // asserts how many requests were sent, and recording after the delay would
+  // make a stampede invisible until it had already happened.
+  const fetch: FetchLike = async (rawUrl) => {
+    const url = new URL(rawUrl);
+    calls.push({ url: rawUrl, host: url.hostname, path: url.pathname });
+    if (latencyMs > 0) await sleep(latencyMs);
+    return respond(rawUrl);
+  };
+
   return {
     fetch,
     calls,
@@ -345,6 +373,9 @@ export function fakeUpstreams(): FakeUpstreams {
     },
     heal: () => {
       broken = false;
+    },
+    setLatency: (ms) => {
+      latencyMs = ms;
     },
   };
 }
