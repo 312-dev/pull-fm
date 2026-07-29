@@ -303,8 +303,21 @@ if [ "$METRICS_AVAILABLE" = "1" ]; then
 fi
 
 step "Summary"
+# `.sarif.json`, not `.sarif`: ZAP appends the report template's extension to
+# whatever `reportFile` says. Getting this wrong is silent in the worst way,
+# because the summariser then reports a missing file and the run still looks
+# like it produced something.
 node "$REPO_ROOT/security/scripts/summarise-zap.mjs" \
-  "$OUT_DIR/zap-$PLAN_NAME.sarif" || true
+  "$OUT_DIR/zap-$PLAN_NAME.sarif.json" || SUMMARY_FAILED=$?
+
+# Exit 2 from the summariser means the report was unreadable or held zero
+# results of any severity, which is a scan that did not happen rather than a
+# clean one. That must not be reported as success even when ZAP itself exited 0.
+if [ "${SUMMARY_FAILED:-0}" = "2" ]; then
+  die "the report is missing or empty. ZAP exited $ZAP_EXIT, but a passive scan of
+        this API always raises at least informational alerts, so an empty report
+        means no requests were scanned."
+fi
 
 if [ "${UPSTREAM_REGRESSED:-0}" = "1" ]; then
   die "the scan moved upstream provider counters. Investigate before running

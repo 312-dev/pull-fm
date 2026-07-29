@@ -93,6 +93,14 @@
     # Turned off at source rather than filtered after the fact, because they
     # can only fire on HTML we do not serve. If Pull.fm ever serves a page,
     # these must come back on.
+    #
+    # 10110 and 10063 are NOT shipped by the pinned zaproxy 2.17.0 image; they
+    # live in add-on rule packs it does not include. ZAP therefore prints
+    # "Unrecognised passive scan rule ID" for each on every run. They are kept
+    # rather than deleted because the setting becomes correct the moment those
+    # packs are installed, and deleting them would silently re-enable the rules
+    # then. Two expected warnings on every run is the cost; a reader who does
+    # not know they are expected is the risk, which is what this note is for.
     - id: 10110
       name: "Dangerous JS Functions"
       threshold: "Off"
