@@ -8,5 +8,12 @@
     "verify": "node scripts/verify-migrations.mjs",
     "test": "node scripts/verify-migrations.mjs",
     "typecheck": "echo 'no typescript in this package'"
+  },
+  "//dependencies": [
+    "scripts/migrate.mjs does `import pg from \"pg\"` and this package declared nothing, so the migration runner resolved the driver only by accident of whatever a previous install happened to leave at the workspace root. A clean `pnpm install` puts nothing there, and load/bin/stack-up.sh then dies at step 3 with ERR_MODULE_NOT_FOUND, which reads as a broken load stack rather than as a missing dependency.",
+    "Pinned to the same range apps/bff uses so the workspace resolves one copy of the driver, not two."
+  ],
+  "devDependencies": {
+    "pg": "^8.13.1"
   }
 }
