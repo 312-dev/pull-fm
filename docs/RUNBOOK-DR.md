@@ -495,21 +495,84 @@ One R2 feature being absent says nothing about another; both were probed.
 
 ### The schedule
 
-Four units in `infra/backup/systemd/`. **None of them is installed yet**, because
-`infra/staging/` belongs to the deploy work; `infra/backup/README.md` lists
-exactly what has to happen there.
+Four units in `infra/backup/systemd/`. **Two are installed and enabled on the
+staging node as of 2026-07-29**; the other two are deliberately not, and the
+reason is in the table rather than left to be rediscovered.
 
-| Unit                      | When                       | Why that cadence                                                                    |
-| ------------------------- | -------------------------- | ----------------------------------------------------------------------------------- |
-| `pullfm-backup-dump`      | daily 03:23 UTC            | this layer's RPO **is** the interval; before the 06:17 audit purge so the two agree |
-| `pullfm-deletion-ledger`  | every 10 minutes           | the interval **is** the erasure-durability RPO (5.3)                                |
-| `pullfm-backup-retention` | Mondays 07:11 UTC          | lifecycle rules drift when a person changes them, not on their own                  |
-| `pullfm-restore-drill`    | 1st of the month 04:47 UTC | Gate 4 asks for monthly; after the nightly dump, before the audit purge             |
+| Unit                      | When                       | Installed | Why that cadence, or why not                                                                                                             |
+| ------------------------- | -------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `pullfm-backup-dump`      | daily 03:23 UTC            | **yes**   | this layer's RPO **is** the interval; before the 06:17 audit purge so the two agree; daily is also what makes the 35-day window recoverable |
+| `pullfm-backup-retention` | Mondays 07:11 UTC          | **yes**   | lifecycle rules drift when a person changes them, not on their own                                                                        |
+| `pullfm-deletion-ledger`  | every 10 minutes           | no        | superseded: `apps/bff` writes the ledger object inline with the deletion cascade and fails the request if that write fails, so the RPO is 0 and this is now a reconciler that would need a second R2 credential on the node to backfill rows that no longer accumulate |
+| `pullfm-restore-drill`    | 1st of the month 04:47 UTC | no        | it **destroys data** on the staging branch and needs a Neon API key that can delete branches. Monthly drilling is a Gate 4 obligation, but arming it unattended on a node that has never run it once is how a drill becomes an incident. Operator-run for now |
 
-All four use `OnFailure=pullfm-job-alert@%n.service`, so they inherit the
-existing alert path. **`infra/scripts/check-job-schedule.mjs` does not lint
-them**: its unit directory and job list are both hard-coded to the four
-application jobs. Adding them there is part of the install.
+**Why daily and not weekly, stated against the retention number.** The lifecycle
+rule expires `dumps/scheduled/` after 35 days. Retention is a window, not a
+count: what can actually be restored to is the window divided by the interval.
+Daily gives about 35 recovery points inside it; weekly would give five, and
+"35 days of backups" would be a true statement about object lifetime and a
+misleading one about recoverability. Nothing finer than daily is warranted,
+because Neon's own six-hour history already covers every fault noticed quickly
+and this layer exists for the two it cannot cover. Section 1 states this layer's
+RPO as 24 hours, and that number **is** the `OnCalendar` line.
+
+**No `RandomizedDelaySec`, deliberately.** `pullfm-cf-ranges.timer` carries an
+hour of jitter because it is a polite client of a shared public endpoint.
+Every *job* timer instead pins `AccuracySec=1s` and owns a distinct minute,
+because systemd's default one-minute accuracy window lets it coalesce timers and
+put two jobs on one small node at the same instant. Jitter would also turn
+"before the 06:17 audit purge" into a probability rather than an ordering, and
+that ordering is why the dump and the purge do not disagree about which rows
+existed. `:23` is a minute nothing else uses.
+
+Both installed units use `OnFailure=pullfm-job-alert@%n.service` in `[Unit]`, so
+they reach the same alert path as the four application jobs, and neither sets
+`SuccessExitStatus=`: unlike those jobs there is no "ran, with something worth a
+look" outcome here. Either a verified encrypted dump is in R2 or the only copy of
+this database outside Neon is a day older than anyone thinks.
+
+**Still open: `infra/scripts/check-job-schedule.mjs` does not lint them.** Its
+`UNIT_DIR` is `infra/staging/app/systemd` and its `JOBS` list is four hard-coded
+entries, so nothing cross-checks these `OnCalendar` expressions against
+`systemd-analyze` or asserts `Type=oneshot` on them. `make jobs` covers four
+scheduled units out of six, which is worth knowing before quoting it.
+
+### What the node needs that a stock image does not have
+
+`pullfm-backup.sh` shells out to `pg_dump`, `psql`, `openssl`, `python3` and
+`aws`. Ubuntu 24.04 ships the middle two and neither of the outer two, and
+`bootstrap.sh` installs them:
+
+- **`postgresql-client-18` from PGDG**, not from Ubuntu. Neon runs Postgres 18
+  and `pg_dump` refuses outright to dump a server newer than itself; noble's
+  newest is 16. The check is on `/usr/lib/postgresql/18/bin/pg_dump` rather than
+  on `command -v pg_dump`, because `/usr/bin/pg_dump` is `pg_wrapper` and any
+  other package pulling in `postgresql-client` satisfies a presence check with
+  the wrong major version. A drop-in pins the unit's `PATH` to the versioned
+  bindir so this stays true whatever else is installed later.
+- **`aws-cli` v2, pinned to an exact version and SHA-256**, from the versioned
+  download URL rather than the moving one. The moving URL changes under you, so a
+  hash check against it fails on release day and no hash check installs whatever
+  was served.
+
+Neither the unit, its drop-in, nor `/etc/pullfm/backup.env` contains a bucket
+host. The endpoint in that file is a **seed the tool probes**, not an answer it
+trusts, so a node whose recorded endpoint is stale warns and keeps working
+rather than reporting that the backup bucket does not exist. R2 jurisdiction is
+immutable at bucket creation, so a residency change means new buckets on a
+different host; `infra/backup/README.md` ends with the full list of what a move
+has to touch, in and out of that directory.
+
+### This survives a node rebuild only once converge ships it
+
+**`infra/staging-env.sh converge` does not send `infra/backup` or `infra/lib`**,
+so `bootstrap.sh` takes its `else` branch and warns that no scheduled backup will
+be installed. The first install was done by shipping those two directories over
+the same SSH path converge uses, by hand. **A node rebuilt today comes back with
+no backup**, which is section 2 of this runbook happening again, one control
+along. The fix is one tar next to the observability one, plus placing
+`backup.env` the way `metrics.env` is placed; both are written out in
+`infra/backup/README.md`.
 
 ---
 

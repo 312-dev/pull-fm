@@ -31,21 +31,32 @@
 # THE R2 ENDPOINT TRAP, FOUND BY RUNNING IT
 # ---------------------------------------------------------------------------
 #
-# `pull-fm-backups-staging` is an EU-JURISDICTION bucket. Jurisdiction-scoped
-# buckets do not live on the account's default S3 host, they live on a
-# jurisdiction host, and the default host answers for them with NoSuchBucket:
+# A jurisdiction-scoped R2 bucket does not live on the account's default S3
+# host. It lives on a jurisdiction host, and the default host answers for it
+# with NoSuchBucket:
 #
-#   https://<acct>.r2.cloudflarestorage.com      ->  NoSuchBucket
-#   https://<acct>.eu.r2.cloudflarestorage.com   ->  200
+#   https://<acct>.r2.cloudflarestorage.com          the default host
+#   https://<acct>.<jurisdiction>.r2.cloudflarestorage.com
 #
-# The `s3 endpoint` field on the 1Password item `pull-fm/staging/R2_CREDENTIALS`
-# records the DEFAULT host, so it is wrong, and it is wrong in the way that
-# costs the most: the credential is valid, the bucket exists, and the error says
-# the bucket does not exist. `pullfm_backup_r2_endpoint` therefore probes rather
-# than trusts, and says so out loud when it has to correct the recorded value.
-# The Terraform module already derives this correctly
-# (`infra/terraform/modules/backup-storage/outputs.tf`); only the hand-written
-# 1Password field disagrees.
+# That is the worst shape an error can take: the credential is valid, the bucket
+# exists, and the message says the bucket does not exist.
+#
+# NOTHING HERE NAMES A JURISDICTION, AND THAT IS DELIBERATE RATHER THAN TIDY.
+# Jurisdiction is fixed at bucket creation and cannot be changed, so moving
+# residency means NEW BUCKETS ON A DIFFERENT HOST, and any tool that had learned
+# the old host breaks on the day of the move. `pullfm_backup_r2_endpoint`
+# therefore PROBES: it treats every recorded value - the `s3 endpoint` field in
+# 1Password, or the endpoint rendered into a node's environment file - as a
+# CANDIDATE to be checked rather than a fact to be trusted, and falls back to
+# deriving the alternatives from the account id. A stale recorded value costs a
+# warning and one extra HEAD, not an outage.
+#
+# It also never assumes two buckets share a host. The backups bucket and the
+# ledger bucket are separate buckets with separate credentials, and each loader
+# probes the bucket it is about to use with the credential it just loaded.
+# `infra/terraform/modules/backup-storage/outputs.tf` derives the endpoint from
+# the jurisdiction variable and is the authority on what a bucket's host should
+# be; this file's job is to still work when a recorded copy of that has drifted.
 
 readonly PULLFM_BACKUP_OP_VAULT="${PULLFM_BACKUP_OP_VAULT:-MCP}"
 
@@ -174,7 +185,12 @@ pullfm_backup_load_r2() {
   # not use them and a stale one produces an unhelpful signature error.
   unset AWS_SESSION_TOKEN AWS_PROFILE || true
 
-  PULLFM_R2_ENDPOINT="$(pullfm_backup_r2_endpoint "${PULLFM_BACKUP_BUCKET}" "${PULLFM_BACKUP_OP_R2}")"
+  # PULLFM_BACKUP_ENDPOINT is passed as a CANDIDATE, not as an answer. On a node
+  # it is the only source available, because there is no `op` there to read the
+  # recorded value from - but "the only source" and "correct" are different
+  # claims, and the second one is the bucket's to make.
+  PULLFM_R2_ENDPOINT="$(pullfm_backup_r2_endpoint "${PULLFM_BACKUP_BUCKET}" \
+    "${PULLFM_BACKUP_OP_R2}" "${PULLFM_BACKUP_ENDPOINT:-}")"
   export PULLFM_R2_ENDPOINT
 }
 
@@ -188,9 +204,17 @@ pullfm_backup_load_r2() {
 # the shape of a check that reports success while checking nothing. Every ledger
 # subcommand therefore loads this and never `pullfm_backup_load_r2`.
 #
-# Both buckets are EU-jurisdiction, so the endpoint is shared and only the key
-# pair differs. PULLFM_LEDGER_ACCESS_KEY_ID is read first for the node case,
-# where a rendered env file is the source and `op` is absent.
+# THE TWO BUCKETS DO NOT SHARE AN ENDPOINT, EVEN WHEN THEY HAPPEN TO. This
+# comment used to say "both buckets are EU-jurisdiction, so the endpoint is
+# shared and only the key pair differs", and that was a true observation written
+# as a rule. Jurisdiction is per bucket and immutable at creation, so the two can
+# and will diverge - a residency move creates new buckets and there is no instant
+# at which both are guaranteed to be on the same host. The ledger loader
+# therefore seeds the probe from PULLFM_LEDGER_ENDPOINT, never from the backup
+# bucket's endpoint, and probes the ledger bucket itself.
+#
+# PULLFM_LEDGER_ACCESS_KEY_ID is read first for the node case, where a rendered
+# env file is the source and `op` is absent.
 pullfm_backup_load_ledger_r2() {
   pullfm_need aws
   if [[ -n "${PULLFM_LEDGER_ACCESS_KEY_ID:-}" && -n "${PULLFM_LEDGER_SECRET_ACCESS_KEY:-}" ]]; then
@@ -209,7 +233,8 @@ pullfm_backup_load_ledger_r2() {
   # Probe the LEDGER bucket, not the backup one. The credential just loaded
   # cannot see the backup bucket, so probing it would fail on every host and
   # blame the ledger credential for a bucket the caller never asked about.
-  PULLFM_R2_ENDPOINT="$(pullfm_backup_r2_endpoint "${PULLFM_LEDGER_BUCKET}" "${PULLFM_LEDGER_OP_R2}")"
+  PULLFM_R2_ENDPOINT="$(pullfm_backup_r2_endpoint "${PULLFM_LEDGER_BUCKET}" \
+    "${PULLFM_LEDGER_OP_R2}" "${PULLFM_LEDGER_ENDPOINT:-}")"
   export PULLFM_R2_ENDPOINT
 }
 
@@ -226,46 +251,58 @@ pullfm_backup_load_ledger_r2() {
 #
 #   $1  bucket to probe   (default: the backup bucket)
 #   $2  1Password item id holding the recorded 's3 endpoint' (default: backups)
+#   $3  an endpoint the caller already has, from a rendered environment file.
+#       A CANDIDATE, NOT AN ANSWER: it used to be an early return, which meant a
+#       node kept using a host recorded before the bucket moved and reported
+#       NoSuchBucket for a bucket that exists. It is now the first thing probed,
+#       so the usual case still costs exactly one HEAD.
 pullfm_backup_r2_endpoint() {
   local bucket="${1:-${PULLFM_BACKUP_BUCKET}}"
   local op_item="${2:-${PULLFM_BACKUP_OP_R2}}"
+  local recorded="${3:-}"
 
-  if [[ -n "${PULLFM_BACKUP_ENDPOINT:-}" ]]; then
-    printf '%s' "${PULLFM_BACKUP_ENDPOINT}"
-    return 0
-  fi
-
-  local recorded host candidates ep
-  if command -v op >/dev/null; then
+  local host candidates ep source
+  if [[ -n "${recorded}" ]]; then
+    source="the environment"
+  elif command -v op >/dev/null; then
     recorded="$(pullfm_op_field "${op_item}" 's3 endpoint')"
+    source="1Password item ${op_item}"
   else
-    pullfm_die "PULLFM_BACKUP_ENDPOINT is not set and 1Password is not available.
+    pullfm_die "no endpoint was passed and 1Password is not available, so there
+is nothing to probe for bucket '${bucket}'.
 
-On a node, set it in the environment file. It is the JURISDICTION-scoped host:
-  https://<account-id>.eu.r2.cloudflarestorage.com
-The account default host answers NoSuchBucket for this bucket."
+On a node, render it into the environment file. It is whichever host the bucket
+was CREATED on: the account default host, or a jurisdiction host if the bucket
+is jurisdiction-scoped. The other one answers NoSuchBucket."
   fi
-  # Account host, e.g. https://<acct>.r2.cloudflarestorage.com
+
+  # The account id: the first label of the host, identical in both forms.
   host="${recorded#https://}"
   host="${host%%.*}"
 
+  # The recorded value first, then the two forms derived from the account id.
+  # Default before jurisdiction only because a bucket with no jurisdiction is
+  # the common case; both are tried, and a duplicate costs one wasted HEAD.
+  # No jurisdiction is hard-coded as THE answer anywhere: this list is a set of
+  # guesses and the bucket decides which one is right.
   candidates="${recorded}
-https://${host}.eu.r2.cloudflarestorage.com
-https://${host}.r2.cloudflarestorage.com"
+https://${host}.r2.cloudflarestorage.com
+https://${host}.eu.r2.cloudflarestorage.com"
 
   while read -r ep; do
     [[ -n "${ep}" ]] || continue
     if aws s3api head-bucket --bucket "${bucket}" \
       --endpoint-url "${ep}" >/dev/null 2>&1; then
       if [[ "${ep}" != "${recorded}" ]]; then
-        pullfm_warn "R2 endpoint correction: the 's3 endpoint' field on the 1Password
-item ${op_item} records
+        pullfm_warn "R2 endpoint correction: ${source} records
   ${recorded}
-which answers NoSuchBucket for '${bucket}'. The bucket is
-jurisdiction-scoped and actually lives on
+which answers NoSuchBucket for '${bucket}'. It actually lives on
   ${ep}
-Using the working host. FIX THE 1PASSWORD FIELD: a restore that begins by
-being told the backup bucket does not exist is the worst possible false alarm."
+Using the working host. FIX THE RECORDED VALUE - the 's3 endpoint' field on
+1Password item ${op_item}, and the endpoint rendered into any node environment
+file by infra/lib/secrets.sh. A restore that begins by being told the backup
+bucket does not exist is the worst possible false alarm, and this correction is
+the only thing currently standing between a stale record and that alarm."
       fi
       printf '%s' "${ep}"
       return 0

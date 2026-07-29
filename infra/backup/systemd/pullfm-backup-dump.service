@@ -22,10 +22,21 @@ ExecStart=/opt/pullfm/infra/backup/pullfm-backup.sh dump --kind scheduled
 # is in R2 or the only copy of this database outside Neon is a day older than
 # anybody thinks. Every non-zero exit is alert-worthy.
 
-# The dump itself takes about 25 seconds against a 43 KB database, and pg_dump
-# time grows with the data. Ten minutes is far beyond any plausible size on a
-# 0.5 GB storage cap and still bounded, so a hung TLS connection to Neon cannot
+# Measured on the node on 2026-07-29: 8.7 seconds end to end for a 50 KB dump -
+# 3.7s pg_dump, 0.6s encrypt, 2.2s upload, and the readback verify. Ten minutes
+# is far beyond that and still bounded, so a hung TLS connection to Neon cannot
 # hold the unit open until the next firing.
+#
+# TEN MINUTES IS ALSO NOT A NUMBER TO RAISE WHEN IT FIRES, and the first run of
+# this unit is the reason that sentence is here. It hit the timeout and was
+# killed at 600s having consumed 5m50s of CPU and 2.6 GB of RSS on a 4 GB node,
+# because the MusicBrainz canonical import had just taken the database from
+# 43 KB to 10 GB. The timeout was not too short; the dump was dumping 31.5
+# million rows of a published upstream dataset that a committed command rebuilds
+# from scratch. The fix was DUMP_EXCLUDE_DATA in pullfm-backup.sh, not a bigger
+# number here. If this unit times out again, ask what got into the database
+# before assuming the bound is wrong: a backup job that grows its own timeout to
+# match whatever it is being handed has stopped being a control.
 # TimeoutStartSec=, NOT RuntimeMaxSec=, for the same reason and since the same
 # date. RuntimeMaxSec= bounds a service that has REACHED the running state and a
 # Type=oneshot service never does: it is "activating" from ExecStart until

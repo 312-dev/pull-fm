@@ -105,7 +105,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=../lib/backup-common.sh
 source "${ROOT}/infra/lib/backup-common.sh"
 
-readonly TOOL_VERSION="1"
+# 2 since 2026-07-29. The manifest gained `excluded_table_data` and the artifact
+# stopped being an unconditional whole-database dump, so a reader cannot assume
+# a version-1 manifest and a version-2 manifest describe the same thing.
+readonly TOOL_VERSION="2"
 
 # Retention, in days, per prefix. These numbers are the policy; changing one
 # here is changing what legal/privacy-policy.md section 7 promises, so change
@@ -119,6 +122,42 @@ readonly RETAIN_HOLD=0
 # an expiry. Anything older than this is reported by retention-check as an
 # exception that has outlived its justification.
 readonly HOLD_REVIEW_DAYS=180
+
+# ---------------------------------------------------------------------------
+# DERIVED DATA: SCHEMA IN, ROWS OUT
+# ---------------------------------------------------------------------------
+#
+# WHAT WAS WRONG. On 2026-07-29 the MusicBrainz canonical loader began
+# populating `mb.canonical`, and the staging database went from 43 KB to 10 GB
+# in one afternoon - 31.5 million rows, against about 500 KB of everything else
+# in the database put together. The first scheduled dump after that ran into
+# TimeoutStartSec and was killed at ten minutes with nothing uploaded. The
+# obvious readings of that are both wrong: the timeout is not too short, and the
+# node is not too small.
+#
+# WHY THIS SHAPE. A backup exists for data that CANNOT BE RE-DERIVED. `mb.*`
+# holds an import of a published upstream dataset, rebuilt from scratch by
+# infra/mb-loader/mb-canonical-load.sh whenever it is wanted. Paying ten minutes
+# of Neon compute, ten gigabytes of R2 and a nightly alert to keep 35 rolling
+# copies of somebody else's public dataset would not make one user record safer,
+# and it would push the thing that IS irreplaceable - users, tokens, wishlists,
+# the audit and deletion logs - behind a wall of data that is a download away.
+#
+# --exclude-table-data, NOT --exclude-schema, AND THE DIFFERENCE IS THE WHOLE
+# POINT. The DDL stays in the artifact: tables, indexes, constraints, grants.
+# A restore therefore reproduces the complete schema and an EMPTY mb.canonical
+# that the loader refills, rather than a database that is missing objects the
+# application's migrations believe exist. It is also emphatically not
+# `--schema=public`, which is the mistake documented at the pg_dump call below:
+# restricting to a schema silently drops all four extensions, and `users.email`
+# is `citext`.
+#
+# ANYTHING ADDED HERE MUST BE RE-DERIVABLE BY A COMMITTED COMMAND, and the
+# comment saying which command must be added with it. That is the only thing
+# separating this list from a slow leak of coverage.
+readonly DUMP_EXCLUDE_DATA=(
+  'mb.*' # rebuilt by infra/mb-loader/mb-canonical-load.sh from the MusicBrainz release
+)
 
 # ---------------------------------------------------------------------------
 # cipher material
@@ -254,7 +293,12 @@ only thing distinguishing this object from the nightly one is its prefix."
   # discards them with --no-owner, because a dump is also the record of what the
   # schema and its grants looked like, and the least-privilege application role
   # is created by hand-written SQL that lives nowhere in Terraform.
-  pg_dump --format=custom --compress=9 \
+  local -a exclude_args=() glob
+  for glob in "${DUMP_EXCLUDE_DATA[@]}"; do
+    exclude_args+=(--exclude-table-data="${glob}")
+  done
+
+  pg_dump --format=custom --compress=9 "${exclude_args[@]}" \
     --file="${tmp}/dump.pgc" "${dsn}" 2>"${tmp}/pgdump.err" || {
     pullfm_warn "$(cat "${tmp}/pgdump.err")"
     pullfm_die "pg_dump failed. Nothing was uploaded."
@@ -285,7 +329,17 @@ SQL
   size_plain="$(wc -c <"${tmp}/dump.pgc" | tr -d ' ')"
   size_cipher="$(wc -c <"${tmp}/dump.enc" | tr -d ' ')"
   stamp="$(date -u +%Y-%m-%dT%H%M%SZ)"
-  git_sha="$(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  # PULLFM_GIT_SHA FIRST, AND THE FALLBACK IS THE LAPTOP CASE RATHER THAN THE
+  # OTHER WAY ROUND. On a workstation ROOT is a checkout and `git rev-parse`
+  # answers. On the staging node this script lives at
+  # /opt/pullfm/infra/backup/pullfm-backup.sh, which is an `install`ed copy and
+  # not a repository, so the rev-parse fails and EVERY scheduled object was
+  # keyed and manifested `unknown` - the one artifact whose whole job is to be
+  # identifiable six months later, carrying no statement of what wrote it.
+  # infra/lib/secrets.sh reads the sha where a checkout does exist and renders
+  # it into /etc/pullfm/backup.env. Not a credential; it is in that file because
+  # that file is how the node is told things.
+  git_sha="${PULLFM_GIT_SHA:-$(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
   key="${prefix}/${stamp}-${git_sha}.pgc.enc"
 
   # Manifest first? No: ciphertext first. A manifest with no object is a
@@ -302,11 +356,19 @@ SQL
   python3 - "${tmp}/manifest.json" "${kind}" "${reason}" "${key}" "${pg_now}" \
     "${pg_lsn}" "${PULLFM_NEON_PROJECT_ID}" "$(pg_dump --version | awk '{print $3}')" \
     "${sha_plain}" "${sha_cipher}" "${mac}" "${size_plain}" "${size_cipher}" \
-    "${counts}" "${git_sha}" "${TOOL_VERSION}" <<'PY'
+    "${counts}" "${git_sha}" "${TOOL_VERSION}" "${DUMP_EXCLUDE_DATA[*]}" <<'PY'
 import datetime, json, sys
 (out, kind, reason, key, server_time, lsn, project, pgdump_v,
- sha_plain, sha_cipher, mac, n_plain, n_cipher, counts, git_sha, tool_v) = sys.argv[1:17]
+ sha_plain, sha_cipher, mac, n_plain, n_cipher, counts, git_sha, tool_v,
+ excluded) = sys.argv[1:18]
 json.dump({
+    # WHAT IS NOT IN THIS ARTIFACT, recorded IN the artifact. A dump that is
+    # missing rows and does not say so is worse than no dump: it restores
+    # cleanly and quietly, and the gap is found by a user. Every pattern here
+    # was excluded because a committed command re-derives it; see
+    # DUMP_EXCLUDE_DATA in infra/backup/pullfm-backup.sh. Schema, indexes and
+    # grants for these tables ARE present - only their rows are not.
+    "excluded_table_data": excluded.split() if excluded else [],
     "tool_version": int(tool_v),
     "kind": kind,
     "reason": reason or None,
@@ -482,8 +544,47 @@ cmd_retention_apply() {
 
 cmd_retention_check() {
   pullfm_backup_load_r2
-  local live rc=0
-  live="$(pullfm_s3 get-bucket-lifecycle-configuration --bucket "${PULLFM_BACKUP_BUCKET}" 2>/dev/null || echo '{"Rules":[]}')"
+  local live err rc=0
+
+  # "CANNOT READ" AND "IS EMPTY" ARE DIFFERENT ANSWERS, and until 2026-07-29
+  # this line turned the first into the second: `2>/dev/null || echo
+  # '{"Rules":[]}'` swallowed every error, so a credential that is refused
+  # GetBucketLifecycleConfiguration produced the report
+  #
+  #   MISSING lifecycle rule: pullfm-scheduled-dumps
+  #
+  # which says the 35-day retention has been deleted from the bucket. It had
+  # not. Nothing had been read at all. That is the worst shape a check can take:
+  # it fails, so it looks like it is working, and it names a cause that is not
+  # the cause - and it does it about the one number legal/privacy-policy.md
+  # section 7 states to users.
+  #
+  # It is not hypothetical. The backup credential is now BUCKET-SCOPED (the fix
+  # for PULLFM-RISK-013, where an account-wide R2 grant turned out to read every
+  # bucket in the estate). Lifecycle configuration is a bucket-ADMIN operation
+  # in R2, not an object operation, so the scoped token is refused it by design.
+  # An empty configuration still reports as missing rules, which is correct;
+  # only the unreadable case changes.
+  err="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '${err}'" RETURN
+  if ! live="$(pullfm_s3 get-bucket-lifecycle-configuration \
+    --bucket "${PULLFM_BACKUP_BUCKET}" 2>"${err}")"; then
+    if grep -qi 'NoSuchLifecycleConfiguration' "${err}"; then
+      live='{"Rules":[]}'
+    else
+      pullfm_die "cannot READ the lifecycle configuration of
+'${PULLFM_BACKUP_BUCKET}', so this check has verified nothing:
+
+$(cat "${err}")
+
+This is not the same as the rules being absent, and it must not be reported as
+if it were. R2 treats lifecycle configuration as a bucket-ADMIN operation, so a
+bucket-scoped object token - which is what the node and this tool now hold, on
+purpose - is refused it. Run this from an operator credential with R2 admin, or
+read the rules in the Cloudflare dashboard."
+    fi
+  fi
 
   local expected
   expected="$(_lifecycle_json)"

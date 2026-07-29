@@ -397,8 +397,51 @@ cmd_converge() {
   # infra/observability ships alongside the app directory rather than inside it,
   # so it is sent as a second tar into the same working directory. bootstrap.sh
   # installs from ./observability if it is there.
-  tar czf - -C "${ROOT}/infra" observability |
+  #
+  # `backup` AND `lib` TRAVEL TOO, AND LEAVING THEM OUT WAS SILENT.
+  #
+  # bootstrap.sh installs the scheduled dump from ./backup and takes an `else`
+  # branch with a warning when the directory is absent. Converge sent only
+  # `observability`, so every converge produced a node with no backup timer and
+  # said so in one line nobody was reading. The first install was done by hand
+  # over this same SSH path, which is exactly the state this function exists to
+  # make unnecessary: a node rebuilt from scratch came back WITHOUT the control,
+  # and nothing failed.
+  #
+  # That matters more than it looks, because the node is disposable ON PURPOSE.
+  # The database is Neon and the node holds nothing, so "rebuild it" is the
+  # documented answer to a whole class of problem. A control that does not
+  # survive a rebuild is a control that disappears on the day it is most likely
+  # to be needed.
+  #
+  # `lib` is not optional decoration: infra/backup/pullfm-backup.sh sources
+  # infra/lib/backup-common.sh, so shipping `backup` alone installs a unit that
+  # fails on its first run rather than one that works.
+  tar czf - -C "${ROOT}/infra" observability backup lib |
     ssh_node "${app_ip}" "tar xzf - -C /tmp/pullfm-config"
+
+  # The scheduled dump's credentials: the bucket-scoped R2 pair and the dump
+  # cipher material. Same treatment as metrics.env, and for the same reason.
+  #
+  # It is a SEPARATE file from bff.env rather than more lines in it because the
+  # two are read by different things with different lifetimes: bff.env is
+  # bind-mounted into the application container, and a container that can read
+  # the backup cipher key can decrypt every dump in the bucket. The split is the
+  # only thing keeping the dump key out of the internet-facing process.
+  #
+  # Non-fatal for the same reason the alert channel is: a missing backup
+  # credential must not stop the environment coming up with a serving origin.
+  # bootstrap.sh reports it, and the timer fails loudly on its first run rather
+  # than silently producing nothing.
+  if [[ -f "${secrets}/backup.env" ]]; then
+    scp -q -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+      "${secrets}/backup.env" "${SSH_USER}@${app_ip}:/tmp/backup.env"
+    ssh_node "${app_ip}" "sudo install -m 0600 -o root -g root /tmp/backup.env /etc/pullfm/backup.env \
+      && rm -f /tmp/backup.env"
+    log "  backup credentials installed"
+  else
+    warn "  no backup.env was rendered; the scheduled dump will fail on its first run"
+  fi
 
   # THE ALERT URL IS A CREDENTIAL AND TRAVELS LIKE ONE. On ntfy the topic name
   # is the entire access control, so a URL in a log or an argv is a channel

@@ -188,6 +188,203 @@ for job in warm-cache sweep-expired purge-audit reap-unverified; do
   install -m 0644 "systemd/pullfm-${job}.timer" /etc/systemd/system/
 done
 
+# --- the scheduled database backup -----------------------------------------
+#
+# WHAT WAS WRONG. `docs/api/deletion-and-backups.md` states a three-layer backup
+# position and gives the object-storage layer a retention of "35 days
+# scheduled". There was no scheduler. Enumerated on this node on 2026-07-29:
+# seven pullfm timers (deploy, cf-ranges, watchdog and the four application
+# jobs) and not one of them a backup; nothing in /etc/systemd/system matching
+# backup, ledger or erasure; /etc/cron.d holding only distribution defaults; and
+# `infra/backup/pullfm-backup.sh` not present on the node at all. Every dump in
+# `pull-fm-backups-staging` had been taken by hand from a workstation. That is
+# PULLFM-RISK-012: the documented control existed in git, which is why reading
+# the repository would have concluded it was present.
+#
+# WHY THIS SHAPE. The units were already written, and correctly - `OnFailure=`
+# in [Unit], `TimeoutStartSec=` rather than the `RuntimeMaxSec=` systemd
+# discards on a oneshot, `ConditionPathExists=` so an unconfigured node skips
+# rather than alerts. They were simply never installed, because
+# `infra/backup/README.md` recorded the install as belonging to `infra/staging/`
+# and nothing here had claimed it. This section claims it, and follows the
+# application-job loop above exactly: install the pair, then `enable --now` the
+# TIMER and never the service.
+#
+# WHY ONLY ONE OF THE FOUR. `infra/backup/systemd/` holds four units and the
+# other three are deliberately left out rather than forgotten. A unit installed
+# on a node that cannot run it correctly is worse than no unit: it fails on a
+# schedule, and an operator paged weekly by a job that was never going to work
+# stops reading the pages that matter.
+#
+#   pullfm-backup-retention  CANNOT WORK WITH THIS NODE'S CREDENTIAL, measured
+#                            rather than assumed. Run here on 2026-07-29 it
+#                            reported four MISSING lifecycle rules; the real
+#                            answer was AccessDenied on
+#                            GetBucketLifecycleConfiguration. Lifecycle is a
+#                            bucket-ADMIN operation in R2 and the node holds a
+#                            bucket-scoped OBJECT token, which is the whole point
+#                            of PULLFM-RISK-013. Widening the token to satisfy a
+#                            weekly check would undo the fix that risk records.
+#                            The check belongs on an operator credential;
+#                            `retention-check` now says so instead of blaming the
+#                            rules.
+#   pullfm-restore-drill     DESTROYS DATA on the staging branch and needs a Neon
+#                            API key that can delete branches. Monthly drilling is
+#                            a Gate 4 obligation, but arming it on a node that has
+#                            never run it once unattended is how a drill becomes
+#                            an incident. It stays an operator-run script.
+#   pullfm-deletion-ledger   Superseded for its original purpose. apps/bff writes
+#                            the ledger object inline with the deletion cascade
+#                            and refuses the delete if that write fails, so
+#                            erasure durability is synchronous with the request
+#                            and no longer waits for a ten-minute timer. What is
+#                            left is a reconciler, and running it here would mean
+#                            putting a SECOND R2 credential - the ledger bucket's,
+#                            which is a different token for a different bucket on
+#                            purpose - on the node to backfill rows that no longer
+#                            accumulate.
+#
+# All three are recorded in docs/RUNBOOK-DR.md section 6 rather than left to be
+# rediscovered.
+#
+# The units read /etc/pullfm/backup.env, rendered by infra/lib/secrets.sh from
+# 1Password and placed root-owned 0600 by converge. There is no `op` on this
+# node and there must not be: a scheduled job that needs an interactive vault
+# unlock is a scheduled job that does not run.
+if [ -d backup ]; then
+  # --- the two binaries the dump actually shells out to ---------------------
+  #
+  # NEITHER IS ON A STOCK UBUNTU 24.04 NODE, and this was the part that made the
+  # gap more than a missing `install` line. `pullfm-backup.sh` calls
+  # `pullfm_need pg_dump psql python3` and `pullfm_need aws`; python3 and
+  # openssl are present, the other two are not, and a unit that dies in
+  # `pullfm_need` fails identically to one that has no credentials.
+  #
+  # pg_dump comes from PGDG rather than from Ubuntu because THE MAJOR VERSION
+  # HAS TO MATCH THE SERVER. Neon runs Postgres 18 (infra/neon/variables.tf
+  # pg_version, ForceNew; `select version()` on the staging branch answers
+  # 18.4); noble ships postgresql-client-16 at the newest, and pg_dump refuses
+  # outright to dump a server newer than itself. Installing the distribution
+  # package would have produced a unit that runs nightly, fails nightly, and
+  # alerts nightly.
+  #
+  # THE TEST IS THE MAJOR VERSION AND NOT `command -v pg_dump`, and that is a
+  # correction rather than a preference. It was a presence check for one hour on
+  # 2026-07-29, during which something else on this node installed
+  # `postgresql-client` - the unversioned metapackage, which on noble pulls
+  # client 16. The presence check then passed, this block skipped, and the node
+  # ended up with a backup unit and a pg_dump that cannot dump the server it
+  # points at. A dependency check that a WRONG version satisfies is not a check.
+  #
+  # The AWS CLI is pinned to an exact version and an exact digest, from the
+  # VERSIONED url rather than the moving one. `awscli-exe-linux-x86_64.zip`
+  # changes under you, so a hash check against it would fail on the day AWS
+  # ships a release and a bootstrap with no hash check would silently install
+  # whatever was served. The two urls were confirmed byte-identical on
+  # 2026-07-29; the versioned one is the one that stays that way.
+  AWSCLI_VERSION=2.36.10
+  AWSCLI_SHA256=f6bf7f19f584a1b32b50217f357f2a5877204cf6f703fec8036cd774932383dd
+  PGDG_KEY_FPR=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+  PGMAJOR=18
+
+  if [ ! -x "/usr/lib/postgresql/${PGMAJOR}/bin/pg_dump" ]; then
+    echo "installing postgresql-client-${PGMAJOR} from PGDG (Neon runs Postgres ${PGMAJOR})"
+    apt-get install -y -qq curl ca-certificates gnupg
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc |
+      gpg --dearmor -o /tmp/pgdg.gpg
+    # Verify the key BEFORE it is trusted to sign packages. A keyring fetched
+    # over TLS and installed unread trusts whoever answered the request.
+    if ! gpg --show-keys --with-colons /tmp/pgdg.gpg | grep -q "^fpr:::::::::${PGDG_KEY_FPR}:"; then
+      echo "PGDG signing key does not have the expected fingerprint" >&2
+      rm -f /tmp/pgdg.gpg
+      exit 1
+    fi
+    install -m 0644 /tmp/pgdg.gpg /usr/share/keyrings/pgdg.gpg
+    rm -f /tmp/pgdg.gpg
+    . /etc/os-release
+    cat >/etc/apt/sources.list.d/pgdg.list <<PGDG
+# Generated by bootstrap.sh. Postgres CLIENT tools only; no server is installed.
+deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main
+PGDG
+    chmod 0644 /etc/apt/sources.list.d/pgdg.list
+    apt-get update -qq
+    apt-get install -y -qq "postgresql-client-${PGMAJOR}"
+  fi
+
+  # A drop-in rather than an edit to the unit, for the same reason the watchdog
+  # gets one: the unit describes what the backup does and belongs to
+  # infra/backup/, while WHICH pg_dump answers on this node is a fact about this
+  # node's shape. /usr/bin/pg_dump is `pg_wrapper`, which dispatches to whichever
+  # major version it decides is current, and that decision is made by whatever
+  # else happens to be installed. Prepending the versioned bindir makes the
+  # backup use Postgres ${PGMAJOR}'s binaries no matter what else lands here,
+  # and leaves /usr/bin/pg_dump alone for everything else on the node.
+  install -d -m 0755 /etc/systemd/system/pullfm-backup-dump.service.d
+  cat >"/etc/systemd/system/pullfm-backup-dump.service.d/10-pg-path.conf" <<PGPATH
+# Generated by bootstrap.sh. Do not edit.
+[Service]
+Environment=PATH=/usr/lib/postgresql/${PGMAJOR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PGPATH
+  chmod 0644 /etc/systemd/system/pullfm-backup-dump.service.d/10-pg-path.conf
+
+  if [ "$(aws --version 2>/dev/null | cut -d' ' -f1)" != "aws-cli/${AWSCLI_VERSION}" ]; then
+    echo "installing aws-cli ${AWSCLI_VERSION}"
+    apt-get install -y -qq unzip curl ca-certificates
+    rm -rf /tmp/awscli && install -d -m 0700 /tmp/awscli
+    curl -fsSL -o /tmp/awscli/aws.zip \
+      "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip"
+    echo "${AWSCLI_SHA256}  /tmp/awscli/aws.zip" | sha256sum -c - || {
+      echo "aws-cli archive does not match the pinned digest" >&2
+      rm -rf /tmp/awscli
+      exit 1
+    }
+    unzip -q -d /tmp/awscli /tmp/awscli/aws.zip
+    # --update so a re-run over an existing install is a no-op rather than an
+    # error, which is what makes this whole script safe to re-run.
+    /tmp/awscli/aws/install --update >/dev/null
+    rm -rf /tmp/awscli
+  fi
+
+  # --- the tool itself -------------------------------------------------------
+  #
+  # /opt/pullfm/infra/... rather than /usr/local/bin, because that is the path
+  # the committed units already name in ExecStart and because pullfm-backup.sh
+  # computes ROOT as two directories up and sources ../lib/backup-common.sh from
+  # it. Flattening it into /usr/local/bin would break that source at the first
+  # firing, at 03:23, with nobody watching.
+  #
+  # ONLY THE DUMP TOOL AND ITS LIBRARY ARE SHIPPED. pullfm-restore.sh and
+  # restore-drill.sh stay off the node: nothing installed here executes them,
+  # both want a Neon API key that can delete branches, and a restore is run by a
+  # person from a checkout. Shipping a tool "in case" is how a node ends up
+  # holding the credential for a capability it never uses.
+  install -d -m 0755 /opt/pullfm/infra /opt/pullfm/infra/backup /opt/pullfm/infra/lib
+  install -m 0755 backup/pullfm-backup.sh /opt/pullfm/infra/backup/pullfm-backup.sh
+  install -m 0644 lib/backup-common.sh /opt/pullfm/infra/lib/backup-common.sh
+
+  install -m 0644 backup/systemd/pullfm-backup-dump.service /etc/systemd/system/
+  install -m 0644 backup/systemd/pullfm-backup-dump.timer /etc/systemd/system/
+
+  # Remove a retention unit left by an earlier run of this script, which
+  # installed it before the AccessDenied above was measured. Leaving it would
+  # keep a weekly failing timer on the node with nothing in the repository that
+  # explains it, which is the shape of every stale unit anybody has ever found.
+  if [ -f /etc/systemd/system/pullfm-backup-retention.timer ]; then
+    systemctl disable --now pullfm-backup-retention.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/pullfm-backup-retention.timer \
+      /etc/systemd/system/pullfm-backup-retention.service
+  fi
+
+  if [ ! -f /etc/pullfm/backup.env ]; then
+    echo "WARNING: /etc/pullfm/backup.env is missing. The backup units carry" >&2
+    echo "ConditionPathExists for it, so they will SKIP rather than fail - which" >&2
+    echo "means no dump and no alert about there being no dump." >&2
+  fi
+else
+  echo "WARNING: backup/ was not shipped; NO SCHEDULED DATABASE BACKUP will be" >&2
+  echo "installed on this node. See infra/backup/README.md and PULLFM-RISK-012." >&2
+fi
+
 # --- notification channel and watchdog -------------------------------------
 # Shipped from infra/observability/, which converge places alongside this
 # directory as ./observability. The alert sender is installed even when
@@ -238,6 +435,16 @@ systemctl enable --now pullfm-warm-cache.timer
 systemctl enable --now pullfm-sweep-expired.timer
 systemctl enable --now pullfm-purge-audit.timer
 systemctl enable --now pullfm-reap-unverified.timer
+
+# THE TIMER, NOT THE UNIT, AND THIS IS THE WHOLE POINT OF PULLFM-RISK-012.
+# A unit file that is installed and whose timer is not enabled looks like a
+# working control in a diff, in a file listing and in `ls /etc/systemd/system`,
+# and produces exactly as many backups as no unit at all. `enable --now` is what
+# makes `systemctl list-timers` show a NEXT, and a NEXT is the only evidence
+# that anything is scheduled.
+if [ -f /etc/systemd/system/pullfm-backup-dump.timer ]; then
+  systemctl enable --now pullfm-backup-dump.timer
+fi
 
 echo
 echo "bootstrap complete. First deploy runs within 60 seconds, or force it with:"

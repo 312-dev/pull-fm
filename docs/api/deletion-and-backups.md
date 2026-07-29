@@ -42,12 +42,12 @@ Ordering matters and is chosen so that a failure at any point leaves a recoverab
 
 ## The backup position
 
-> **Status, 2026-07-29: this now describes a system that exists and has been drilled.** The earlier
-> version of this block described pgBackRest against a self-managed Postgres node. That node no
-> longer exists: the database moved to a managed provider, and pgBackRest was never deployed. The retention
-> numbers below are configured and were verified against live storage, not planned. What was **not**
-> verified at the time is whether anything invokes the dump on a schedule; it does not. See the
-> correction under the table.
+> **Status, 2026-07-29: this now describes a system that exists, has been drilled, and is
+> scheduled.** The earlier version of this block described pgBackRest against a self-managed
+> Postgres node. That node no longer exists: the database moved to a managed provider, and
+> pgBackRest was never deployed. A later version of this block correctly recorded that **nothing
+> invoked the dump on a schedule**. That is now fixed; see the correction under the table for what
+> was done and for the one part of the retention claim that is still unverified.
 
 Backups are three layers, because no single one covers what the others do not:
 
@@ -57,14 +57,35 @@ Backups are three layers, because no single one covers what the others do not:
 | A pinned restore branch                  | planned destructive operations, any age                                    | kept until deliberately released    |
 | Encrypted logical dump in object storage | loss of the database project itself, or a fault older than the PITR window | **35 days** scheduled, 90 preflight |
 
-**One correction to the table, because a retention window is not a backup.** The 35 day figure is the
-retention policy applied to scheduled dumps, and on the staging deployment there is **no scheduler
-running it yet**: the dump tooling exists and is exercised by the restore drill, but nothing on the
-node invokes it on a timer, so the objects that exist were produced by hand. Found on 2026-07-29 by
-enumerating the node's timers rather than by reading this repository, which is the point - every
-artifact needed to schedule it is committed, so reading the code would have concluded the control
-was present. The first two layers are unaffected and are provider-managed. This is tracked with a
-deliberately short expiry in the internal register.
+**Two corrections to the table, because a retention window is not a backup.**
+
+**1. There is now a scheduler, and until 2026-07-29 there was not.** The 35 day figure is a
+retention policy applied to scheduled dumps, and on the staging deployment nothing was producing
+them: the tooling existed and was exercised by the restore drill, but no timer invoked it, so the
+only objects in the bucket were drill artifacts. Found by enumerating the node's timers rather than
+by reading this repository, which is the point - every artifact needed to schedule it was committed,
+so reading the code would have concluded the control was present. `pullfm-backup-dump.timer` is now
+installed and enabled on the staging node, fires daily at 03:23 UTC, alerts through the same
+`pullfm-job-alert@` path as the application jobs, and has produced a verified object under
+`dumps/scheduled/`. **Daily is derived from the retention number rather than chosen next to it:**
+retention is a window and what can be restored to is the window divided by the interval, so daily
+gives about 35 recovery points inside 35 days where weekly would give five.
+
+**2. The 35 days is a bucket lifecycle rule that we can no longer read, and therefore no longer
+verify.** The backup credential was narrowed to a bucket-scoped object token (the fix for a separate
+finding, where an account-wide grant turned out to read every bucket in the estate). R2 treats
+lifecycle configuration as a bucket-admin operation, so that token is refused
+`GetBucketLifecycleConfiguration`. The conformance check now says so plainly instead of reporting
+the rules as missing, and it is run from an operator credential rather than from the node. Until it
+is next run that way, **treat the 35 days as configured-but-unconfirmed**, not as verified.
+
+The first two layers are unaffected and are provider-managed.
+
+**A scheduled dump does not contain everything in the database, and says so.** The rows of the
+imported MusicBrainz catalogue are excluded and their schema is kept, because that table is an
+import of a published upstream dataset that a committed command rebuilds, and at 31.5 million rows
+it was 99.99% of the database by size. Every manifest lists what was excluded, so an artifact can
+never be quietly less than it appears. Nothing a user gave us is excluded.
 
 A deleted user's rows therefore continue to exist inside encrypted artifacts until the last one
 containing them ages out, and that is now a stated number rather than an open question.

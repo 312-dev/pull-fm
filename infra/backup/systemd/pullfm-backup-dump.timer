@@ -14,8 +14,35 @@ Description=Take the nightly database dump
 #   makes the two records disagree for no reason.
 #
 #   :23, to stay off the :05/:35 and :10/:40 minutes the existing timers use.
+#
+# DAILY IS ALSO WHAT MAKES THE 35-DAY RETENTION MEAN SOMETHING. The lifecycle
+# rule on `dumps/scheduled/` expires objects after 35 days
+# (RETAIN_SCHEDULED in infra/backup/pullfm-backup.sh, and the sentence it makes
+# true in legal/privacy-policy.md section 7). Retention is a window, not a
+# count: what an operator can actually restore to is the window divided by the
+# interval. Daily gives about 35 recovery points inside it. Weekly would give
+# five, and "35 days of backups" would be a true statement about object lifetime
+# and a misleading one about recoverability. Anything finer than daily buys
+# nothing here, because the layer below this one - Neon's own 6-hour history -
+# already covers every fault noticed quickly, and this layer exists for the two
+# it cannot: a fault older than six hours, and the loss of the Neon account.
+# docs/RUNBOOK-DR.md section 1 states this layer's RPO as 24 hours, and that
+# number IS this line.
 OnCalendar=*-*-* 03:23:00 UTC
 AccuracySec=1s
+
+# NO RandomizedDelaySec=, DELIBERATELY, and the split in this repository is not
+# an inconsistency. pullfm-cf-ranges.timer carries RandomizedDelaySec=1h because
+# it is a polite client of a shared public endpoint and nothing downstream cares
+# when within the hour it runs. Every JOB timer - warm-cache, sweep-expired,
+# purge-audit, reap-unverified - instead pins AccuracySec=1s and owns a distinct
+# minute, because systemd's default one-minute accuracy window lets it coalesce
+# timers, and two job containers starting at the same instant on one small node
+# is the thing that convention exists to prevent. A jittered backup would also
+# make "before the 06:17 audit purge" a probability rather than an ordering, and
+# that ordering is the reason the dump and the purge do not disagree about which
+# rows existed. This is a job timer, so it follows the job convention: an exact
+# minute, no jitter, and a minute nothing else uses.
 
 # TRUE. A missed night is a night with no off-Neon copy, and the whole point of
 # this layer is the failure where Neon is not available to ask.

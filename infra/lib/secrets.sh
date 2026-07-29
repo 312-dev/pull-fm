@@ -78,6 +78,24 @@ readonly PULLFM_WORKOS_OP_ITEM="${PULLFM_WORKOS_OP_ITEM:-qr6sfpfzskhpqtzbehw7kdh
 readonly PULLFM_PUBLIC_BASE_URL="${PULLFM_PUBLIC_BASE_URL:-https://api-staging.pull.fm}"
 readonly PULLFM_MB_USER_AGENT="${PULLFM_MB_USER_AGENT:-PullFM/0.1.0 (ope@312.dev)}"
 
+# The backup credential, addressed BY TITLE rather than by item id, unlike its
+# twin in infra/lib/backup-common.sh. Both work - `op item get` takes either, and
+# these titles are unambiguous where the two WorkOS titles above are not - and
+# the title is what belongs in a PUBLIC repository. An item id is a direct object
+# reference: it turns any vault access from a search problem into a fetch, which
+# is why `tools/check-public-identifiers.mjs` rejects one in a tracked file.
+#
+# THIS TOKEN IS BUCKET-SCOPED AND THAT IS THE WHOLE REASON THE NODE MAY HOLD IT.
+# It was rotated on 2026-07-29 to reach `pull-fm-backups-staging` and nothing
+# else. `pull-fm/staging/R2_LEDGER_CREDENTIALS` is a DIFFERENT token for a
+# DIFFERENT bucket (`pull-fm-ledger-staging`) and the two are never
+# interchangeable: the backup token cannot see the ledger bucket at all, and a
+# ledger command run with it reports an EMPTY LEDGER rather than a permission
+# error, which is the shape of a check that reports success while checking
+# nothing. See the header of infra/lib/backup-common.sh.
+readonly PULLFM_BACKUP_OP_ITEM="${PULLFM_BACKUP_OP_ITEM:-pull-fm/staging/R2_CREDENTIALS}"
+readonly PULLFM_CIPHER_OP_ITEM="${PULLFM_CIPHER_OP_ITEM:-pull-fm/infra/BACKUP_DUMP_KEY}"
+
 _pullfm_secret_die() { printf '\033[31m%s\033[0m\n' "$*" >&2; return 1; }
 
 _pullfm_field() {
@@ -124,6 +142,8 @@ pullfm_secret_workdir() {
 #
 #   bff.env             application configuration and secrets (app node)
 #   cache.env           Redis passwords (cache node)
+#   backup.env          the scheduled dump's credentials (app node)
+#   metrics.env         the watchdog's scrape target and token (app node)
 #   origin.pem          Cloudflare Origin CA certificate
 #   origin.key          its private key
 #   origin-pull-ca.pem  Cloudflare's origin-pull CA, a PUBLIC certificate
@@ -275,6 +295,96 @@ ERASURE_LEDGER_SECRET_ACCESS_KEY=${ledger_secret}
 #   sudo touch /etc/pullfm/flags/maintenance     # 503 within MAINTENANCE_POLL_MS
 #   sudo rm    /etc/pullfm/flags/maintenance     # back to 200
 MAINTENANCE_FLAG_FILE=/etc/pullfm/flags/maintenance
+EOF
+
+  # --- the scheduled backup --------------------------------------------------
+  #
+  # WHAT WAS WRONG. docs/api/deletion-and-backups.md states a three-layer backup
+  # position and gives the object-storage layer a retention of "35 days
+  # scheduled". There was no scheduler. Enumerated on the node on 2026-07-29:
+  # seven pullfm timers, none of them a backup; no unit in /etc/systemd/system
+  # matching backup or ledger; infra/backup/pullfm-backup.sh not present on the
+  # node at all; /etc/cron.d holding only distribution defaults. Every dump in
+  # `pull-fm-backups-staging` had been produced by hand from a workstation, so a
+  # documented retention window was being applied to objects that arrived only
+  # when somebody remembered. That is PULLFM-RISK-012, and this block plus the
+  # install section of infra/staging/app/bootstrap.sh is the fix.
+  #
+  # WHY THIS SHAPE. `pullfm_backup_load_r2` in infra/lib/backup-common.sh takes
+  # the R2 pair from the ENVIRONMENT when it is already there and only falls back
+  # to `op`. That preference was written for exactly this case: the node has no
+  # `op`, and it must not get one, because a scheduled job that needs an
+  # interactive vault unlock is a scheduled job that does not run. So the
+  # credentials arrive the same way `bff.env` does - rendered here from
+  # 1Password at converge time, shipped over SSH, installed root-owned 0600.
+  # Nothing here is ever written into the repository, which is public.
+  #
+  # WHAT IS DELIBERATELY ABSENT, because an env file is also a blast radius:
+  #
+  #   NEON_API_KEY. Only `pullfm-restore-drill.service` needs it, and that unit
+  #     is not installed (it destroys data on the staging branch). The key can
+  #     create and delete branches, so putting it on the node to satisfy two
+  #     units that never call it would be the broadest credential here in
+  #     exchange for nothing.
+  #   PULLFM_LEDGER_ACCESS_KEY_ID / _SECRET_ACCESS_KEY. The ledger reconciler is
+  #     not installed either: apps/bff now writes the ledger object inline with
+  #     the deletion cascade and refuses the delete if that write fails, so
+  #     erasure durability no longer waits for a timer. The BFF's own copy of
+  #     that credential is in bff.env above, scoped to the ledger bucket.
+  #   PULLFM_DRILL_NONEMPTY. Setting it lets the drill run against a branch that
+  #     already holds user rows. That is a decision a person makes at the time,
+  #     not one a file makes every night.
+  #
+  # THE ENDPOINT IS A SEED FOR THE PROBE, NOT A STATEMENT OF WHERE THE BUCKET
+  # IS, AND NO JURISDICTION IS WRITTEN DOWN ANYWHERE. A jurisdiction-scoped R2
+  # bucket lives on a jurisdiction host and the account's default host answers
+  # NoSuchBucket for it, which is an error that says the bucket does not exist
+  # when it does. `pullfm_backup_r2_endpoint` probes rather than trusts, but the
+  # probe has to start from something, and on a node with no `op` it cannot read
+  # the recorded value out of the vault. So the vault's `s3 endpoint` field is
+  # copied here verbatim and probed on the node.
+  #
+  # Copied, never composed: nothing in this function knows or asserts which
+  # jurisdiction a bucket is in. Jurisdiction is immutable at bucket creation, so
+  # a residency change means NEW BUCKETS ON A DIFFERENT HOST, and the only thing
+  # that has to happen for this file to keep working is that the 1Password field
+  # is updated with the new bucket's endpoint. If it is not, the probe tries the
+  # derived alternatives, warns loudly that the recorded value is stale, and the
+  # backup still runs.
+  local backup_key backup_secret backup_endpoint cipher_pass hmac_key tool_sha
+  backup_key="$(_pullfm_field "${PULLFM_BACKUP_OP_ITEM}" 'access key id')" || return 1
+  backup_secret="$(_pullfm_field "${PULLFM_BACKUP_OP_ITEM}" 'secret access key')" || return 1
+  backup_endpoint="$(_pullfm_field "${PULLFM_BACKUP_OP_ITEM}" 's3 endpoint')" || return 1
+  cipher_pass="$(_pullfm_field "${PULLFM_CIPHER_OP_ITEM}" 'cipher passphrase')" || return 1
+  hmac_key="$(_pullfm_field "${PULLFM_CIPHER_OP_ITEM}" 'hmac key')" || return 1
+
+  # The commit the backup TOOLING was shipped from, which is the only provenance
+  # a dump taken on the node can carry. `cmd_dump` stamps `git_sha` into every
+  # manifest and into the object key, and it derives that from `git rev-parse` in
+  # the tree the script lives in - which on the node is /opt/pullfm, not a
+  # checkout, so every scheduled object would have been keyed `-unknown`. Read
+  # here, where a checkout does exist, and passed through PULLFM_GIT_SHA. Not a
+  # secret; it is in the file only because the file is how the node is told
+  # things.
+  tool_sha="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+  install -m 0600 /dev/null "${dir}/backup.env"
+  cat >"${dir}/backup.env" <<EOF
+# Rendered by infra/lib/secrets.sh from 1Password. NEVER COMMIT THIS FILE.
+# Read by the units in infra/backup/systemd/ via EnvironmentFile=.
+
+# DIRECT endpoint, never the pooler: pg_dump opens more than one connection and
+# PgBouncer in transaction mode does not survive that.
+PULLFM_BACKUP_DSN=${database_url_direct}
+
+PULLFM_BACKUP_ENDPOINT=${backup_endpoint}
+AWS_ACCESS_KEY_ID=${backup_key}
+AWS_SECRET_ACCESS_KEY=${backup_secret}
+
+PULLFM_BACKUP_CIPHER_PASS=${cipher_pass}
+PULLFM_BACKUP_HMAC_KEY=${hmac_key}
+
+PULLFM_GIT_SHA=${tool_sha}
 EOF
 
   # --- watchdog scrape configuration -----------------------------------------
