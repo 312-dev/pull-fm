@@ -127,12 +127,26 @@ describe("POST /v1/auth/start", () => {
     expect(stable(unknown.body)).toBe(stable(known.body));
   });
 
-  test("no code is actually minted for an unregistered address", async () => {
-    // The other half of the property: identical responses must not be achieved
-    // by sending mail to strangers.
+  test("a first request for an unknown address creates an unverified identity", async () => {
+    // The surprising property, asserted so it is discoverable rather than
+    // rediscovered. `magic_auth/send` AUTO-CREATES a WorkOS user for an address
+    // it does not know and answers 200; it does not refuse. Confirmed against
+    // the live API on 2026-07-29.
+    //
+    // The consequence is that this unauthenticated route can cause a
+    // personal-data record to exist for a person who never consented, which is
+    // a GDPR Article 6 problem rather than a tidiness one. Two controls bound
+    // it: the send budgets below bound the RATE, and the directory reaper
+    // bounds the DURATION. This test exists so that removing either one has a
+    // visible reason attached.
     const email = unknownAddress();
     expect((await start(email)).statusCode).toBe(202);
-    expect(ctx.workos.codeFor(email)).toBeNull();
+
+    const record = ctx.workos
+      .directory()
+      .find((entry) => entry.email === email.toLowerCase());
+    expect(record, "the send did not create a directory record").toBeDefined();
+    expect(record?.verified).toBe(false);
   });
 
   test("a malformed address is refused before anything is spent", async () => {

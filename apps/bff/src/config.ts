@@ -163,6 +163,44 @@ const schema = z.object({
   AUTH_START_FLOOR_MS: z.coerce.number().int().nonnegative().default(250),
 
   /**
+   * Directory reaper: how long an unverified WorkOS record may live.
+   *
+   * `magic_auth/send` CREATES a user for an unknown address, and
+   * POST /v1/auth/start is unauthenticated, so without this an anonymous caller
+   * can cause a personal-data record to exist for someone who never consented.
+   * The send budgets above bound the rate; this bounds the duration.
+   *
+   * 24 hours: two orders of magnitude above the 10 minute code lifetime, so a
+   * person who asks for a code before lunch and finishes after is never racing
+   * the job, and short enough that an unconsented record does not outlive a
+   * day. Reaping is not destructive, because a later send simply recreates the
+   * record, which is why this errs short. Full argument in
+   * services/directory-reaper.ts.
+   */
+  AUTH_UNVERIFIED_REAP_AFTER_S: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(24 * 3600),
+  /** Blast-radius cap on one sweep, not a throughput knob. */
+  AUTH_UNVERIFIED_REAP_MAX_DELETIONS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(500),
+  AUTH_UNVERIFIED_REAP_PAGE_SIZE: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(100)
+    .default(100),
+  AUTH_UNVERIFIED_REAP_MAX_PAGES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(50),
+
+  /**
    * Lifetime of the sealed session cookie.
    *
    * Bounds the cookie, not the WorkOS session: the access token inside it

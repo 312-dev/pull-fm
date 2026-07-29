@@ -209,6 +209,33 @@ export function registerAuthRoutes(
   /**
    * Step one of sign-in: ask for a code.
    *
+   * ---------------------------------------------------------------------------
+   * THIS UNAUTHENTICATED ROUTE MUTATES THE WORKOS DIRECTORY.
+   *
+   * Verified against the live API on 2026-07-29:
+   * `POST /user_management/magic_auth/send` CREATES a WorkOS user when the
+   * address does not already have one, with `email_verified: false`, and
+   * answers 200. It does not refuse an unknown address.
+   *
+   * So calling this route causes a personal-data record to exist for whatever
+   * address the caller typed, including an address belonging to a real person
+   * who has never heard of Pull.fm. There is no lawful basis under GDPR
+   * Article 6 for holding that indefinitely, and the affected person is not a
+   * user, so they would have no reason to come looking for us to exercise a
+   * right over it.
+   *
+   * Two controls, and BOTH are load-bearing. Neither is sufficient alone: the
+   * budgets bound the rate but a patient attacker outlasts them, and the reaper
+   * bounds the duration but not how fast records appear within it.
+   *
+   *   1. The send budgets below. They read like abuse protection and they are
+   *      also the primary bound on directory pollution. ANYONE RETUNING THEM
+   *      NEEDS TO KNOW THAT, which is why it is said here and again in
+   *      services/magic-auth.ts rather than left to be rediscovered.
+   *   2. services/directory-reaper.ts, a scheduled sweep that deletes records
+   *      which were auto-created here and never verified.
+   * ---------------------------------------------------------------------------
+   *
    * The response is IDENTICAL for a registered address, an unregistered one,
    * and one the identity provider refused, and it is padded to a floor so the
    * clock does not answer the question the body refuses to. The reasoning and
@@ -216,7 +243,8 @@ export function registerAuthRoutes(
    *
    * Both rate limits live in the `noeviction` quota Redis and fail CLOSED. On
    * this route a limiter that fails open is not a missing control, it is an
-   * open mail relay pointed at arbitrary third parties.
+   * open mail relay pointed at arbitrary third parties AND an unbounded write
+   * channel into the identity provider's directory.
    */
   app.post(
     "/auth/start",
@@ -225,7 +253,7 @@ export function registerAuthRoutes(
         operationId: "authStart",
         summary: "Request a magic-link sign-in code",
         description:
-          "Sends a one-time code to the address. The response is identical whether or not the address has an account, and is padded to a fixed floor so the response time does not disclose it either. Rate limited per source address and per email address independently: the first stops one host enumerating many addresses, the second stops many hosts flooding one mailbox, and neither limit subsumes the other.",
+          "Sends a one-time code to the address. The response is identical whether or not the address has an account, and is padded to a fixed floor so the response time does not disclose it either. Rate limited per source address and per email address independently: the first stops one host enumerating many addresses, the second stops many hosts flooding one mailbox, and neither limit subsumes the other. Note that a first request for an unknown address creates an unverified identity at the identity provider; if it is never verified it is deleted automatically within a bounded window.",
         tags: ["auth"],
         body: {
           type: "object",

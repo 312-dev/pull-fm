@@ -58,6 +58,25 @@
  * third parties.
  *
  * ---------------------------------------------------------------------------
+ * THE SEND BUDGETS PROTECT SOMETHING BEYOND MAILBOXES. READ THIS BEFORE
+ * RETUNING THEM.
+ *
+ * `POST /user_management/magic_auth/send` CREATES a WorkOS user when the
+ * address does not already have one (verified against the live API on
+ * 2026-07-29). `POST /v1/auth/start` is unauthenticated. So these two send
+ * budgets are also the PRIMARY BOUND ON DIRECTORY POLLUTION: they decide how
+ * fast an anonymous caller can cause personal-data records to be created for
+ * people who never consented and are not users.
+ *
+ * That is a GDPR Article 6 problem, not a tidiness one, and it is why raising
+ * these numbers is a bigger decision than it looks. The companion control is
+ * services/directory-reaper.ts, which bounds how LONG such a record survives.
+ * Rate and duration are independent: loosening these budgets is not compensated
+ * for by the reaper, because the reaper does not care how many records appeared
+ * inside its window.
+ * ---------------------------------------------------------------------------
+ *
+ * ---------------------------------------------------------------------------
  * THE ADDRESS IS NEVER A KEY, AND NEVER AN AUDIT VALUE
  *
  * Counter keys and audit rows carry a truncated SHA-256 of the address, not the

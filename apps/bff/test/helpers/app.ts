@@ -312,16 +312,32 @@ export async function buildTestApp(
  *     fails, which is what makes the replay test meaningful rather than a
  *     tautology.
  *   - A code is bound to the address it was minted for.
- *   - An unknown address is REFUSED on send, with a 404, so the anti-enumeration
- *     assertions have something real to be indistinguishable from. If the stub
- *     accepted every address, the "unregistered addresses look identical" test
- *     would pass with the control removed.
+ *   - A send for an UNKNOWN address AUTO-CREATES an unverified user and answers
+ *     200, which is what the live API does (confirmed 2026-07-29). The stub
+ *     must reproduce this or every directory-reaper test is vacuous, and the
+ *     anti-enumeration assertions would be passing against a behaviour the real
+ *     provider does not have.
+ *   - Completing a magic-auth exchange flips `email_verified` to true, which is
+ *     the state the reaper keys on.
  *   - Refresh tokens rotate, so a replayed refresh token fails.
  */
 export interface WorkOsStub {
   readonly fetch: typeof fetch;
-  /** Registers an address so `sendMagicAuthCode` accepts it. */
-  register(email: string, workosUserId: string): void;
+  /**
+   * Seeds a directory record directly.
+   *
+   * `verified` and `createdAt` exist so the reaper suite can construct the four
+   * cases that matter without waiting a day or faking a clock: verified,
+   * unverified and recent, unverified and stale, and a stale record that has a
+   * local row.
+   */
+  register(
+    email: string,
+    workosUserId: string,
+    opts?: { verified?: boolean; createdAt?: Date },
+  ): void;
+  /** The current directory, for asserting what a sweep did and did not remove. */
+  directory(): { id: string; email: string; verified: boolean }[];
   /** The code most recently emailed to an address, as WorkOS would have sent it. */
   codeFor(email: string): string | null;
   /** Expires a live code without consuming it. */
@@ -355,7 +371,14 @@ export interface WorkOsStubOptions {
 export function workOsStub(opts: WorkOsStubOptions): WorkOsStub {
   const users = new Map<
     string,
-    { id: string; first: string | null; last: string | null }
+    {
+      id: string;
+      first: string | null;
+      last: string | null;
+      /** WorkOS `email_verified`. Auto-created records start false. */
+      verified: boolean;
+      createdAt: Date;
+    }
   >();
   const codes = new Map<string, MagicCode>();
   const refreshTokens = new Map<string, string>();
@@ -381,6 +404,8 @@ export function workOsStub(opts: WorkOsStubOptions): WorkOsStub {
         email: entry?.[0] ?? null,
         first_name: entry?.[1].first ?? null,
         last_name: entry?.[1].last ?? null,
+        email_verified: entry?.[1].verified ?? false,
+        created_at: entry?.[1].createdAt.toISOString() ?? null,
       },
       access_token: await opts.mintAccessToken(
         workosUserId,
@@ -415,20 +440,31 @@ export function workOsStub(opts: WorkOsStubOptions): WorkOsStub {
       return typeof value === "string" ? value : "";
     };
 
-    if (url.endsWith("/user_management/magic_auth")) {
+    if (url.endsWith("/user_management/magic_auth/send")) {
       const email = field("email").toLowerCase();
-      if (!users.has(email)) {
-        // WorkOS refuses an address it does not know. The route above must turn
-        // this into the same 202 a known address gets.
-        return json({ code: "entity_not_found" }, 404);
-      }
       counter += 1;
+
+      // The real API AUTO-CREATES a user for an unknown address and answers
+      // 200. Confirmed against the live staging environment on 2026-07-29. The
+      // stub reproduces it because it is the behaviour the directory reaper
+      // exists to compensate for: a stub that refused unknown addresses would
+      // make every reaper test vacuous.
+      if (!users.has(email)) {
+        users.set(email, {
+          id: `user_autocreated_${String(counter)}`,
+          first: null,
+          last: null,
+          verified: false,
+          createdAt: new Date(),
+        });
+      }
+
       codes.set(email, {
         code: `code_${String(counter).padStart(6, "0")}`,
         email,
         expired: false,
       });
-      return json({ id: `magic_auth_${String(counter)}` }, 201);
+      return json({ id: `magic_auth_${String(counter)}` }, 200);
     }
 
     if (url.endsWith("/user_management/authenticate")) {
@@ -449,6 +485,9 @@ export function workOsStub(opts: WorkOsStubOptions): WorkOsStub {
         }
         // Single use. This is what the replay assertion actually exercises.
         codes.delete(email);
+        // Completing the exchange is what proves mailbox control, and it is
+        // what makes the record invisible to the reaper from here on.
+        user.verified = true;
         return json(await issue(user.id), 200);
       }
 
@@ -470,6 +509,40 @@ export function workOsStub(opts: WorkOsStubOptions): WorkOsStub {
       }
 
       return json({ code: "unsupported_grant_type" }, 400);
+    }
+
+    if (url.includes("/user_management/users?")) {
+      const params = new URL(url, "http://stub.invalid").searchParams;
+      const limit = Number(params.get("limit") ?? "10");
+      const after = params.get("after");
+
+      const ordered = [...users.entries()].sort(
+        (a, b) => a[1].createdAt.getTime() - b[1].createdAt.getTime(),
+      );
+      const start =
+        after === null ? 0 : ordered.findIndex(([, u]) => u.id === after) + 1;
+      const page = ordered.slice(start, start + limit);
+      const last = page.at(-1);
+
+      return json(
+        {
+          data: page.map(([email, u]) => ({
+            id: u.id,
+            email,
+            first_name: u.first,
+            last_name: u.last,
+            email_verified: u.verified,
+            created_at: u.createdAt.toISOString(),
+          })),
+          list_metadata: {
+            after:
+              last !== undefined && start + limit < ordered.length
+                ? last[1].id
+                : null,
+          },
+        },
+        200,
+      );
     }
 
     if (url.includes("/revoke")) return json({ ok: true }, 200);
@@ -509,12 +582,24 @@ export function workOsStub(opts: WorkOsStubOptions): WorkOsStub {
 
   return {
     fetch: stub,
-    register(email, workosUserId) {
+    register(email, workosUserId, options = {}) {
       users.set(email.toLowerCase(), {
         id: workosUserId,
         first: null,
         last: null,
+        // Seeded records default to VERIFIED, because almost every suite wants
+        // a normal signed-in user and an unverified default would quietly make
+        // every existing fixture reapable.
+        verified: options.verified ?? true,
+        createdAt: options.createdAt ?? new Date(),
       });
+    },
+    directory() {
+      return [...users.entries()].map(([email, u]) => ({
+        id: u.id,
+        email,
+        verified: u.verified,
+      }));
     },
     codeFor(email) {
       return codes.get(email.toLowerCase())?.code ?? null;

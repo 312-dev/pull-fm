@@ -105,6 +105,39 @@ export class Database implements Queryable {
     }
   }
 
+  /**
+   * Runs `fn` against ONE pinned pooled connection, without a transaction.
+   *
+   * Exists for session-scoped advisory locks, and that is a narrow enough
+   * purpose to be worth stating. `pg_try_advisory_lock` without the `_xact_`
+   * infix is bound to the SESSION, and on a pool "the session" is whichever
+   * connection happened to serve that one query. Taking such a lock through
+   * `query` is therefore doubly broken: the lock lands on an arbitrary
+   * connection that is immediately returned to the pool, so a later
+   * `pg_advisory_unlock` usually runs on a DIFFERENT connection, fails to find
+   * the lock, and leaks it for the life of the leaked connection. Meanwhile a
+   * concurrent caller handed the same connection re-acquires it successfully,
+   * because advisory locks are re-entrant within a session, and the mutual
+   * exclusion silently does not exist.
+   *
+   * The transaction-scoped `advisoryLock` below is the right tool wherever the
+   * critical section fits in one transaction, and it should be preferred. This
+   * is for the case where it does not: a sweep that makes many outbound HTTP
+   * calls cannot hold a transaction open, both because it would pin a
+   * connection in `idle in transaction` for minutes and because
+   * `idle_in_transaction_session_timeout` is deliberately set and would kill it.
+   */
+  async withConnection<T>(
+    fn: (client: pg.PoolClient) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.#pool.connect();
+    try {
+      return await fn(client);
+    } finally {
+      client.release();
+    }
+  }
+
   /** Liveness probe for /readyz. Deliberately trivial. */
   async healthy(): Promise<boolean> {
     try {
@@ -140,8 +173,45 @@ export async function advisoryLock(
   ]);
 }
 
+/**
+ * Takes a SESSION-scoped advisory lock, or reports that someone else holds it.
+ *
+ * `try` rather than a blocking wait, because the caller is a scheduled sweep:
+ * an overlapping invocation should decline and let the current one finish, not
+ * queue behind it. A cron that piles up waiting is how a periodic job becomes
+ * an outage.
+ *
+ * `client` MUST be a pinned connection from {@link Database.withConnection}.
+ * Passing the pool here would take the lock on an arbitrary connection and is
+ * the exact bug that method's comment describes.
+ */
+export async function tryAdvisoryLock(
+  client: Queryable,
+  namespace: number,
+  key: string,
+): Promise<boolean> {
+  const { rows } = await client.query<{ acquired: boolean }>(
+    "SELECT pg_try_advisory_lock($1, hashtext($2)) AS acquired",
+    [namespace, key],
+  );
+  return rows[0]?.acquired === true;
+}
+
+/** Releases {@link tryAdvisoryLock}. Must run on the SAME pinned connection. */
+export async function advisoryUnlock(
+  client: Queryable,
+  namespace: number,
+  key: string,
+): Promise<void> {
+  await client.query("SELECT pg_advisory_unlock($1, hashtext($2))", [
+    namespace,
+    key,
+  ]);
+}
+
 /** Advisory-lock namespaces, so two features cannot collide on one key space. */
 export const LOCK_NAMESPACE = {
   connectionRefresh: 1,
   accountDeletion: 2,
+  directoryReap: 3,
 } as const;

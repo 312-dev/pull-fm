@@ -164,6 +164,63 @@ method off, per section 0.
 - Verify by signing in from the staging environment with a real mailbox you
   control before touching production.
 
+### 4a. Sending a code CREATES a user. Plan for the directory to be dirty.
+
+**Verified against the live staging API on 2026-07-29**, not taken from the
+documentation: `POST /user_management/magic_auth/send` **auto-creates a WorkOS
+user** when the address does not already have one, with `email_verified: false`,
+and returns **200**. It does not refuse an unknown address. A probe sent to a
+nonexistent address at `example.com` produced a real `user_...` record in the
+directory, which then had to be deleted by hand.
+
+This matters because `POST /v1/auth/start` is **unauthenticated**. Anyone can
+cause a directory record to exist for any address they can type, including the
+address of a real person who has never heard of Pull.fm. That is not merely
+untidy: holding an email address for someone who never consented and has no
+relationship with the service has no lawful basis under **GDPR Article 6**, and
+the affected person is not a user, so they would have no reason to come looking
+for us to exercise a right over it.
+
+Two controls compensate, and they are independent. Neither is sufficient alone,
+because one bounds the rate and the other bounds the duration:
+
+| Control                                                          | Bounds                      | Where                                       |
+| ---------------------------------------------------------------- | --------------------------- | ------------------------------------------- |
+| `AUTH_MAGIC_AUTH_PER_IP_MAX` and `AUTH_MAGIC_AUTH_PER_EMAIL_MAX` | how FAST records can appear | `apps/bff/src/services/magic-auth.ts`       |
+| The directory reaper                                             | how LONG one survives       | `apps/bff/src/services/directory-reaper.ts` |
+
+**The send budgets are not only abuse protection.** They are the primary bound
+on directory pollution. Anyone retuning them upward needs to know that, and it
+is written into the code at both call sites for that reason.
+
+**The reaper** deletes records that were auto-created and never verified. It
+runs as a scheduled command, not inside the API:
+
+```
+pnpm --filter @pull-fm/bff reap:unverified
+```
+
+Run it **hourly or daily**. The window is a duration, not a cadence, so running
+it more often reaps nothing extra; running it less often than daily means
+`AUTH_UNVERIFIED_REAP_AFTER_S` stops being an upper bound on how long an
+unconsented record exists.
+
+It deletes a record only when **all four** hold, and the first is the one that
+makes it safe: WorkOS reports `email_verified` **strictly false**; the record is
+older than the window; we hold **no local `users` row** for it, including a
+soft-deleted one; and nothing about the record is unknown. An absent
+`email_verified` or an unparseable `created_at` means skip, never delete.
+
+Exit codes are meant for the scheduler: **0** ran or declined because another
+run held the lock, **1** could not run and deleted nothing (the case worth
+alerting on, because the directory is unbounded until it succeeds), **2** ran
+but a deletion failed or the blast-radius cap was hit (self-healing next run).
+
+**Consequence for counting users.** Directory size is not signup count. A record
+with `email_verified: false` is somebody who was sent a code, which includes
+every address an attacker typed. Count verified records, or count rows in our
+own `users` table, which only gains a row on a completed verification.
+
 ## 5. Email sender
 
 Until a custom email domain is configured, WorkOS sends from its own domains:
@@ -263,8 +320,12 @@ fresh WorkOS environment.
 - [ ] Default redirect URI is set, and is not the localhost one in production
 - [ ] Sign-out redirect is set (otherwise logout errors)
 - [ ] Magic Auth is on; password, social, and passkeys are all off
-- [ ] A real sign-in completes: code arrives, `GET /v1/auth/callback` returns a
+- [ ] A real sign-in completes: code arrives, `POST /v1/auth/verify` returns a
       session, and a row appears in `users`
+- [ ] The reaper is scheduled (hourly or daily) and a manual run exits 0. Send a
+      code to a throwaway address, confirm an unverified record appears in the
+      directory, backdate or wait out `AUTH_UNVERIFIED_REAP_AFTER_S`, and
+      confirm the record is gone while your own verified record is not
 - [ ] An `auth.callback` row appears in `audit_log` with `outcome = 'ok'`
 - [ ] Webhook endpoint is registered, subscribed to `user.deleted`, and the
       signing secret is in the environment. Send a test event and confirm it is
@@ -293,6 +354,7 @@ live documentation on **2026-07-29**.
 | Staging and production isolation, per-environment keys, production key shown once, branding is the only copyable thing             | `workos.com/docs/environments`                                             |
 | **Redirects** section, default redirect URI, wildcard limitation, sign-out redirect warning                                        | `workos.com/docs/authkit/nextjs`, `workos.com/docs/authkit/vanilla/nodejs` |
 | Magic Auth enabled in the **Authentication** section; 10 minute code expiry                                                        | `workos.com/docs/user-management/magic-auth`                               |
+| `magic_auth/send` auto-creates an unverified user and returns 200 for an unknown address                                           | **Live staging API probe, 2026-07-29.** Not documented; see section 4a     |
 | Passkeys enabled in the **Authentication** section; domain binding quotes                                                          | `workos.com/docs/authkit/passkeys`                                         |
 | Custom domains are production-only; four domain types                                                                              | `workos.com/docs/custom-domains`                                           |
 | **Domains** section, 3 CNAME records, **Verify now**, 72 hour retry, `workos-mail.com` / `workos.dev` defaults, `no-reply@` result | `workos.com/docs/custom-domains/email`                                     |

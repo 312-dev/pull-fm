@@ -18,6 +18,7 @@ import { Database } from "./lib/db.js";
 import { SigningKeys } from "./lib/keys.js";
 import { createRedis } from "./lib/redis.js";
 import { SessionCookieCipher } from "./lib/session-cookie.js";
+import { DirectoryReaper } from "./services/directory-reaper.js";
 import { MagicAuthService } from "./services/magic-auth.js";
 import {
   ConnectionService,
@@ -94,6 +95,7 @@ export function buildServices(
   if (activeKek === undefined) {
     throw new Error("active KEK missing after validation");
   }
+  const audit = new AuditLog(db, log as never);
   const keys = new SigningKeys(activeKek);
   // Derived from the same root under its own HKDF label, for the reasons in
   // lib/keys.ts: one secret to escrow, domain-separated outputs, and a KEK
@@ -138,9 +140,19 @@ export function buildServices(
     quotaRedis,
     keys,
     sessionCookies,
-    audit: new AuditLog(db, log as never),
+    audit,
     users,
     tokens,
+    // Compensates for `magic_auth/send` auto-creating a WorkOS user for any
+    // address, which makes the unauthenticated POST /v1/auth/start able to put
+    // a personal-data record in the directory for a non-user. Never invoked by
+    // a route; the only caller is the scheduled script in scripts/.
+    directoryReaper: new DirectoryReaper(db, workos, audit, {
+      reapAfterSeconds: cfg.AUTH_UNVERIFIED_REAP_AFTER_S,
+      pageSize: cfg.AUTH_UNVERIFIED_REAP_PAGE_SIZE,
+      maxDeletionsPerRun: cfg.AUTH_UNVERIFIED_REAP_MAX_DELETIONS,
+      maxPagesPerRun: cfg.AUTH_UNVERIFIED_REAP_MAX_PAGES,
+    }),
     // Every counter goes to the quota instance, never the cache: on an
     // `allkeys-lru` instance a cache-fill event would silently disable the
     // send and verify budgets, which on this route means an open mail relay.

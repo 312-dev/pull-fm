@@ -39,6 +39,11 @@ export type AuditAction =
   | "auth.session.refreshed"
   | "auth.session.revoked"
   | "account.profile_updated"
+  // The directory reaper. `subjectRef` is the WorkOS id and never the address:
+  // the subject of this row is by definition NOT a user of ours, so recording
+  // their address permanently in order to note that we deleted their record
+  // would defeat the purpose of deleting it.
+  | "directory.unverified_reaped"
   | "connection.created"
   | "connection.deleted"
   | "connection.connect_started"

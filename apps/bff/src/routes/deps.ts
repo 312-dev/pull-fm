@@ -17,6 +17,7 @@ import type { SigningKeys } from "../lib/keys.js";
 import type { SessionCookieCipher } from "../lib/session-cookie.js";
 import type { ConnectionService } from "../services/connections.js";
 import type { DeletionService } from "../services/deletion.js";
+import type { DirectoryReaper } from "../services/directory-reaper.js";
 import type { DiscoveryService } from "../services/discovery.js";
 import type { EventsService } from "../services/events.js";
 import type { ExportService } from "../services/export.js";
@@ -39,6 +40,14 @@ export interface Services {
   readonly users: UserService;
   /** Magic-link sign-in: the send and verify budgets, and the timing floor. */
   readonly magicAuth: MagicAuthService;
+  /**
+   * Deletes unverified WorkOS records that `magic_auth/send` auto-created.
+   *
+   * On the bundle because the wiring is shared with the scheduled script, NOT
+   * because any route may call it. Nothing in routes/ does, and nothing should:
+   * it enumerates the entire user directory and deletes identities.
+   */
+  readonly directoryReaper: DirectoryReaper;
   readonly tokens: TokenService;
   readonly connections: ConnectionService;
   readonly wishlist: WishlistService;
