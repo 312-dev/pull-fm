@@ -43,9 +43,11 @@ function specConfig(): Config {
     CREDENTIAL_KEKS: `kek:spec=${placeholderKek}`,
     CREDENTIAL_ACTIVE_KEK_ID: "kek:spec",
     WORKOS_CLIENT_ID: process.env["WORKOS_CLIENT_ID"] ?? "client_spec",
-    // Contains "placeholder" so it lands in the gitleaks allowlist rather than
-    // costing a reviewer an afternoon. No handler runs, so it is never used.
-    WORKOS_API_KEY: "sk_test_placeholder_not_a_credential",
+    // Deliberately does NOT use the sk_test_ prefix. Trivy's stripe-secret-token
+    // rule matches that prefix on shape alone and ignores the word
+    // "placeholder", so a gitleaks-safe value still failed the Trivy gate.
+    // Config only requires a non-empty string here; no handler ever runs.
+    WORKOS_API_KEY: "not-a-credential-openapi-emit-only",
     MUSICBRAINZ_USER_AGENT: "PullFM/0.1.0 (spec@pull.fm)",
     PUBLIC_BASE_URL: process.env["PUBLIC_BASE_URL"] ?? "https://api.pull.fm",
     LOG_LEVEL: "fatal",
