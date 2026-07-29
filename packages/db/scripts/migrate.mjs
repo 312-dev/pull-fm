@@ -19,8 +19,24 @@
  *     migration that has shipped is a loud failure rather than a silent drift
  *     between environments.
  *
+ * CONNECTS THROUGH `DATABASE_URL_DIRECT` WHEN IT IS SET, AND THAT IS A
+ * CORRECTNESS REQUIREMENT RATHER THAN A TUNING PREFERENCE.
+ *
+ * The advisory lock above is SESSION scoped. A transaction pooler (PgBouncer in
+ * transaction mode, which is also exactly what Neon's pooled endpoint is) hands
+ * the server connection to somebody else at COMMIT, so the session that holds
+ * the lock is not the session that continues the migration. The lock stops
+ * serialising anything, and it does so silently: nothing errors, and the damage
+ * only appears when two nodes deploy at the same moment and both run
+ * `CREATE TABLE`. That is the exact failure the lock exists to prevent, so
+ * running migrations through a pooler removes the protection while leaving
+ * every symptom of having it.
+ *
+ * `DATABASE_URL` stays the fallback so a local run against a plain Postgres,
+ * where the two are the same endpoint, needs no extra variable.
+ *
  * Usage:
- *   DATABASE_URL=postgres://... node scripts/migrate.mjs
+ *   DATABASE_URL_DIRECT=postgres://... node scripts/migrate.mjs
  *   DATABASE_URL=postgres://... node scripts/migrate.mjs --dry-run
  */
 
@@ -75,9 +91,11 @@ function upSection(text) {
 }
 
 async function main() {
-  const url = process.env["DATABASE_URL"];
+  // Direct first: see the header. A pooled URL here is not an error the
+  // database will report, so preferring the direct one is the only defence.
+  const url = process.env["DATABASE_URL_DIRECT"] || process.env["DATABASE_URL"];
   if (!url) {
-    throw new Error("DATABASE_URL is required");
+    throw new Error("DATABASE_URL_DIRECT or DATABASE_URL is required");
   }
 
   const migrationsDir = resolveMigrationsDir();

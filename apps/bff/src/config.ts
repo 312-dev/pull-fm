@@ -71,10 +71,25 @@ const schema = z.object({
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
 
+  /**
+   * POOLED connection string. In a cloud environment this is Neon's `-pooler`
+   * host; locally it is PgBouncer on 6432. Both are PgBouncer in transaction
+   * mode, which is the point: local development meets the same connection
+   * semantics production does.
+   */
   DATABASE_URL: z.string().url(),
   /**
+   * DIRECT connection string, bypassing the pooler. Optional here because the
+   * API server itself never needs it; it exists in the environment so the
+   * migration step of a deploy can pick it up (see
+   * packages/db/scripts/migrate.mjs, which takes a SESSION-level advisory lock
+   * that a transaction pooler silently breaks). Validated rather than ignored
+   * so a malformed value fails at startup instead of at 3am mid-deploy.
+   */
+  DATABASE_URL_DIRECT: z.string().url().optional(),
+  /**
    * Deliberately small. Traffic scales by adding BFF nodes, and every node
-   * multiplies into Postgres `max_connections`. PgBouncer in transaction mode
+   * multiplies into the server's connection limit. A transaction-mode pooler
    * is what actually absorbs concurrency; a large per-node pool just exhausts
    * the server sooner. See docs/PLAN.md Gate 1.
    */

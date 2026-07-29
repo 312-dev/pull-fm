@@ -13,8 +13,10 @@ name: pullfm-dev
 
 services:
   postgres:
-    # Pinned to the same major we run in production (Neon runs 18). A skew here
-    # and prod is how "migrations passed locally" turns into a prod incident.
+    # Pinned to the same major the cloud runs. The Neon project reports
+    # pg_version 18 (infra/neon, verified against the live API), and a skew
+    # between here and there is how "migrations passed locally" turns into a
+    # production incident.
     image: postgres:18-alpine
     container_name: pullfm-postgres
     restart: unless-stopped
@@ -56,15 +58,34 @@ services:
 
   # PgBouncer in transaction mode.
   #
-  # This is not an optimisation, it is what makes horizontal scaling possible.
-  # Traffic grows by adding BFF nodes, and every node multiplies into Postgres
-  # `max_connections`. Without a pooler, step 1 of the scale-up playbook (add
-  # app nodes) exhausts the database instead of relieving it.
+  # ---------------------------------------------------------------------------
+  # THIS IS DELIBERATELY LOCAL-ONLY. THERE IS NO PGBOUNCER IN STAGING OR PROD,
+  # AND ITS ABSENCE THERE IS NOT AN OVERSIGHT.
+  # ---------------------------------------------------------------------------
   #
-  # Present locally so the application is developed against the same connection
-  # semantics it will meet in production. Transaction pooling does not support
-  # session-level features such as prepared statements outside a transaction,
-  # and discovering that in staging is expensive.
+  # The cloud environments run on Neon (infra/neon), and Neon's pooled endpoint
+  # IS PgBouncer in transaction mode, operated by Neon inside their proxy. The
+  # `-pooler` host and the plain host are two front doors onto the same compute.
+  # Deploying our own PgBouncer in front of that would add a second pooler, a
+  # second failure mode and a second hop for exactly zero capability, which is
+  # why the Hetzner data node lost it (and lost Postgres with it).
+  #
+  # It stays here because the alternative is a laptop that behaves differently
+  # from production in precisely the way that is expensive to discover late.
+  # Transaction pooling is not transparent: a session-level advisory lock does
+  # not survive COMMIT, `SET` outside a transaction does not persist, LISTEN and
+  # NOTIFY do not work, and prepared statements outside a transaction are not
+  # available. Every one of those fails SILENTLY rather than loudly, so the only
+  # way to catch the mistake is to develop against the same semantics.
+  #
+  # Which is why the two ports are both published and are not interchangeable:
+  #
+  #   6432  this pooler        -> DATABASE_URL         (the application)
+  #   5432  Postgres directly  -> DATABASE_URL_DIRECT  (the migration runner)
+  #
+  # That is the same split the Neon outputs expose, under the same two variable
+  # names, so nothing about the application's configuration changes between a
+  # laptop and production. See docs/runbooks/neon-migration.md.
   pgbouncer:
     image: edoburu/pgbouncer:latest
     container_name: pullfm-pgbouncer
