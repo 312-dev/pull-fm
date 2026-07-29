@@ -90,6 +90,21 @@ export interface UpstreamBundle {
   readonly crosswalk: CrosswalkResolver;
   readonly crosswalkStore: CrosswalkStore;
   readonly previews: PreviewResolver;
+  /**
+   * The same resolver WITHOUT the Deezer fallback, for the background warmer.
+   *
+   * `previews.resolve` falls through to Deezer when iTunes misses, which is
+   * correct on the playback path and pointless on the warm path: a Deezer URL
+   * is signed and expiring, so it is never persisted, so resolving one in a
+   * background job spends an upstream call and warms nothing. This shares the
+   * SAME `ItunesClient` instance, which is the part that matters - the 15/min
+   * quota counter lives on the client, so one budget covers both resolvers
+   * rather than the warmer getting a second one of its own.
+   *
+   * Not a raw provider client, so the rule at the top of this file holds: what
+   * escapes this module is still a resolver with a store behind it.
+   */
+  readonly previewWarmer: PreviewResolver;
   /** Undefined when SeatGeek is unconfigured or switched off. */
   readonly events: EventsProvider | undefined;
   /** Coarse per-provider health for `GET /v1/config`. Never internal detail. */
@@ -161,11 +176,22 @@ export function buildUpstream(
     musicbrainz,
   });
 
+  // One store and one iTunes client, shared by both resolvers below. The client
+  // owns the local 15-calls-per-minute quota counter, so sharing the instance is
+  // what keeps the warmer and the request path inside ONE Apple budget instead
+  // of two. A second ItunesClient would double the spend against a provider
+  // that blocks with no appeals process.
+  const previewStore = new PgPreviewStore(queryable);
+  const itunes = new ItunesClient({ killSwitch, ...withFetch });
+
   const previews = new PreviewResolver({
-    store: new PgPreviewStore(queryable),
-    itunes: new ItunesClient({ killSwitch, ...withFetch }),
+    store: previewStore,
+    itunes,
     deezer: new DeezerClient({ killSwitch, ...withFetch }),
   });
+
+  // No Deezer. See the field comment on UpstreamBundle.previewWarmer.
+  const previewWarmer = new PreviewResolver({ store: previewStore, itunes });
 
   const events =
     cfg.SEATGEEK_CLIENT_ID === undefined || !cfg.SEATGEEK_ENABLED
@@ -191,6 +217,7 @@ export function buildUpstream(
     crosswalk,
     crosswalkStore,
     previews,
+    previewWarmer,
     events,
     status() {
       // Deliberately coarse. `GET /v1/config` is a reconnaissance endpoint
