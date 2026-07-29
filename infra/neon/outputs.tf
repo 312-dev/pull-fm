@@ -57,7 +57,7 @@ output "pg_version" {
 }
 
 output "main_branch_id" {
-  description = "ID of the default branch (`main`), which serves production. Stable across a rename: this project's branch was renamed from `production` to `main` on 2026-07-29 and kept the id br-curly-wave-as91izv6."
+  description = "ID of the default branch (`main`), which serves production. The literal used to be written into this description and is not any more: a branch id addresses a restorable copy of production data through the control plane, which is what tools/check-public-identifiers.mjs is for. Branch ids ARE stable across a rename - the EU project's default branch was renamed from `production` to `main` and kept its id - which is worth knowing and is not a fact about the live project."
   value       = neon_project.pullfm.default_branch_id
 }
 

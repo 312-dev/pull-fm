@@ -1,9 +1,29 @@
 # ---------------------------------------------------------------------------
 # Pull.fm - Neon variables (EXAMPLE)
 #
-# Copy to terraform.tfvars, which is gitignored, if you need to override
-# anything. YOU NORMALLY DO NOT: every default in variables.tf was read back
-# from the live project, so a plan with no tfvars at all is the correct plan.
+# Copy to terraform.tfvars, which is gitignored.
+#
+# ---------------------------------------------------------------------------
+# THIS FILE IS NOW MANDATORY, AND IT USED TO SAY THE OPPOSITE.
+# ---------------------------------------------------------------------------
+#
+# WHAT IT USED TO SAY. "YOU NORMALLY DO NOT [need this]: every default in
+# variables.tf was read back from the live project, so a plan with no tfvars at
+# all is the correct plan."
+#
+# WHY THAT CHANGED. The four ADOPTION IDENTIFIERS at the bottom of this file have
+# NO DEFAULTS, on purpose. They used to be string literals in imports.tf, and
+# `tools/check-public-identifiers.mjs` has a detector for each shape: a Neon
+# endpoint hostname is reachable from the internet with the credential as the only
+# network control, and a branch id addresses a restorable copy of production data
+# through the control plane. Eleven baseline findings came from that one file, and
+# the baseline only shrinks, so the US cutover could not simply swap the literals.
+#
+# So `terraform plan` in this root now REQUIRES a terraform.tfvars. Without one it
+# fails with "No value for required variable", which is a safe failure - it stops
+# and names what is missing rather than planning the wrong thing. That is already
+# true of backend.hcl, so a fresh checkout gains no new obstacle.
+# `terraform init -backend=false && terraform validate` still needs nothing.
 #
 # THERE IS NO SECRET IN THIS FILE AND THERE MUST NEVER BE ONE. This repository
 # is public and gitleaks blocks CI. The Neon API key is supplied as an
@@ -11,40 +31,86 @@
 #
 #   source infra/lib/credentials.sh && pullfm_load_credentials neon
 #
-# The identifiers below are not credentials. A Neon project ID grants nothing on
-# its own, exactly like a Cloudflare zone ID.
+# Note the asymmetry that follows: a project id is committed below, and branch and
+# endpoint ids are not. That is not inconsistency. A project id is an opaque
+# account-scoped handle that grants nothing and cannot be connected to; an
+# endpoint id IS a public DNS name that accepts Postgres connections, and a branch
+# id names a restorable copy of the data. The check draws the line in the same
+# place.
 # ---------------------------------------------------------------------------
 
 # --- adoption --------------------------------------------------------------
 # The project already exists and is imported, not created. Changing either of
 # these points the configuration at a DIFFERENT project, which is never what
-# you want; it is not how you rename anything.
+# you want; it is not how you rename anything. Repointed from the EU project to
+# the US project on 2026-07-29, which took `terraform state rm` plus six import
+# blocks and not an edit here; see imports.tf.
 org_id     = "org-tiny-leaf-89756764"
-project_id = "steep-frost-83698289"
+project_id = "cold-brook-02833828"
 
 # --- placement -------------------------------------------------------------
-# EU only, and immutable for an existing project: Neon cannot move a project
-# between regions.
-region_id  = "aws-eu-central-1"
+# UNITED STATES only, and immutable for an existing project: Neon cannot move a
+# project between regions, which is why the cutover was a new project.
+region_id  = "aws-us-east-1"
 pg_version = 18
 
 # --- point-in-time restore -------------------------------------------------
-# 21600 seconds is 6 hours, the ceiling on the Free plan and the live value.
-# MUST be set: the provider's own default is 86400 and would plan a change the
-# plan cannot grant.
-history_retention_seconds = 21600
+# 604800 seconds is 7 days, the live value on the US project (launch_v3). It was
+# 21600 (6 hours, the free_v3 ceiling) on the EU project. MUST be set: the
+# provider's own default is 86400, so omitting it plans a change - and leaving the
+# old 21600 here would plan a REDUCTION of the restore window on production.
+history_retention_seconds = 604800
+
+# --- ADOPTION IDENTIFIERS. NO DEFAULTS. FILL THESE IN FROM THE CONTROL PLANE. --
+#
+# These four are the reason this file is mandatory. They are deliberately left
+# EMPTY here rather than filled in with the live values: this file is tracked and
+# the repository is public. Each carries a shape validation in variables.tf, so an
+# empty or transposed value fails at variable-validation time with a message
+# naming the API call, rather than as an unhelpful "resource not found" partway
+# through an import.
+#
+# Read them, do not transcribe them. An id written down by hand is an id that can
+# be stale, and this root has already been repointed from one project to another
+# once:
+#
+#   source infra/lib/credentials.sh && pullfm_load_credentials neon
+#   P=cold-brook-02833828
+#
+#   curl -sS -H "Authorization: Bearer $NEON_API_KEY" \
+#     "https://console.neon.tech/api/v2/projects/$P/branches" |
+#     python3 -c 'import json,sys; [print(("main_branch_id" if b["default"] else "staging_branch_id"), "=", repr(b["id"]), "#", b["name"]) for b in json.load(sys.stdin)["branches"]]'
+#
+#   curl -sS -H "Authorization: Bearer $NEON_API_KEY" \
+#     "https://console.neon.tech/api/v2/projects/$P/endpoints" |
+#     python3 -c 'import json,sys; [print(e["id"], e["branch_id"], e["type"]) for e in json.load(sys.stdin)["endpoints"]]'
+#
+# Match each endpoint to its branch by `branch_id`; there is exactly one
+# `read_write` endpoint per branch. The `main_*` pair belongs to the branch with
+# `default: true`.
+main_branch_id      = "" # br-... , the branch with default: true
+main_endpoint_id    = "" # ep-... , read_write on the default branch
+staging_branch_id   = "" # br-... , the branch named "staging"
+staging_endpoint_id = "" # ep-... , read_write on the staging branch
 
 # --- branches --------------------------------------------------------------
 staging_branch_name = "staging"
 
-# Paid-plan feature, and in tension with resetting a branch. See variables.tf.
+# Available on launch_v3, and still false. The reason is no longer the plan; see
+# variables.tf.
 default_branch_protected = false
 
 # --- staging compute -------------------------------------------------------
-# The Free plan gives 100 CU-hours per project per month, shared by every
-# branch, and suspends any compute after 5 minutes of inactivity.
+# The live values, and they are the project's own default_endpoint_settings
+# (0.25 to 8 CU, platform-default suspend) rather than a separate opinion.
+#
+# staging_max_cu WAS 1, which was free_v3 arithmetic against a 2 CU ceiling and a
+# 100 CU-hour monthly allowance. Neither exists on launch_v3, and the mismatch
+# against the live 8 made `terraform plan` report a change on EVERY run that
+# nobody ever applied. Read the long block above `staging_max_cu` in variables.tf
+# before lowering it: the MusicBrainz canonical load runs against this branch.
 staging_min_cu                  = 0.25
-staging_max_cu                  = 1
+staging_max_cu                  = 8
 staging_suspend_timeout_seconds = 0
 
 # --- roles -----------------------------------------------------------------

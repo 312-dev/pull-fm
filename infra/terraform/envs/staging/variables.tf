@@ -110,36 +110,48 @@ variable "app_hostname" {
 }
 
 # ---------------------------------------------------------------------------
-# THIS STILL NAMES THE EU BUCKET AFTER THE US CUTOVER, AND THAT IS A DELIBERATE
-# NON-CHANGE RATHER THAN AN OVERSIGHT.
+# THIS NOW NAMES THE US BUCKET. IT WAS NOT A VARIABLE EDIT, AND THE PREVIOUS
+# COMMENT HERE WAS THE RECIPE FOR THE CHANGE THAT REPLACED IT.
 # ---------------------------------------------------------------------------
 #
-# The backup tooling (infra/lib/backup-common.sh) now reads and writes
-# `pull-fm-backups-staging-us`, which was created BY HAND in the default
-# jurisdiction with an ENAM location hint, because R2 has no `us` jurisdiction
-# to pin to and jurisdiction is fixed at creation.
+# The backup tooling (infra/lib/backup-common.sh) reads and writes
+# `pull-fm-backups-staging-us`, which was created BY HAND in the DEFAULT
+# jurisdiction with an ENAM location hint, because R2 has no `us` jurisdiction to
+# pin to and jurisdiction is fixed at creation. Terraform managed the EU bucket
+# `pull-fm-backups-staging` until 2026-07-29, so for a while the tooling and
+# Terraform were pointed at two different buckets. They are now pointed at one.
 #
-# WHY THIS VARIABLE WAS NOT SIMPLY REPOINTED. `bucket_name` is ForceNew on
+# WHY EDITING THIS DEFAULT ON ITS OWN WOULD HAVE BEEN DESTRUCTIVE, kept because
+# it is the reason the change looks the way it does. `bucket_name` is ForceNew on
 # `cloudflare_r2_bucket`, and `modules/backup-storage` marks that resource
-# `prevent_destroy = true` with the note that "if this is destroyed the service
-# is gone". So editing this default does not rename anything. It plans a DESTROY
-# AND CREATE of the bucket holding every database backup, and `prevent_destroy`
-# then fails the plan - which is the lock working, not a bug to route around.
-# The create half would fail anyway, because the US bucket already exists and is
-# not in this state.
+# `prevent_destroy = true` with the note that "if this is destroyed the service is
+# gone". So editing this line does not rename anything. It plans a DESTROY AND
+# CREATE of the bucket holding every database backup, `prevent_destroy` fails the
+# plan, and the create half would have failed anyway because the US bucket
+# already existed outside this state.
 #
-# WHAT REPOINTING ACTUALLY REQUIRES, so nobody rediscovers it under pressure:
-# `terraform state rm module.backup_storage.cloudflare_r2_bucket.backups`
-# followed by an `import` block for the existing US bucket, plus a
-# `jurisdiction = "default"` argument on the module call (the module defaults to
-# `eu`), plus a pre-apply snapshot from infra/lib/tfstate-snapshot.sh. That is a
-# reviewed change with an apply behind it, not a variable edit, and it is the
-# owner's call. Until it happens, Terraform manages the EU bucket that is being
-# kept as the rollback, and the tooling manages the US bucket that is live.
+# WHAT WAS ACTUALLY DONE, on 2026-07-29, after a verified pre-apply snapshot from
+# infra/lib/tfstate-snapshot.sh:
+#
+#   terraform state rm module.backup_storage.cloudflare_r2_bucket.backups
+#
+# plus an `import` block for the existing US bucket and an explicit
+# `jurisdiction = "default"` on the module call in main.tf, because the module
+# defaults to `eu` and a default that disagrees with the imported object is a
+# plan that proposes replacing a backup bucket. `state rm` forgets the EU bucket
+# without touching it; it was deleted separately and deliberately.
+#
+# NOTE WHAT THE `-us` SUFFIX DOES AND DOES NOT MEAN. It distinguishes this bucket
+# from the retired EU one. It is not a residency claim: R2's only jurisdictions
+# are `eu` and `fedramp`, so `default` means Cloudflare may store these objects
+# anywhere, and the ENAM location hint is a preference rather than a guarantee.
+# legal/privacy-policy.md states it that way on purpose and declines the stronger
+# claim. The control that actually does the work is that the objects are
+# encrypted before upload under a key that has never been at Cloudflare.
 variable "backup_bucket_name" {
   type        = string
-  description = "R2 bucket for pgBackRest. Still the EU bucket: see the block above before changing it."
-  default     = "pull-fm-backups-staging"
+  description = "R2 bucket for pgBackRest. The US bucket, in the DEFAULT jurisdiction; main.tf passes jurisdiction explicitly to match. See the block above before changing it: bucket_name is ForceNew and the resource carries prevent_destroy, so this is not a rename knob."
+  default     = "pull-fm-backups-staging-us"
 }
 
 variable "ssh_allowlist_cidrs" {

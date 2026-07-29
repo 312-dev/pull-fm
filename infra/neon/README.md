@@ -1,69 +1,98 @@
 # Pull.fm - Neon serverless Postgres
 
-> ## THIS ROOT STILL ADOPTS THE EU PROJECT. THE DATABASE IS IN THE US.
+> ## REPOINTED TO THE US PROJECT ON 2026-07-29. PLAN IS CLEAN, AND THAT CLAIM IS CHECKABLE.
 >
-> **Read this before running anything here.** The US cutover created a second
-> Neon project, `cold-brook-02833828` (`pull-fm-us`, `aws-us-east-1`, Postgres
-> 18, PITR 7 days), with the same two branch NAMES as the EU project, `main` and
-> `staging`. The branch and endpoint ids are deliberately not written here; ask
-> the control plane for them, which is what `tools/check-public-identifiers.mjs`
-> exists to enforce. Both branches are bootstrapped, migrated
-> and verified, and every connection string the application and the backup
-> tooling use now points at them: `pull-fm/{staging,prod}/DATABASE_URL_US` and
-> `..._DIRECT_US` in 1Password, and `PULLFM_NEON_PROJECT_ID` in
-> `infra/lib/backup-common.sh`.
+> This root manages `cold-brook-02833828` (`pull-fm-us`, `aws-us-east-1`,
+> Postgres 18, `launch_v3`, PITR 7 days). The EU project `steep-frost-83698289`
+> was the rollback for the cutover and **was deleted on 2026-07-29** once the US
+> side was verified. There is one Neon project again.
 >
-> **This Terraform root was deliberately not repointed, and it was not a
-> shortcut.** Every sentence below about "one project, adopted by import" is
-> still true of the EU project and is now also the thing standing in the way:
+> **All six resources are adopted by import. This root creates nothing.** That is
+> a change: on the EU project, `neon_branch.staging` and `neon_endpoint.staging`
+> were created by Terraform. On the US project they already existed, so they have
+> import blocks of their own. Read `imports.tf` before touching anything here -
+> it explains that without those two blocks a repointed apply reads as "2 to
+> add", applies cleanly, and cuts a SECOND `staging` branch on the US project
+> while the live one goes unmanaged. Neon does not require branch names to be
+> unique.
 >
-> - `variable "region_id"` has a `validation` requiring `startswith("aws-eu-")`.
->   The US project fails it. That validation is a stated GDPR control, so
->   relaxing it is a posture decision and not a typo fix.
-> - `neon_project.pullfm` carries `prevent_destroy`, and a project's region and
->   `pg_version` are ForceNew. There is no in-place move; the only expression
->   Terraform has for "different project" is destroy-and-create, which for this
->   resource means deleting the live EU database that is being kept as the
->   rollback.
-> - The import ids in `imports.tf` are the EU branch and endpoint. Repointing
->   means `terraform state rm` on all six resources plus `import` blocks for the
->   US project, its database, its owner role and BOTH endpoints. Note that
->   `neon_branch.staging` and `neon_endpoint.staging` are currently CREATED
->   rather than imported, so without new import blocks a repointed apply would
->   cut a second staging branch on the US project rather than adopt the existing
->   one.
-> - The `pullfm_app` role and its grants are not resources here at all, so none
->   of that state surgery touches them. They were applied with
->   `sql/*.sql` per branch and verified; see below.
+> **What the repoint actually consisted of**, because "we changed a variable" is
+> not what happened:
 >
-> A pre-apply snapshot from `infra/lib/tfstate-snapshot.sh` is mandatory before
-> any of that, because R2 cannot version the state object.
+> - A verified pre-apply snapshot from `infra/lib/tfstate-snapshot.sh --local`.
+>   R2 cannot version objects, so that is the only rollback.
+> - `terraform state rm` on all six resources. `state rm` forgets an object
+>   without touching it, so nothing in either project was destroyed by it.
+> - Six import blocks against the US project, its database, its owner role, its
+>   staging branch and BOTH endpoints.
+> - `variable "region_id"` relaxed from `aws-eu-*` to `aws-us-*`. That validation
+>   was a stated GDPR control; the residency posture moved to United States only
+>   and `legal/privacy-policy.md` now states the database as `aws-us-east-1`, so
+>   the check changed sides rather than being deleted. Read the comment above it.
+> - `history_retention_seconds` 21600 -> 604800 and `staging_max_cu` 1 -> 8. Both
+>   are properties of the new project and plan, not carried-over values. Leaving
+>   the first would have planned a REDUCTION of the restore window from seven days
+>   to six hours, which applies cleanly and is only noticed by somebody trying to
+>   restore.
 >
-> **There is also pre-existing drift on this root, unrelated to the cutover.**
-> `terraform plan` on 2026-07-29 reported `neon_endpoint.staging`
-> `autoscaling_limit_max_cu 8 -> 1`: the live EU staging endpoint was raised to
-> 8 CU outside Terraform. The claim below that "the plan is clean" is no longer
-> accurate.
+> The applied plan was **6 imported, 0 added, 3 changed, 0 destroyed**. The three
+> changes were `pooler_enabled false -> true` on both endpoints and `protected =
+> "no"` written onto the adopted staging branch. `terraform plan` now reports no
+> changes, with no `-var` overrides.
 >
-> The `PGURL_ITEM=pull-fm/<env>/DATABASE_URL` invocations further down should
-> read `..._DATABASE_URL_US` when they are being run against the live database.
+> **THIS ROOT NOW REQUIRES A GITIGNORED `terraform.tfvars`, WHICH IT DID NOT
+> BEFORE.** The six import blocks used to carry the live branch and endpoint ids as
+> literals in a tracked file, which is what `tools/check-public-identifiers.mjs`
+> exists to prevent, and eleven of its baseline findings came from `imports.tf`
+> alone. Those ids moved into four variables with no defaults, supplied from
+> `terraform.tfvars`. Consequences: `plan` without that file fails with "No value
+> for required variable", which is a safe stop rather than a wrong plan;
+> `terraform init -backend=false && terraform validate` is unaffected; and the
+> values are always re-derivable from the control plane with the commands in
+> `terraform.tfvars.example`. Deleting the import blocks was the alternative and
+> was rejected - they are inert while state is intact and they are the RESCUE if
+> state is lost, where the failure is not an error but a plan to create a second
+> Neon project.
 >
-> ## APPLIED 2026-07-29. PLAN IS CLEAN.
+> **THE PERMANENT PLAN DIFF IS GONE, AND IT WAS THE MOST IMPORTANT THING HERE.**
+> An earlier revision of this banner said the plan was clean while
+> `terraform plan` reported `neon_endpoint.staging autoscaling_limit_max_cu
+> 8 -> 1` on every run: the live endpoint was 8 and the configuration said 1,
+> because 1 was `free_v3` arithmetic. Nobody applied it, because nobody believed
+> it. A root whose plan is never clean teaches everyone reading it to skip the
+> plan, which is worse than the drift it was hiding. See the long block above
+> `staging_max_cu` in `variables.tf` for what was given up by matching 8.
 >
-> Applied against the live Neon control plane: **4 imported, 2 added, 1 changed,
-> 0 destroyed**, exactly the predicted plan. Staging branch
-> `br-calm-morning-asjr2h1v`, staging endpoint `ep-super-wind-asbuczm7`.
+> **One earlier claim was measured and turned out to be false.** This module said
+> that with `pooler_enabled` false "the pooled host resolves but refuses
+> connections". On 2026-07-29, with the API reporting false on both US endpoints,
+> the `-pooler` hostname accepted connections and reported the pooled-path role
+> default. So the flag and the served behaviour had already diverged, and setting
+> it true corrected what Neon REPORTS rather than switching a working path on.
+> Neon still ignores `pooler_enabled` at creation and honours it on update, which
+> is why an endpoint created outside Terraform arrives as drift.
 >
-> Two defects appeared only once real resources existed, and both are fixed:
-> Neon **ignores `pooler_enabled` when an endpoint is created** (it honours it on
-> update), and this module derived the staging pooled hostname from an attribute
-> whose meaning changes when pooling is enabled. See `checks.tf` and the
-> `locals` block in `main.tf`. `terraform plan` reports no changes.
+> The `pullfm_app` role and its grants are not resources here, so none of the
+> state surgery touched them. They were applied with `sql/*.sql` per branch and
+> verified; see below.
 >
-> This root **adopts an existing project**. The Neon project, its default
-> branch, its database, its owner role and its read-write endpoint were created
-> in the Neon console on 2026-07-29. `imports.tf` brings them under management.
-> **There must never be a second Neon project.**
+> **THE LIVE 1PASSWORD ITEMS STILL CARRY A `_US` SUFFIX, AND THAT IS AN OPEN
+> ITEM RATHER THAN A DECISION.** The connection strings the application, the
+> backup tooling and the verifiers actually use are
+> `pull-fm/{staging,prod}/DATABASE_URL_US` and `..._DIRECT_US`, plus
+> `pull-fm/staging/R2_CREDENTIALS_US`, `..._LEDGER_CREDENTIALS_US` and
+> `..._DRILL_LEDGER_CREDENTIALS_US`. The plain-named EU originals were **archived
+> and retitled `(RETIRED 2026-07-29)`** when the EU estate was retired, so the
+> plain titles no longer resolve.
+>
+> The suffix is a migration artifact and should be dropped, but dropping it is a
+> two-sided change: the titles are referenced by `infra/lib/secrets.sh`,
+> `infra/lib/backup-common.sh`, `infra/backup/restore-drill.sh`,
+> `infra/backup/README.md`, `infra/mb-loader/systemd/README.md` and
+> `packages/db/scripts/verify-query-ceilings.mjs`. Renaming the items without
+> those edits breaks the backup path and the restore drill, so the rename and the
+> edits go in one change. Every `PGURL_ITEM=` example below therefore names the
+> `_US` item, because that is the one that resolves today.
 
 The full migration procedure, the free-plan analysis and the rollback paths live
 in [`docs/runbooks/neon-migration.md`](../../docs/runbooks/neon-migration.md).
@@ -110,8 +139,14 @@ That exports `NEON_API_KEY` plus the R2 state pair, and nothing else. It reads
 the key from 1Password **by item ID**, because the item's title contains
 parentheses and an `op://` reference cannot address it by title. It then calls
 `pullfm_assert_neon_scope`, which lists projects with the key and refuses to
-continue if it can see any project other than `pull-fm`, or any personal project
-at all.
+continue if it can see any project other than **`pull-fm-us`**, or any personal
+project at all.
+
+That accepted set was two names for the length of the cutover, because a Neon
+region is immutable and the US project had to exist alongside the EU one. It is
+back to one: `pull-fm` came off the list in the same change that deleted the
+project, on the principle its own comment states - a second accepted project that
+no longer exists is a standing exemption nobody reads.
 
 `provider "neon" {}` is deliberately empty. A value assigned to a provider
 argument is rendered into the plan file even when it comes from a `sensitive`
@@ -124,12 +159,18 @@ public.
 cd infra/neon
 source ../lib/credentials.sh && pullfm_load_credentials neon
 cp backend.hcl.example backend.hcl        # gitignored; fill in the R2 endpoint
+cp terraform.tfvars.example terraform.tfvars   # gitignored; REQUIRED, see below
 terraform init -backend-config=backend.hcl
 terraform fmt -check -recursive
 terraform validate
 terraform plan -out=tfplan                # READ THE PLAN
 terraform apply tfplan
 ```
+
+`terraform.tfvars` is **not optional any more**. The four adoption identifiers at
+the bottom of `terraform.tfvars.example` have no defaults because they are live
+branch and endpoint ids; the example file carries the two `curl` commands that
+read them out of the Neon API, and nothing should be transcribed by hand.
 
 To validate with no credentials at all, which is what CI can do and what
 provisions nothing:
@@ -201,7 +242,9 @@ as resources in their own right.
 
 `history_retention_seconds` is the exception. It carries a **static** provider
 default of 86400, so omitting it means "plan a change to 24 hours" rather than
-"leave it alone". It is set explicitly to the live value, 21600.
+"leave it alone". It is set explicitly to the live value, which is **604800**
+(seven days) on the US project. It was 21600 on the EU project, and that number
+survived in three places in this repository longer than the project did.
 
 ### The default branch is `main`, and nothing here declares its name
 
@@ -327,7 +370,7 @@ psql -v ON_ERROR_STOP=1 -f sql/set-role-timeouts.sql "$OWNER_DIRECT_URL"
 
 # Proves. Over the POOLED endpoint as pullfm_app: reads the catalog, fans out
 # to defeat parked backends, then exceeds the ceiling and checks it is killed.
-PGURL_ITEM=pull-fm/<env>/DATABASE_URL \
+PGURL_ITEM=pull-fm/<env>/DATABASE_URL_US \
   node ../../packages/db/scripts/verify-query-ceilings.mjs
 ```
 
@@ -356,7 +399,7 @@ psql -v ON_ERROR_STOP=1 -f sql/verify-app-role.sql   "$OWNER"   # 40 assertions
 
 # Then, over the POOLED endpoint as pullfm_app, prove the ceilings FIRE.
 # ~110 seconds: it waits out both timeouts on purpose.
-PGURL_ITEM=pull-fm/<env>/DATABASE_URL \
+PGURL_ITEM=pull-fm/<env>/DATABASE_URL_US \
   node ../../packages/db/scripts/verify-query-ceilings.mjs
 ```
 
@@ -401,18 +444,47 @@ destroy-and-recreate. The role because dropping the owner of the application
 database orphans every object in it.
 
 Unlike the Hetzner roots there is no second, vendor-side lock here: Neon has no
-`delete_protection` equivalent, and protected branches are a paid-plan feature.
-So `prevent_destroy` is the only lock, which is a weaker position than the
-Hetzner nodes were in and is stated rather than glossed.
+`delete_protection` equivalent. So `prevent_destroy` is the only lock, which is a
+weaker position than the Hetzner nodes were in and is stated rather than glossed.
 
-### The free plan is a development allowance, not a production one
+This paragraph used to add "and protected branches are a paid-plan feature",
+offered as a second reason no vendor lock was available. That half is no longer
+true on `launch_v3`, and it was never quite the same thing anyway: a protected
+branch is not a protected PROJECT, and it is the project whose loss is
+unrecoverable. Turning branch protection on would not give this resource a second
+lock. See `default_branch_protected` in `variables.tf`.
 
-`org-tiny-leaf-89756764` is on `free_v3`: 0.5 GB storage per project, 100
-CU-hours per project per month, 10 branches, and a 6 hour restore window.
-Staging-as-a-branch fits comfortably. **Production does not** - 100 CU-hours at
-the 0.25 CU floor is 400 hours of activity, and a month is 730. A paid plan is a
-Phase 6 prerequisite, and it is what unlocks `allowed_ips`, a longer PITR window
-and protected branches. Arithmetic and sources are in the runbook.
+### The plan changed with the project, and most of this section expired
+
+**What this section used to say, because the arithmetic is still worth having.**
+`org-tiny-leaf-89756764` was on `free_v3`: 0.5 GB storage per project, 100
+CU-hours per project per month, an autoscaling ceiling of 2 CU, 10 branches, and
+a 6 hour restore window. Staging-as-a-branch fitted comfortably. **Production did
+not** - 100 CU-hours at the 0.25 CU floor is 400 hours of activity against 730 in
+a month. A paid plan was recorded as a Phase 6 prerequisite.
+
+**That prerequisite has been met, and it is the reason several numbers in this
+repository changed at once.** `cold-brook-02833828` is on `launch_v3`. Read back
+from the API on 2026-07-29: `branches_limit` 5000,
+`branch_logical_size_limit_bytes` 16 TiB, `default_endpoint_settings` of 0.25 to
+8 CU with the platform-default suspend, and `history_retention_seconds` 604800.
+Every free-plan figure written elsewhere in this repository is now historical, and
+`docs/runbooks/mb-canonical-data.md` already carries the general form of the
+lesson: **a plan limit is a per-project property and it does not travel, so read
+it rather than assuming it.**
+
+**What the paid plan did NOT unlock.** `allowed_ips` is a Scale feature, so
+`launch_v3` is still below it and `PULLFM-RISK-007` stands unchanged. Protected
+branches ARE now available; the default branch is still unprotected, and the
+reason is no longer the plan - see `default_branch_protected` in `variables.tf`.
+
+**What replaced the allowance as the spend control, and it is not armed.** A
+fixed monthly allowance that simply stops is a crude cap, but it is a cap. On a
+paid plan, overspend is money. The mechanism for bounding it is `var.quota`,
+enforced server-side across the project, and it is still `null`. It is left null
+because exceeding a quota suspends every compute in the project, which on `main`
+means production is down, so the number is the owner's call. Named here rather
+than implied.
 
 ### The security regression, named
 
@@ -432,7 +504,7 @@ Three further risks come from where the state lives rather than from Neon:
 | ----------------- | ---------------------------------------------------------------------------- |
 | `PULLFM-RISK-008` | The database password is plaintext in state, and R2 cannot version objects   |
 | `PULLFM-RISK-009` | The state R2 key is account-scoped, so it also reaches the backups bucket    |
-| `PULLFM-RISK-010` | `pull-fm-tfstate` is not in the EU jurisdiction the residency posture claims |
+| `PULLFM-RISK-010` | Retired by the posture change, not by the bucket moving. The residency posture is United States only and R2 has no `us` jurisdiction, so `pull-fm-tfstate` being in the default jurisdiction is now the intended shape rather than a gap. Re-read it in `security/accepted-risks.md` before relying on either reading; that file is not updated by this change. |
 
 ## What this configuration does not manage
 

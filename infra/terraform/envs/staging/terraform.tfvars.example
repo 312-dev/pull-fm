@@ -110,4 +110,17 @@ restrict_egress = true
 # the naming ever matters more than the money.
 api_hostname       = "api-staging.pull.fm"
 app_hostname       = "app-staging.pull.fm"
-backup_bucket_name = "pull-fm-backups-staging"
+
+# The US bucket, in R2's DEFAULT jurisdiction. This example named the EU bucket
+# `pull-fm-backups-staging` until 2026-07-29; that bucket was DELETED with the
+# rest of the EU estate, so the old value now names nothing and a first apply
+# following it would have created a new empty bucket rather than adopting the
+# live repository.
+#
+# Both `name` and `jurisdiction` are ForceNew on cloudflare_r2_bucket and the
+# resource carries prevent_destroy, so this line is NOT a rename knob: editing it
+# plans a destroy-and-create of the bucket holding every database backup. The
+# repoint was done with `terraform state rm` plus an import block; see
+# envs/staging/imports.tf and the block above `backup_bucket_name` in
+# variables.tf. main.tf passes `jurisdiction = "default"` to match.
+backup_bucket_name = "pull-fm-backups-staging-us"

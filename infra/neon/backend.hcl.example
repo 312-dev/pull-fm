@@ -23,6 +23,13 @@ region = "auto"
 # documented creating it with `--jurisdiction eu`. Anybody following the runbook
 # with the old `.eu.` value could not init.
 #
+# RE-ENUMERATED LATER THE SAME DAY, AFTER THE EU ESTATE WAS RETIRED. The `.eu.`
+# endpoint now returns NOTHING: `pull-fm-backups-staging` and the two erasure
+# ledgers were deleted. The observation above is kept as it was measured, because
+# it is what proved the two endpoint forms are not interchangeable, and an empty
+# EU endpoint proves nothing on its own - an endpoint with no buckets and an
+# endpoint that cannot see the bucket you want look identical from here.
+#
 # THE US CUTOVER CHANGES WHICH HALF OF THAT IS A PROBLEM, NOT THE ENDPOINT VALUE
 # HERE. The residency posture is now US-only, and the replacement data buckets
 # (`pull-fm-backups-staging-us`, `pull-fm-ledger-staging-us`,

@@ -7,8 +7,13 @@
 # (see the long comment on `locals` in main.tf), so after the pooler was enabled
 # the module wanted to publish:
 #
-#   staging_host_direct   ep-super-wind-asbuczm7-pooler.c-4...          (pooled, mislabelled)
-#   staging_host_pooled   ep-super-wind-asbuczm7-pooler-pooler.c-4...   (does not resolve)
+#   staging_host_direct   <endpoint-id>-pooler.<proxy>          (pooled, mislabelled)
+#   staging_host_pooled   <endpoint-id>-pooler-pooler.<proxy>   (does not resolve)
+#
+# (The real endpoint id was written out here once. It is redacted for the reason
+# tools/check-public-identifiers.mjs gives: the hostname is internet-reachable and
+# the credential is the only network control on this plan. Nothing about the
+# argument below needs the literal.)
 #
 # Neither is visible as an error at plan time. Both fail at connect time, which
 # means in production, at whatever hour production notices. The whole class is

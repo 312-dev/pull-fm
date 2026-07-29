@@ -43,34 +43,45 @@ readonly PULLFM_ZONE="pull.fm"
 readonly PULLFM_NEON_ORG_ID="${PULLFM_NEON_ORG_ID:-org-tiny-leaf-89756764}"
 
 # ---------------------------------------------------------------------------
-# THE SCOPE ASSERTION EXPECTS TWO PROJECTS FOR THE LENGTH OF THE US CUTOVER, AND
-# IT USED TO EXPECT EXACTLY ONE.
+# THE SCOPE ASSERTION IS BACK TO EXACTLY ONE PROJECT. IT BRIEFLY ACCEPTED TWO,
+# AND THE SECOND ENTRY HAS BEEN REMOVED IN THE SAME CHANGE THAT DELETED IT.
 # ---------------------------------------------------------------------------
 #
-# WHAT WAS WRONG. `pullfm_assert_neon_scope` compared every project name the key
-# can see against a single expected name and refused to run on any extra. That
-# was correct while there was one project. A Neon REGION IS IMMUTABLE, so moving
-# residency to the US meant creating `pull-fm-us` alongside `pull-fm`, and from
-# the moment that project existed this function refused every call:
+# WHAT WAS WRONG ORIGINALLY. `pullfm_assert_neon_scope` compared every project
+# name the key can see against a single expected name and refused to run on any
+# extra. That was correct while there was one project. A Neon REGION IS
+# IMMUTABLE, so moving residency to the US meant creating `pull-fm-us` alongside
+# `pull-fm`, and from the moment that project existed this function refused every
+# call:
 #
 #   REFUSING TO RUN: this Neon key can see projects other than pull-fm:
 #   pull-fm-us
 #
-# which takes out `pullfm_load_credentials neon` and therefore every `terraform`
-# command in infra/neon, for a state of the world that is intended.
+# which took out `pullfm_load_credentials neon` and therefore every `terraform`
+# command in infra/neon, for a state of the world that was intended. So the
+# single name became a list of two for the length of the cutover.
 #
-# WHY A LIST AND NOT A PREFIX. The obvious repair is to accept anything starting
-# `pull-fm`, and that is the repair that quietly deletes the control: this
-# function exists to notice a key whose blast radius is wider than this
-# repository, and a personal project called `pull-fm-scratch` would then pass.
-# An explicit set still refuses everything that is not named here.
+# WHY A LIST AND NOT A PREFIX, which still matters because the list is a list.
+# The obvious repair was to accept anything starting `pull-fm`, and that is the
+# repair that quietly deletes the control: this function exists to notice a key
+# whose blast radius is wider than this repository, and a personal project called
+# `pull-fm-scratch` would then pass. An explicit set still refuses everything
+# that is not named here.
 #
-# THIS LIST MUST SHRINK BACK TO ONE. `pull-fm` is the EU project and it is the
-# rollback for the cutover; it is deliberately not deleted. When it is finally
-# retired, remove it from this list in the same change, because a second
-# accepted project that no longer exists is a standing exemption nobody reads.
-readonly PULLFM_NEON_PROJECTS="${PULLFM_NEON_PROJECTS:-pull-fm
-pull-fm-us}"
+# WHY IT IS ONE ENTRY AGAIN. The old note said "THIS LIST MUST SHRINK BACK TO
+# ONE... a second accepted project that no longer exists is a standing exemption
+# nobody reads." The EU project `pull-fm` (steep-frost-83698289) was DELETED on
+# 2026-07-29 once the US side was verified, so it came off the list in the same
+# change. The instruction is kept because it applies to the next cutover too: a
+# temporary second entry here is only temporary if removing it is part of the
+# retirement rather than a follow-up.
+#
+# NOTE THE NAME. It is `pull-fm-us`, not `pull-fm`. The suffix is a cutover
+# artifact - the new project's name had to differ from the old one's while both
+# existed - and `neon_project.name` is updatable in place, so it can be dropped
+# later. If it is, this line changes with it, and the two must move together or
+# every terraform command in infra/neon stops.
+readonly PULLFM_NEON_PROJECTS="${PULLFM_NEON_PROJECTS:-pull-fm-us}"
 
 # 1Password item holding the Neon API key, addressed BY ITEM ID.
 #

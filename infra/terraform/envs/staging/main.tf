@@ -121,6 +121,35 @@ module "backup_storage" {
 
   account_id  = var.cloudflare_account_id
   bucket_name = var.backup_bucket_name
+
+  # ---------------------------------------------------------------------------
+  # JURISDICTION IS PASSED EXPLICITLY BECAUSE THE MODULE DEFAULTS TO `eu` AND
+  # THIS BUCKET IS NOT IN IT.
+  # ---------------------------------------------------------------------------
+  #
+  # WHAT WAS WRONG. This module call omitted `jurisdiction`, so
+  # modules/backup-storage's default of "eu" applied. That was correct while the
+  # bucket was `pull-fm-backups-staging`, which really is EU-pinned. The US
+  # cutover replaced it with `pull-fm-backups-staging-us`, created by hand in the
+  # DEFAULT jurisdiction because R2 offers only `eu` and `fedramp` and there is no
+  # `us` to pin to.
+  #
+  # WHY LEAVING IT UNSET WOULD BE WORSE THAN WRONG. `jurisdiction` is ForceNew
+  # and the resource carries `prevent_destroy`, so an inherited `eu` against an
+  # imported default-jurisdiction bucket does not read as a mismatch to be fixed:
+  # it plans a REPLACEMENT of the bucket holding every database backup, and then
+  # fails the plan on the lifecycle lock. A root that cannot plan is a root nobody
+  # can use, and the failure names the wrong thing.
+  #
+  # It is also not merely a metadata field. A jurisdiction-scoped bucket answers
+  # on a DIFFERENT S3 host than a default one - the module's `s3_endpoint` output
+  # encodes exactly that - which is the usual cause of a 401 during pgBackRest
+  # setup, and the reason this cannot be left to a default that happens to be
+  # right for one environment.
+  #
+  # `default` is not a residency claim. See the block above `backup_bucket_name`
+  # in variables.tf.
+  jurisdiction = "default"
 }
 
 locals {

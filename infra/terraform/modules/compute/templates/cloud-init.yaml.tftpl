@@ -84,6 +84,257 @@ write_files:
       APT::Periodic::Update-Package-Lists "1";
       APT::Periodic::Unattended-Upgrade "1";
 
+  # -------------------------------------------------------------------------
+  # THE PRIVATE INTERFACE, WHEN CLOUD-INIT LOST THE RACE FOR IT.
+  #
+  # WHAT WAS WRONG. A rebuild in ash on 2026-07-29 produced a node whose
+  # Hetzner private NIC existed, was DOWN, and was configured nowhere:
+  # /etc/netplan/50-cloud-init.yaml held eth0 and nothing else, while
+  # http://169.254.169.254/hetzner/v1/metadata/private-networks had been
+  # reporting `ip: 10.20.1.11` the entire time. Hetzner attaches the private
+  # network AFTER the server boots, and cloud-init reads metadata once, in its
+  # local stage, before that attach lands. DataSourceHetzner builds the private
+  # stanza from `private-networks` (see network_config in
+  # DataSourceHetzner.py), so an empty list at read time means no stanza, and
+  # the datasource is then CACHED - every later boot re-renders the same
+  # eth0-only netplan from the same stale answer.
+  #
+  # That is not cosmetic. Redis publishes on the private address
+  # (10.20.1.11:6379 and :6380), so `docker compose up` died with "failed to
+  # bind host port 10.20.1.11:6379: cannot assign requested address", converge
+  # stopped at its last step, and the BFF failed closed on its rate limiter and
+  # refused all traffic. A REBUILT NODE DID NOT COME BACK SERVING, which is the
+  # one property this whole repository leans on: the node is disposable on
+  # purpose and "rebuild it" is the documented answer in docs/RUNBOOK-DR.md.
+  # The recovery was `cloud-init clean --logs; cloud-init init --local;
+  # netplan apply`, typed by hand, recorded nowhere.
+  #
+  # WHY THIS SHAPE, AND NOT THE THREE COMMANDS THAT FIXED IT BY HAND.
+  # `cloud-init clean` throws away the instance's state and its logs, so the
+  # NEXT boot re-runs every module: another apt upgrade, another curl-pipe-sh
+  # of the Tailscale installer, and a `tailscale up` with a key that was spent
+  # months ago. A repair that makes the following reboot unpredictable is not a
+  # repair. This asks the metadata service the same question cloud-init asks
+  # and writes the one stanza cloud-init would have written, which also
+  # survives the stale cache described above.
+  #
+  # WHY NOTHING HERE IS HARD-CODED. `enp7s0` and `86:00:00:3f:50:34` are
+  # per-instance: a netplan file carrying either would work on the node that
+  # was debugged and fail on the next rebuild, which is the same class of bug
+  # as the one being fixed. The interface name is resolved from the MAC the
+  # metadata service reports, at runtime, and the addressing is left to the
+  # same DHCP the datasource would have used - which is also where MTU 1450
+  # and the route to the network's range come from, two more values a static
+  # file would have had to guess.
+  # -------------------------------------------------------------------------
+  - path: /usr/local/sbin/pullfm-private-net
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      # Asserts that every private address the Hetzner metadata service reports
+      # is actually assigned on this node, and configures the interface if it is
+      # not. Idempotent, and a no-op on a boot cloud-init got right.
+      #
+      # Run by cloud-init's runcmd before the completion marker, and safe to run
+      # by hand at any time:  sudo /usr/local/sbin/pullfm-private-net
+      set -uo pipefail
+
+      MD_URL=http://169.254.169.254/hetzner/v1/metadata/private-networks
+      NETPLAN_FILE=/etc/netplan/60-pullfm-private-net.yaml
+      STATE_DIR=/var/lib/pullfm
+      FAIL_FILE=/var/lib/pullfm/private-net-FAILED
+
+      # Seconds to wait for the metadata service to admit that a private network
+      # is attached. Bounded on purpose: an unbounded wait inside cloud-init is a
+      # node that never finishes booting and never says why. 180 leaves room
+      # under the 600s deadline in wait_for_node (infra/staging-env.sh) even when
+      # apt takes its worst measured four minutes.
+      METADATA_WAIT=180
+      [ $# -ge 1 ] && METADATA_WAIT="$1"
+      # Seconds to wait for DHCP to answer after netplan apply.
+      DHCP_WAIT=60
+
+      PAIRS=""
+      MISSING=""
+
+      say() {
+        printf 'pullfm-private-net: %s\n' "$*" >&2
+        logger -t pullfm-private-net -- "$*" 2>/dev/null || true
+      }
+
+      # Everything an operator would have had to collect by hand, collected
+      # before anyone asks for it.
+      diagnostics() {
+        printf 'pullfm-private-net FAILED at %s\n' "$(date -Is 2>/dev/null)"
+        printf 'reason: %s\n\n' "$1"
+        printf -- '--- %s ---\n' "$MD_URL"
+        curl -sS --max-time 5 "$MD_URL" 2>&1
+        printf -- '\n--- ip -4 -br addr ---\n'
+        ip -4 -br addr 2>&1
+        printf -- '\n--- interfaces and MAC addresses ---\n'
+        for dev in /sys/class/net/*; do
+          printf '%s %s\n' "$(basename "$dev")" "$(cat "$dev/address" 2>/dev/null)"
+        done
+        printf -- '\n--- /etc/netplan ---\n'
+        ls -l /etc/netplan 2>&1
+      }
+
+      # LOUD, not silent-and-degraded. The journal for the operator who is
+      # already logged in, a file for the one who is not, and /dev/console for
+      # the case this failure creates most often: a node with no working private
+      # network, reachable only through the Hetzner web console.
+      fail() {
+        install -d -m 0755 "$STATE_DIR"
+        diagnostics "$1" >"$FAIL_FILE" 2>&1
+        chmod 0644 "$FAIL_FILE"
+        say "FAILED: $1"
+        say "diagnostics written to $FAIL_FILE"
+        cat "$FAIL_FILE" >/dev/console 2>/dev/null || true
+        exit 1
+      }
+
+      # "ip mac" per attached private network, parsed out of the metadata YAML.
+      # Field ORDER is not assumed - each list item is flushed when the next `-`
+      # begins - because a metadata document that grows a field is not a reason
+      # for a node to come up without a network. `alias_ips: []` is skipped by
+      # requiring a digit after `ip:`.
+      metadata_pairs() {
+        curl -sS --max-time 5 --retry 2 --retry-delay 1 "$MD_URL" 2>/dev/null | awk '
+          function flush() { if (ip != "" && mac != "") print ip, mac; ip = ""; mac = "" }
+          /^[[:space:]]*-/ { flush() }
+          {
+            line = $0
+            sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+            sub(/^[[:space:]]+/, "", line)
+            gsub(/[\r"]/, "", line)
+            if (line ~ /^ip:[[:space:]]*[0-9]/) {
+              sub(/^ip:[[:space:]]*/, "", line); ip = line
+            } else if (line ~ /^mac_address:[[:space:]]*[0-9a-fA-F]/) {
+              sub(/^mac_address:[[:space:]]*/, "", line); mac = line
+            }
+          }
+          END { flush() }
+        '
+      }
+
+      # The interface name is a LOOKUP, never a constant. Case-folded because
+      # /sys reports lower case and the metadata service is not required to.
+      ifname_for_mac() {
+        local want dev
+        want="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+        for dev in /sys/class/net/*; do
+          [ -r "$dev/address" ] || continue
+          if [ "$(tr 'A-Z' 'a-z' <"$dev/address")" = "$want" ]; then
+            basename "$dev"
+            return 0
+          fi
+        done
+        return 1
+      }
+
+      # True once metadata reports at least one private network AND this node
+      # actually has a NIC for every MAC in it. Both halves have to hold before
+      # there is anything to configure.
+      pairs_ready() {
+        local pip pmac
+        PAIRS="$(metadata_pairs)"
+        [ -n "$PAIRS" ] || return 1
+        while read -r pip pmac; do
+          [ -n "$pip" ] || continue
+          ifname_for_mac "$pmac" >/dev/null || return 1
+        done <<<"$PAIRS"
+        return 0
+      }
+
+      # Sets MISSING to the reported addresses that are not on any interface.
+      # -F because an address is a fixed string: the dots in 10.20.1.11 are
+      # regex wildcards to grep and would match 10x20x1x11.
+      find_missing() {
+        local pip pmac
+        MISSING=""
+        while read -r pip pmac; do
+          [ -n "$pip" ] || continue
+          ip -4 -o addr show 2>/dev/null | grep -qFw -- "$pip" ||
+            MISSING="$MISSING $pip"
+        done <<<"$PAIRS"
+        [ -z "$MISSING" ]
+      }
+
+      # The stanza DataSourceHetzner would have written, had it been asked one
+      # attach later: match on the MAC, keep the kernel's name for the device,
+      # and take the address, the MTU and the route from Hetzner's DHCP rather
+      # than restating them here.
+      write_netplan() {
+        local pip pmac pif tmp
+        tmp="$NETPLAN_FILE.tmp"
+        {
+          printf '# Generated by /usr/local/sbin/pullfm-private-net. Do not edit.\n'
+          printf '#\n'
+          printf '# cloud-init read the metadata service before Hetzner attached the\n'
+          printf '# private network, so 50-cloud-init.yaml describes eth0 only. This\n'
+          printf '# file adds the interface that answer left out.\n'
+          printf 'network:\n'
+          printf '  version: 2\n'
+          printf '  ethernets:\n'
+          while read -r pip pmac; do
+            [ -n "$pip" ] || continue
+            pif="$(ifname_for_mac "$pmac")" || return 1
+            printf '    %s:\n' "$pif"
+            printf '      match:\n'
+            printf '        macaddress: "%s"\n' "$pmac"
+            printf '      set-name: "%s"\n' "$pif"
+            printf '      dhcp4: true\n'
+            printf '      dhcp4-overrides:\n'
+            printf '        use-dns: false\n'
+            printf '      optional: true\n'
+          done <<<"$PAIRS"
+        } >"$tmp" || return 1
+        # 0600 for the same reason netplan warns about anything looser, and
+        # `optional: true` so a future boot with the network detached does not
+        # spend two minutes in systemd-networkd-wait-online before failing.
+        # use-dns is off because eth0's DHCP already supplies the resolvers and a
+        # second source is only a way for /etc/resolv.conf to change under the
+        # node - the same argument as --accept-dns=false for Tailscale.
+        install -m 0600 -o root -g root "$tmp" "$NETPLAN_FILE" || return 1
+        rm -f "$tmp"
+      }
+
+      main() {
+        local deadline
+        install -d -m 0755 "$STATE_DIR"
+
+        deadline=$(( SECONDS + METADATA_WAIT ))
+        until pairs_ready; do
+          if [ "$SECONDS" -ge "$deadline" ]; then
+            fail "the metadata service never reported an attached private network with a matching NIC (waited $METADATA_WAIT s)"
+          fi
+          sleep 5
+        done
+
+        if find_missing; then
+          say "private addressing is already correct:$(ip -4 -br addr show | awk '{ printf " %s(%s)", $1, $3 }')"
+          rm -f "$FAIL_FILE"
+          return 0
+        fi
+
+        say "metadata reports$MISSING but nothing on this node holds it; cloud-init raced the private-network attach"
+        write_netplan || fail "could not render $NETPLAN_FILE"
+        netplan apply || fail "netplan apply failed after writing $NETPLAN_FILE"
+
+        deadline=$(( SECONDS + DHCP_WAIT ))
+        until find_missing; do
+          if [ "$SECONDS" -ge "$deadline" ]; then
+            fail "still missing$MISSING $DHCP_WAIT s after netplan apply; DHCP on the private network did not answer"
+          fi
+          sleep 3
+        done
+
+        say "recovered:$(ip -4 -br addr show | awk '{ printf " %s(%s)", $1, $3 }')"
+        rm -f "$FAIL_FILE"
+      }
+
+      main "$@"
+
 runcmd:
   - [systemctl, restart, ssh]
   - [systemctl, enable, --now, fail2ban]
@@ -111,7 +362,27 @@ runcmd:
   - tailscale up --authkey "${tailscale_auth_key}" --hostname "${hostname}" --ssh=false --accept-routes=false --accept-dns=false
 %{ endif ~}
 
-  # The completion marker. `converge` polls for this rather than sleeping,
-  # because apt on a fresh node takes anywhere between 40 seconds and four
-  # minutes and a fixed sleep is either flaky or slow.
-  - ["/bin/sh", "-c", "echo ${hostname} >/var/lib/pullfm/cloud-init-done"]
+  # THE PRIVATE INTERFACE, AND THEN the completion marker. `converge` polls for
+  # the marker rather than sleeping, because apt on a fresh node takes anywhere
+  # between 40 seconds and four minutes and a fixed sleep is either flaky or
+  # slow.
+  #
+  # WHY THE TWO ARE ONE COMMAND. The exit status has to be the network script's,
+  # so a node that came up without its private address reports `error` from
+  # `cloud-init status` instead of `done`. Written as two separate runcmd entries
+  # that would depend on cloud-init not running the generated script under
+  # `set -e`, which is true today and is not a contract.
+  #
+  # WHY THE MARKER IS STILL WRITTEN ON FAILURE. Withholding it makes converge
+  # sit for its full ten-minute wait_for_node deadline and then say only that
+  # cloud-init did not finish. Writing it lets converge start, and the first
+  # thing it does is bring up Redis, which asserts the private address is
+  # assigned and dies in seconds naming the address, the interface and this
+  # script's own diagnostics file. Fast and specific beats slow and vague; the
+  # failure is loud on four channels either way (cloud-init status, the journal,
+  # /dev/console and /var/lib/pullfm/private-net-FAILED).
+  #
+  # AFTER Tailscale on purpose. If the network repair does fail, the operator
+  # needs a way in to read the diagnostics, and there is no inbound rule for
+  # port 22.
+  - ["/bin/sh", "-c", "/usr/local/sbin/pullfm-private-net 180; rc=$?; echo ${hostname} >/var/lib/pullfm/cloud-init-done; exit $rc"]

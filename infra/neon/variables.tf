@@ -6,33 +6,77 @@
 # default that disagrees with reality is not a preference, it is a plan that
 # changes production. Where an attribute is ForceNew, a disagreement is a plan
 # that DESTROYS production. Read the comment on each one before editing it.
+#
+# ---------------------------------------------------------------------------
+# THE PROJECT THESE DEFAULTS DESCRIBE CHANGED ON 2026-07-29. THEY WERE RE-READ,
+# NOT EDITED BY HAND.
+# ---------------------------------------------------------------------------
+#
+# This root used to adopt `steep-frost-83698289` (`pull-fm`, aws-eu-central-1).
+# It now adopts `cold-brook-02833828` (`pull-fm-us`, aws-us-east-1). Every
+# default below came from GET /projects/cold-brook-02833828 and its /branches
+# and /endpoints listings on 2026-07-29, not from editing the old value towards
+# the new one. Two of them are NOT the same as the EU project's and would have
+# been silently wrong if they had been carried over:
+#
+#   history_retention_seconds  21600 -> 604800   (the plan changed too)
+#   staging_max_cu             1     -> 8        (the project default is 0.25-8)
+#
+# The EU project is retired. A default here that still names it is not a stale
+# comment, it is a configuration pointed at a project that does not exist.
 
 variable "org_id" {
   type        = string
-  description = "Neon organisation that owns the project. Verified against GET /projects/steep-frost-83698289 on 2026-07-29: org-tiny-leaf-89756764, name '312.dev LLC'. Neon's API now requires org_id as a query parameter when listing projects, so an organisation-owned project is no longer addressable through the older personal-account shape."
+  description = "Neon organisation that owns the project. Verified against GET /projects/cold-brook-02833828 on 2026-07-29: org-tiny-leaf-89756764, name '312.dev LLC'. Unchanged by the US cutover: the new project was created in the same organisation. Neon's API requires org_id as a query parameter when listing projects, so an organisation-owned project is not addressable through the older personal-account shape."
   default     = "org-tiny-leaf-89756764"
 }
 
 variable "project_id" {
   type        = string
-  description = "Identifier of the EXISTING Neon project this root adopts. Not a name: Neon project IDs are opaque and permanent. Consumed by the import block in imports.tf."
-  default     = "steep-frost-83698289"
+  description = "Identifier of the EXISTING Neon project this root adopts. Not a name: Neon project IDs are opaque and permanent. Consumed by the import blocks in imports.tf. Repointed from steep-frost-83698289 (EU) to cold-brook-02833828 (US) on 2026-07-29; that was a state-rm-and-reimport, not a variable edit, because a project's region is immutable. See imports.tf."
+  default     = "cold-brook-02833828"
 }
 
 variable "project_name" {
   type        = string
-  description = "Human-readable project name. Live value is 'pull-fm'."
-  default     = "pull-fm"
+  description = "Human-readable project name. Live value is 'pull-fm-us'. The `-us` suffix is a cutover artifact rather than a preference: the name had to differ from the EU project's while both existed. `name` is updatable in place, so dropping the suffix is a one-line change plus an apply once nobody is reading the old name; it is deliberately NOT bundled into the retirement, because renaming a project in the same change that deletes its predecessor makes both harder to reason about if either goes wrong."
+  default     = "pull-fm-us"
 }
 
+# ---------------------------------------------------------------------------
+# THIS VALIDATION USED TO REQUIRE AN EU REGION AND CITED GDPR. THE POSTURE
+# CHANGED; THE VALIDATION DID NOT DISAPPEAR, IT CHANGED SIDES.
+# ---------------------------------------------------------------------------
+#
+# WHAT IT USED TO SAY. `startswith(var.region_id, "aws-eu-")`, on the stated
+# grounds that "Pull.fm processes EU personal data and the GDPR posture in
+# docs/PLAN.md assumes EU-only hosting". That was a real control and it did its
+# job: the US project failed it, which is why the cutover could not be finished
+# by editing one default.
+#
+# WHY THAT REASON NO LONGER APPLIES. The residency posture is now United States
+# only, and it is stated as such in legal/privacy-policy.md, which records the
+# database as "Neon Postgres, United States region (aws-us-east-1)" and deletes
+# the whole Chapter V cross-border analysis on the ground that after the move
+# there is no EEA-resident data to transfer. So the EU check is not a control
+# that was weakened to unblock an apply; it is a control whose premise was
+# withdrawn by a decision taken above this file.
+#
+# WHY IT IS STILL A VALIDATION AND NOT A DELETION. The reason to constrain the
+# region at all never depended on which region was chosen. A Neon region is
+# immutable, `region_id` is ForceNew, and `neon_project` carries
+# prevent_destroy, so a wrong value here is not a typo that plans a move: it is
+# a plan that proposes destroying the database and then fails the lifecycle
+# lock. Failing at variable-validation time, with a message that says why, is
+# several minutes and one less panic better than failing at plan time.
 variable "region_id" {
   type        = string
-  description = "Neon deployment region. EU only, for the same reason modules/compute validates the Hetzner location: Pull.fm processes EU personal data and the GDPR posture in docs/PLAN.md assumes EU-only hosting. THE REGION OF AN EXISTING PROJECT CANNOT BE CHANGED; Neon's own documentation says a different region means a new project and a data migration."
-  default     = "aws-eu-central-1"
+  description = "Neon deployment region. UNITED STATES only, matching the residency posture in legal/privacy-policy.md. THE REGION OF AN EXISTING PROJECT CANNOT BE CHANGED; Neon's own documentation says a different region means a new project and a data migration, which is exactly what the 2026-07-29 cutover was."
+  default     = "aws-us-east-1"
 
   validation {
-    condition     = startswith(var.region_id, "aws-eu-")
-    error_message = "region_id must be an EU region (aws-eu-central-1 Frankfurt or aws-eu-west-2 London). A US or APAC region would silently break the EU-only data residency assumption in docs/PLAN.md."
+    condition     = startswith(var.region_id, "aws-us-")
+    error_message = "region_id must be a US region (the live project is aws-us-east-1). This check used to require aws-eu-* on GDPR grounds; the residency posture moved to United States only on 2026-07-29 and legal/privacy-policy.md now states that. Changing this value does not move a project: the region is immutable and ForceNew, so it plans a destroy of the live database and then trips prevent_destroy on neon_project."
   }
 }
 
@@ -63,22 +107,114 @@ variable "compute_provisioner" {
 variable "history_retention_seconds" {
   type        = number
   description = <<-DESC
-    Point-in-time restore window, in seconds. Live value is 21600 (6 hours),
-    which is the ceiling on the Free plan.
+    Point-in-time restore window, in seconds. Live value on the US project is
+    604800 (7 days).
+
+    THIS NUMBER CHANGED WITH THE PROJECT AND IS NOT A CARRIED-OVER DEFAULT. The
+    EU project was 21600 (6 hours), which was the ceiling on free_v3. The US
+    project is on launch_v3, which is a paid plan, and it was created with a
+    7 day window. Leaving 21600 here after the repoint would have planned a
+    REDUCTION of the restore window from seven days to six hours on the live
+    production database, which is a plan that applies cleanly and is only
+    noticed when somebody needs to restore.
 
     THIS MUST BE SET EXPLICITLY AND MUST MATCH. The provider declares a static
     default of 86400 (24 hours) for this attribute, so leaving it out of the
     configuration does not mean "leave it alone", it means "plan a change to 24
-    hours" against a plan that cannot grant it.
+    hours".
 
-    Gate L requires a configured PITR window, and this is now where that number
-    lives. Six hours is short; raising it is a plan upgrade, not a code change.
+    Gate L requires a configured PITR window, and this is where that number
+    lives.
   DESC
-  default     = 21600
+  default     = 604800
 
   validation {
     condition     = var.history_retention_seconds >= 0 && var.history_retention_seconds <= 2592000
     error_message = "history_retention_seconds must be between 0 and 2592000 (30 days)."
+  }
+}
+
+# ---------------------------------------------------------------------------
+# ADOPTION IDENTIFIERS. THESE HAVE NO DEFAULTS AND MUST COME FROM A GITIGNORED
+# terraform.tfvars, AND THAT IS A DISCLOSURE CONSTRAINT RATHER THAN A STYLE ONE.
+# ---------------------------------------------------------------------------
+#
+# WHAT WAS WRONG. The six import blocks in imports.tf used to carry the live
+# branch and endpoint ids as string literals. `tools/check-public-identifiers.mjs`
+# has detectors for exactly those two shapes, on the stated grounds that a Neon
+# endpoint hostname is reachable from the public internet with the credential as
+# the only network control, and that a branch id addresses a restorable copy of
+# production data through the control plane. Both were OPEN FINDINGS recorded in
+# that check's baseline, and the baseline only shrinks: writing the US ids in
+# after the cutover would have added eleven NEW findings to a public repository
+# and failed the gate.
+#
+# The head of infra/neon/README.md said the ids were "deliberately not written
+# here; ask the control plane for them". `imports.tf` was the one file that did
+# not honour that.
+#
+# WHY VARIABLES AND NOT SOMETHING CLEVERER. An import block's `id` must be known
+# at plan time, so it cannot be a resource attribute, a data source or an output.
+# Deleting the import blocks after the first apply was the other option and it was
+# rejected: they are inert while state is intact, and they are the RESCUE if state
+# is ever lost or rolled back. Without them a plan against empty state does not
+# error, it proposes CREATING A SECOND NEON PROJECT, which is the failure this
+# root repeats most often in its own comments.
+#
+# So the ids live in `terraform.tfvars`, which `.gitignore` already covers, next
+# to nothing else. The consequences, stated rather than discovered:
+#
+#   - `terraform plan` in this root REQUIRES that file. Without it the run fails
+#     with "No value for required variable", which is a safe failure: it stops,
+#     it names what is missing, and it cannot plan the wrong thing. That is
+#     already true of `backend.hcl`, so a fresh checkout gains no new obstacle.
+#   - `terraform validate` does NOT require it, so the credential-free CI path
+#     (`terraform init -backend=false && terraform validate`) is unaffected.
+#   - The values are always re-derivable from the control plane. The command is in
+#     terraform.tfvars.example, and it is the authority: an id written down by hand
+#     is an id that can be stale, and this root has already been repointed once.
+#
+# Each carries a shape validation so a truncated or transposed value fails at
+# variable-validation time rather than as an unhelpful "resource not found"
+# partway through an import.
+
+variable "main_branch_id" {
+  type        = string
+  description = "Id of the project's DEFAULT branch, used only to build the composite import ids for neon_database.main and neon_role.owner. Not written in any tracked file: read it from GET /projects/<project_id>/branches, where it is the branch with default true. Terraform's own view of it after adoption is the main_branch_id OUTPUT, which is derived from the project rather than from this variable."
+
+  validation {
+    condition     = can(regex("^br-[a-z]+-[a-z]+-[a-z0-9]{8,}$", var.main_branch_id))
+    error_message = "main_branch_id must look like a Neon branch id (br-word-word-suffix). Read it from GET /projects/<project_id>/branches rather than transcribing it."
+  }
+}
+
+variable "main_endpoint_id" {
+  type        = string
+  description = "Id of the read_write endpoint on the default branch, used only to build the import id for neon_endpoint.main. Read it from GET /projects/<project_id>/endpoints; it is the one whose branch_id is the default branch."
+
+  validation {
+    condition     = can(regex("^ep-[a-z]+-[a-z]+-[a-z0-9]{8,}$", var.main_endpoint_id))
+    error_message = "main_endpoint_id must look like a Neon endpoint id (ep-word-word-suffix). Read it from GET /projects/<project_id>/endpoints."
+  }
+}
+
+variable "staging_branch_id" {
+  type        = string
+  description = "Id of the EXISTING staging branch, used only to build the import id for neon_branch.staging. THIS IS THE ONE THAT MATTERS MOST: on the US project the staging branch was cut outside Terraform, so without this import the plan reads '1 to add' and applying it creates a SECOND branch named `staging` while the live one goes unmanaged. Neon does not require branch names to be unique. Read it from GET /projects/<project_id>/branches."
+
+  validation {
+    condition     = can(regex("^br-[a-z]+-[a-z]+-[a-z0-9]{8,}$", var.staging_branch_id))
+    error_message = "staging_branch_id must look like a Neon branch id (br-word-word-suffix). Read it from GET /projects/<project_id>/branches."
+  }
+}
+
+variable "staging_endpoint_id" {
+  type        = string
+  description = "Id of the EXISTING read_write endpoint on the staging branch, used only to build the import id for neon_endpoint.staging. Same trap as staging_branch_id: without it, an apply creates a second endpoint rather than adopting the live one. Read it from GET /projects/<project_id>/endpoints."
+
+  validation {
+    condition     = can(regex("^ep-[a-z]+-[a-z]+-[a-z0-9]{8,}$", var.staging_endpoint_id))
+    error_message = "staging_endpoint_id must look like a Neon endpoint id (ep-word-word-suffix). Read it from GET /projects/<project_id>/endpoints."
   }
 }
 
@@ -96,40 +232,107 @@ variable "default_branch_protected" {
     Mark the default branch (`main`, which serves production) protected. Live
     value is false.
 
-    LEFT FALSE DELIBERATELY. Protected branches are a paid-plan feature and this
-    organisation is on free_v3, so setting it true plans a change the API will
-    refuse. It is also in tension with the workflow this migration exists to
-    enable: protection blocks the branch from being reset from a parent, which
-    is exactly the operation a "restore staging from production" drill performs.
+    STILL FALSE, AND THE REASON IT IS FALSE HAS CHANGED. Do not re-read the old
+    justification as though it still stood.
 
-    Flip it on when the org moves to a paid plan AND the runbook's restore drill
-    has been rewritten to reset the staging branch rather than the default one.
+    WHAT THE OLD COMMENT SAID. Two reasons: protected branches are a paid-plan
+    feature and the org was on free_v3, so true would plan a change the API
+    refuses; and protection blocks a reset from a parent, which is the operation
+    the branching workflow exists to make cheap.
+
+    BOTH HAVE EXPIRED. The US project is on launch_v3, a paid plan, so this is
+    no longer a request the API would reject. And the restore drill already
+    refuses to touch the default branch on its own account
+    (infra/backup/restore-drill.sh reads `default` off GET /branches and dies if
+    the target is it), so protecting `main` would not take anything away from
+    it.
+
+    SO WHY IS IT STILL FALSE. Only because that is the live value, and this root
+    adopts rather than dictates. Turning it on is now a genuinely available
+    hardening step rather than a blocked one, and it is left for a change that
+    is about that and has an apply behind it, not smuggled into a migration.
+    Note it interacts with `allowed_ips`, whose API shape carries a
+    `protected_branches_only` flag.
   DESC
   default     = false
 }
 
 # --- compute sizing ----------------------------------------------------------
 #
-# Free plan: 100 CU-hours per project per month, autoscaling up to 2 CU, and
-# scale-to-zero after 5 minutes of inactivity which CANNOT be disabled. A 0.25
-# CU compute therefore runs for about 400 hours a month before the allowance is
-# gone, shared across every branch in the project.
+# THE PLAN CHANGED UNDER THIS SECTION AND EVERY NUMBER IN IT WAS FREE-PLAN
+# ARITHMETIC. Read the new figures before reusing the old reasoning.
+#
+# The EU project was on `free_v3`: 100 CU-hours per project per month, an
+# autoscaling ceiling of 2 CU, a 512 MiB branch size limit, 10 branches, and
+# scale-to-zero after 5 minutes that could not be disabled.
+#
+# The US project `cold-brook-02833828` is on `launch_v3`. Read back on
+# 2026-07-29: `branches_limit` 5000, `branch_logical_size_limit_bytes` 16 TiB,
+# and `default_endpoint_settings` of 0.25 to 8 CU with `suspend_timeout_seconds`
+# 0. Compute is no longer a fixed monthly allowance that simply stops; past the
+# included hours it is billed. That flips the shape of the risk from "staging
+# can exhaust production's allowance" to "staging can spend money", and the
+# control that expresses the second one is `var.quota` below, not an asymmetry
+# between two endpoint ceilings.
 
 variable "staging_min_cu" {
   type        = number
-  description = "Minimum compute units for the staging endpoint. 0.25 is the floor and the right value for an environment that only runs during a gate session."
+  description = "Minimum compute units for the staging endpoint. 0.25 is the floor, is the live value, and is the right value for an environment that is idle most of the month: the floor is what the compute costs while nothing is happening."
   default     = 0.25
 }
 
+# ---------------------------------------------------------------------------
+# THIS IS THE VALUE THAT MADE `terraform plan` PERMANENTLY DIRTY ON THIS ROOT.
+# ---------------------------------------------------------------------------
+#
+# WHAT WAS WRONG. The default was 1, and the live staging endpoint was 8. Plan
+# reported `autoscaling_limit_max_cu 8 -> 1` on every single run, on the EU
+# project before the cutover and on the US project after it. Nobody applied it,
+# because nobody believed it, which is the actual damage: a root whose plan is
+# never clean teaches everyone reading it to skip the plan. The README even
+# carried a banner saying the plan WAS clean while it was not.
+#
+# WHY THE OLD VALUE WAS 1. "Kept below the production ceiling on purpose:
+# staging burns the same shared 100 CU-hour allowance production does, and a
+# runaway load test on staging must not be able to spend production's compute
+# budget." Every clause of that is free_v3 arithmetic. There is no 100 CU-hour
+# allowance on launch_v3, and the 2 CU ceiling it was reasoning under is now 8.
+#
+# WHY 8 AND NOT SOMETHING SMALLER. Three reasons, in order of weight:
+#
+#   1. It is what the project's own `default_endpoint_settings` says (0.25 to 8),
+#      so it is what every endpoint created in this project gets. Declaring
+#      anything else here makes staging the odd one out by configuration rather
+#      than by decision.
+#   2. The MusicBrainz canonical load RUNS AGAINST THE STAGING BRANCH
+#      (infra/mb-loader/mb-canonical-load.sh, measured against staging on
+#      2026-07-29) and docs/runbooks/mb-canonical-data.md records that load
+#      succeeding on a project reporting "0.25 to 8 CU of compute autoscaling",
+#      streaming a 2.32 GB archive into roughly 10 GB resident. Clamping staging
+#      to 1 CU does not make that load fail, it makes it slow, and a load test
+#      bottlenecked on a deliberately undersized database produces numbers that
+#      mean nothing.
+#   3. Autoscaling max is a CEILING, not a reservation. Staging sits at the 0.25
+#      floor and scales to zero; raising the ceiling changes what an active
+#      minute may cost, not what an idle month does.
+#
+# WHAT WAS GIVEN UP, STATED PLAINLY RATHER THAN GLOSSED. The old value did
+# enforce "staging's ceiling is lower than production's". That invariant is gone:
+# production's endpoint adopts the same 0.25-8 and this one now matches it. It
+# could not have been kept - lowering staging breaks reason 2, and raising
+# production is not this file's decision - and it was never the right mechanism
+# anyway. A per-endpoint ceiling bounds one compute's peak; it does not bound
+# spend. `var.quota` is enforced server-side across the whole project and is
+# still null. That is the gap, it is named here, and it is named again there.
 variable "staging_max_cu" {
   type        = number
-  description = "Maximum compute units for the staging endpoint. Kept below the production ceiling on purpose: staging burns the same shared 100 CU-hour allowance production does, and a runaway load test on staging must not be able to spend production's compute budget."
-  default     = 1
+  description = "Maximum compute units for the staging endpoint. 8, matching the live endpoint and the project's own default_endpoint_settings. This is a CEILING on an endpoint that idles at the 0.25 floor and scales to zero, not a reservation. The former value of 1 was free_v3 arithmetic and was the source of a permanent plan diff; see the block above before lowering it."
+  default     = 8
 }
 
 variable "staging_suspend_timeout_seconds" {
   type        = number
-  description = "Inactivity before the staging compute suspends. 0 means 'use the platform default', which is 5 minutes and is not adjustable on the Free plan. Do not set -1 (never suspend) here: scale-to-zero cannot be disabled on Free, and it is the entire reason a standing staging branch is affordable."
+  description = "Inactivity before the staging compute suspends. 0 means 'use the platform default', which is 5 minutes, and is the live value. Do not set -1 (never suspend) here: scale-to-zero is the entire reason a standing staging branch is affordable, and on launch_v3 an unsuspendable idle compute is billed rather than merely eating an allowance."
   default     = 0
 }
 
@@ -203,6 +406,15 @@ variable "allowed_ips" {
     the environment roots) is the fix. It requires a Scale plan, so it is
     recorded in the runbook as a plan-upgrade prerequisite rather than left as
     an unexplained empty list.
+
+    THE 2026-07-29 PLAN CHANGE DOES NOT UNLOCK THIS, WHICH IS WORTH SAYING
+    BECAUSE OTHER PARAGRAPHS IN THIS FILE DID BECOME OBSOLETE. The US project
+    moved to launch_v3, which cleared the free_v3 blockers on branch count,
+    branch size, PITR window and protected branches. Neon lists IP Allow on
+    Scale and above, so launch_v3 is still below it and PULLFM-RISK-007 stands
+    unchanged. Not re-tested against this project: the live settings object
+    reports an empty `ips` list either way, so an empty list is not evidence
+    that the feature is available.
   DESC
   default     = []
 
@@ -233,9 +445,22 @@ variable "quota" {
     Neon does have one, it is enforced server-side, and it is declarable here.
 
     Null by default because the block is Optional+Computed in the provider, so
-    omitting it produces no diff against the adopted project. Set it in the same
-    change that moves the org off the Free plan, where a quota starts to mean
-    money rather than an allowance that simply stops.
+    omitting it produces no diff against the adopted project.
+
+    THE CONDITION THIS WAS WAITING FOR HAS ALREADY HAPPENED, AND IT IS STILL
+    NULL. The old note said "set it in the same change that moves the org off the
+    Free plan, where a quota starts to mean money rather than an allowance that
+    simply stops". The US project is on launch_v3. Compute past the included
+    hours is billed, so overspend is now money and not a stopped allowance, and
+    this is the only control in this repository that bounds it: it is enforced by
+    Neon, project-wide, and it is the mechanism `staging_max_cu` was wrongly
+    being asked to stand in for.
+
+    Left null rather than guessed at, because a quota that is exceeded SUSPENDS
+    EVERY ACTIVE COMPUTE IN THE PROJECT until the billing period rolls over,
+    which on the `main` branch means production is down. Picking that number is
+    the owner's call and it needs the plan's included-hours figure in front of
+    whoever picks it. It is a named gap, not an oversight.
   DESC
   default     = null
 }

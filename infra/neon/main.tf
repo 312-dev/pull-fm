@@ -1,10 +1,17 @@
 # Pull.fm - Neon serverless Postgres.
 #
-# This root ADOPTS an existing project rather than creating one. The project,
-# its default branch, its database, its owner role and its read-write endpoint
-# were all created in the Neon console on 2026-07-29 and are brought under
-# management by the import blocks in imports.tf. There must never be a second
-# Neon project; see that file for the identifiers and how they were verified.
+# This root ADOPTS an existing project rather than creating one, and as of
+# 2026-07-29 it adopts ALL SIX of its resources - it creates nothing. The project
+# `cold-brook-02833828` (`pull-fm-us`, aws-us-east-1), its default branch, its
+# database, its owner role, its staging branch and both read-write endpoints were
+# all created outside Terraform during the US cutover and are brought under
+# management by the import blocks in imports.tf. Read that file before touching
+# anything here: it explains why two of those imports are new, and what a
+# repointed apply does without them.
+#
+# There must never be a second Neon project. There was one for the length of the
+# cutover - the EU project `steep-frost-83698289` was kept as the rollback - and
+# it was deleted on 2026-07-29 once the US side was verified.
 #
 # BRANCH NAMING: `main` is the default branch and serves production. Every
 # environment branch is a child of `main`, named after its environment, so the
@@ -34,18 +41,31 @@ locals {
   #     }
   #     d.Set("host", host)
   #
-  # Verified against both at once on 2026-07-29. The API says
+  # Verified against both at once on 2026-07-29. The API said
   #
-  #     host       ep-super-wind-asbuczm7.c-4.eu-central-1.aws.neon.tech
-  #     proxy_host c-4.eu-central-1.aws.neon.tech
+  #     host       <endpoint-id>.<proxy-host>
+  #     proxy_host <proxy-host>
   #
-  # while Terraform state for the same endpoint says
+  # while Terraform state for the same endpoint said
   #
-  #     host       ep-super-wind-asbuczm7-pooler.c-4.eu-central-1.aws.neon.tech
+  #     host       <endpoint-id>-pooler.<proxy-host>
   #
   # So appending "-pooler" to `host` produced `-pooler-pooler`, a name that does
   # not resolve, and labelled the pooled host as the direct one. Both errors are
   # invisible at plan time and surface as a connection failure.
+  #
+  # THE REAL VALUES ARE NOT WRITTEN HERE, AND THEY USED TO BE. This comment
+  # carried the live endpoint id and proxy host of the staging compute, which is
+  # exactly what `tools/check-public-identifiers.mjs` exists to keep out of a
+  # public repository: the hostname is internet-reachable and the credential is
+  # the only network control on this plan. The shape of the bug is what the
+  # comment is for and the shape survives redaction. To see it on the live
+  # project, compare `terraform state show neon_endpoint.staging` against
+  # `GET /projects/<project_id>/endpoints`.
+  #
+  # Re-verified after the 2026-07-29 repoint to the US project: the derivation is
+  # unchanged, and both hostnames were confirmed to accept connections (pooled as
+  # pullfm_app, direct as neondb_owner) before the import.
   #
   # `id` and `proxy_host` do not have that problem. Neither is rewritten by the
   # provider, and neither changes meaning when pooling is toggled, so this is
@@ -229,19 +249,34 @@ resource "neon_endpoint" "main" {
   branch_id  = neon_project.pullfm.default_branch_id
   type       = "read_write"
 
-  # THE ONLY INTENTIONAL CHANGE TO THE ADOPTED PRODUCTION COMPUTE. The console
-  # created this endpoint with pooling off, so the pooled host resolves but
-  # refuses connections. Neon's pooler is PgBouncer in transaction mode running
-  # inside the Neon proxy, which is precisely the component this migration
-  # deletes from the Hetzner topology, so it has to be on for the pooled
-  # connection string to mean anything.
+  # THE ONLY INTENTIONAL CHANGE TO THE ADOPTED PRODUCTION COMPUTE. This endpoint
+  # was created outside Terraform with pooling off, on the EU project and again
+  # on the US one. Neon's pooler is PgBouncer in transaction mode running inside
+  # the Neon proxy, which is precisely the component this migration deletes from
+  # the Hetzner topology, so it has to be on for the pooled connection string to
+  # mean anything.
+  #
+  # ONE CLAIM THAT USED TO BE HERE WAS NOT TRUE AND IS WORTH CORRECTING RATHER
+  # THAN QUIETLY DROPPING. It said that with pooling off "the pooled host
+  # resolves but refuses connections". Measured against the US endpoints on
+  # 2026-07-29, with the API reporting pooler_enabled false on both, the
+  # `-pooler` hostname accepted a connection and reported the pooled-path role
+  # default (statement_timeout 30s as pullfm_app) while the direct hostname
+  # reported the owner's 15min. So the reported flag and the served behaviour had
+  # already diverged, which makes setting it true here a correction to what Neon
+  # REPORTS rather than a switch that turns the pooled path on. That distinction
+  # matters if this apply ever has to be judged as risky: nothing depends on the
+  # flag flipping.
   pooler_enabled = true
   pooler_mode    = "transaction"
 
   # Autoscaling limits and suspend timeout are deliberately absent: they are
-  # Optional+Computed, and the live values (0.25 to 2 CU, platform-default
-  # suspend) are the console's and are correct. Scale-to-zero after 5 minutes
-  # cannot be disabled on the Free plan in any case.
+  # Optional+Computed, and the live values are the project's own
+  # default_endpoint_settings, which on the US project are 0.25 to 8 CU with
+  # suspend_timeout_seconds 0 (the platform default, five minutes). Declaring
+  # them would mean this file had an opinion about production compute sizing that
+  # nobody has formed; adopting them means the project default is the single
+  # place that number lives.
 
   lifecycle {
     prevent_destroy = true
@@ -255,19 +290,33 @@ resource "neon_endpoint" "main" {
 # a Neon branch bills for the storage of its diff from the parent and for the
 # compute hours it actually serves, both of which round to nothing while it
 # sits idle. Destroying it to save money would be destroying it for no reason.
+#
+# THIS RESOURCE IS NOW IMPORTED AND NO LONGER CREATED BY TERRAFORM, AND THAT IS
+# NOT A COSMETIC DIFFERENCE. On the EU project the first apply cut this branch.
+# On the US project the branch already existed before this root ever pointed at
+# it: it was cut by hand during the cutover, migrated, and is what
+# api-staging.pull.fm serves from. There is an import block for it in imports.tf
+# for exactly that reason. If that block is ever deleted while the branch is
+# absent from state, this resource does not error - it cuts a SECOND branch
+# called `staging`, because Neon does not require branch names to be unique.
 
 resource "neon_branch" "staging" {
   project_id = neon_project.pullfm.id
   parent_id  = neon_project.pullfm.default_branch_id
   name       = var.staging_branch_name
 
-  # Explicitly unprotected. Protection is a paid-plan feature, and a protected
-  # staging branch could not be reset from production, which is the operation
-  # the whole branching workflow exists to make cheap.
+  # Explicitly unprotected, matching the live branch. Protection would prevent
+  # this branch being reset from production, which is the operation the whole
+  # branching workflow exists to make cheap. (The old note here also said
+  # protection was a paid-plan feature; the US project is on launch_v3, so that
+  # half no longer applies. See variables.tf on default_branch_protected.)
   protected = "no"
 
   # A branch inherits the roles that exist AT THE MOMENT IT IS CREATED, so the
-  # owner must be in state before the branch is cut.
+  # owner must be in state before the branch is cut. Retained after the move to
+  # an import because it is cheap and because it is still the correct ordering if
+  # this ever legitimately creates a branch again; it is not load-bearing while
+  # the branch is adopted.
   #
   # The same rule applies to the application role and Terraform cannot express
   # it, because that role is created by SQL after this apply (see the block
@@ -300,6 +349,15 @@ resource "neon_endpoint" "staging" {
   # lie is; see checks.tf. Re-plan after applying and require zero drift, which
   # is what Gate 0 already asks for, and verify against the API as the runbook's
   # post-apply step says.
+  #
+  # THE SAME THING IS TRUE OF AN ENDPOINT CREATED BY HAND, WHICH IS WHY THIS
+  # ATTRIBUTE WAS DRIFT AT THE MOMENT IT WAS IMPORTED. The live US staging
+  # endpoint was created outside Terraform during the cutover and the API reported
+  # pooler_enabled false on it too, so the first plan after the import showed
+  # false -> true here exactly as the first EU apply did.
+  # See the correction on neon_endpoint.main above: the `-pooler` hostname was
+  # already serving pooled connections while the flag read false, so this is a
+  # change to what Neon reports and not a change to what works.
   pooler_enabled = true
   pooler_mode    = "transaction"
 
