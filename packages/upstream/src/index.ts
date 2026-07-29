@@ -37,7 +37,6 @@ export * from "./itunes/client.js";
 export * from "./deezer/client.js";
 export * from "./reccobeats/client.js";
 export * from "./seatgeek/client.js";
-export * from "./seatgeek/bulk-performers.js";
 
 export * from "./events/types.js";
 export * from "./events/seatgeek-provider.js";

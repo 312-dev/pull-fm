@@ -32,6 +32,14 @@
  *
  * NO PRICES. `stats.lowest_price` / `stats.average_price` are unpopulated by
  * design; they are not parsed and must not be modelled.
+ *
+ * NO PERSONAL DATA (terms 4.4, verbatim): "the SeatGeek API is not intended for
+ * Personal Data, and you agree to not input or process Personal Data using the
+ * SeatGeek API." Every outbound parameter is therefore checked against an
+ * allow-list and every value against a coordinate/identifier pattern, and a
+ * violation throws before the request is built. An allow-list rather than a
+ * deny-list because the parameter that leaks a user is the one nobody thought
+ * to ban.
  */
 
 import { UpstreamError } from "../errors.js";
@@ -43,6 +51,7 @@ import {
   optRecord,
   optString,
 } from "../json.js";
+import type { ProviderAttribution } from "../events/types.js";
 import type { ProviderClientOptions } from "../provider-client.js";
 import { ProviderClient } from "../provider-client.js";
 import type { Provider, ProviderStatus } from "../types.js";
@@ -59,7 +68,28 @@ export const SEATGEEK_BASE_URL = "https://api.seatgeek.com/2";
 export const SEATGEEK_QUOTA = { limit: 60, windowMs: 60_000 } as const;
 export const SEATGEEK_MIN_INTERVAL_MS = 1000;
 
-export const SEATGEEK_ATTRIBUTION = "Event data provided by SeatGeek";
+/**
+ * Attribution required by terms 3.1.
+ *
+ * Verbatim: we "shall display SeatGeek attribution, in the form of the SeatGeek
+ * logo currently available at https://seatgeek.com/press" in every place their
+ * material is accessed, used, or displayed, and each instance must link to the
+ * SeatGeek homepage.
+ *
+ * This is a UI obligation that an API package cannot discharge on its own. What
+ * it can do is refuse to hand back a bare credit string that a frontend would
+ * reasonably render as text and consider done.
+ */
+export const SEATGEEK_ATTRIBUTION: ProviderAttribution = {
+  source: "seatgeek",
+  text: "SeatGeek",
+  logoRequired: true,
+  logoAssetPage: "https://seatgeek.com/press",
+  linkUrl: "https://seatgeek.com",
+  // Their Brand Guidelines permit proportional resizing without approval; any
+  // other modification (recolouring, cropping, effects) needs written consent.
+  logoModification: "proportional-resize-only",
+};
 
 /** SeatGeek's own scope statement: the US and Canada, other markets thinner. */
 export const SEATGEEK_PRIMARY_COVERAGE: readonly string[] = ["US", "CA"];
@@ -97,10 +127,10 @@ export interface SeatGeekEvent {
 export interface SeatGeekEventsQuery {
   readonly performerId?: number | undefined;
   readonly q?: string | undefined;
+  /** City NAME. There is no coordinate or postal-code option; see terms 4.4. */
   readonly city?: string | undefined;
   readonly state?: string | undefined;
   readonly country?: string | undefined;
-  readonly postalCode?: string | undefined;
   /** ISO 8601. Maps to datetime_utc.gte. Defaults to now at the call site. */
   readonly fromUtc?: string | undefined;
   readonly perPage?: number | undefined;
@@ -173,6 +203,82 @@ function itemsOf(payload: unknown, key: string): unknown[] {
   return arrayOrSingle(payload, key);
 }
 
+/**
+ * Every query parameter this client is permitted to send.
+ *
+ * Terms 4.4 forbid inputting Personal Data. An allow-list is the only version
+ * of this check that stays correct: a deny-list of `lat`, `lon`, `email`, and
+ * so on is a list of the leaks somebody already thought of.
+ */
+export const SEATGEEK_ALLOWED_PARAMS: ReadonlySet<string> = new Set([
+  "client_id",
+  "q",
+  "id",
+  "per_page",
+  "page",
+  "sort",
+  "type",
+  "performers.id",
+  "performers.slug",
+  "venue.city",
+  "venue.state",
+  "venue.country",
+  "taxonomies.id",
+  "datetime_utc.gte",
+  "datetime_utc.lte",
+]);
+
+/** A decimal coordinate: three or more fractional digits pins a person. */
+const COORDINATE_RE = /^-?\d{1,3}\.\d{3,}$/;
+const EMAIL_RE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
+/** US ZIP or ZIP+4, and the UK/CA shapes, in case one is ever passed through. */
+const POSTAL_RE = /^(?:\d{5}(?:-\d{4})?|[A-Z]\d[A-Z] ?\d[A-Z]\d)$/i;
+
+export class PersonalDataRejectedError extends Error {
+  public override readonly name = "PersonalDataRejectedError";
+  constructor(detail: string) {
+    super(
+      `refusing to send this to SeatGeek: ${detail}. Their terms 4.4 forbid inputting Personal Data; resolve a location to a city name before calling.`,
+    );
+  }
+}
+
+/**
+ * Rejects anything that would put Personal Data in a SeatGeek request.
+ *
+ * Throws rather than silently dropping the parameter: a dropped location
+ * quietly returns nationwide results, which looks like a ranking bug and would
+ * be debugged for an hour before anyone found the sanitiser.
+ */
+export function assertNoPersonalData(
+  params: Readonly<Record<string, string | number | undefined>>,
+): void {
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) continue;
+    if (!SEATGEEK_ALLOWED_PARAMS.has(key)) {
+      throw new PersonalDataRejectedError(
+        `parameter "${key}" is not on the allow-list`,
+      );
+    }
+    const asString = typeof value === "number" ? String(value) : value;
+    if (COORDINATE_RE.test(asString.trim())) {
+      throw new PersonalDataRejectedError(
+        `parameter "${key}" looks like a precise coordinate`,
+      );
+    }
+    if (EMAIL_RE.test(asString)) {
+      throw new PersonalDataRejectedError(
+        `parameter "${key}" looks like an email address`,
+      );
+    }
+    if (key.startsWith("venue.") && POSTAL_RE.test(asString.trim())) {
+      throw new PersonalDataRejectedError(
+        `parameter "${key}" looks like a postal code; use a city name instead`,
+      );
+    }
+  }
+}
+
 /** Distinguishes "no credential sent" from "credential rejected". */
 export function describeAuthFailure(payload: unknown): string | null {
   const code = optNumber(payload, "code");
@@ -221,6 +327,9 @@ export class SeatGeekClient implements Provider {
   #query(
     params: Readonly<Record<string, string | number | undefined>>,
   ): Record<string, string | number | undefined> {
+    // Checked before the credential is added, so a rejection message can never
+    // contain one.
+    assertNoPersonalData(params);
     return this.#clientIdQueryFallback === undefined
       ? { ...params }
       : { ...params, client_id: this.#clientIdQueryFallback };
@@ -287,9 +396,6 @@ export class SeatGeekClient implements Provider {
     if (query.city !== undefined) params["venue.city"] = query.city;
     if (query.state !== undefined) params["venue.state"] = query.state;
     if (query.country !== undefined) params["venue.country"] = query.country;
-    if (query.postalCode !== undefined) {
-      params["venue.postal_code"] = query.postalCode;
-    }
     // Past events are never useful to this product, and excluding them server
     // side keeps us far away from the 10,000-result cap.
     params["datetime_utc.gte"] = query.fromUtc ?? new Date().toISOString();

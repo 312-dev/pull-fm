@@ -7,9 +7,13 @@ import { describe, expect, it } from "vitest";
 import type { UpstreamError } from "../errors.js";
 import { FakeClock, FakeHttp } from "../testing/fake-http.js";
 import {
+  PersonalDataRejectedError,
+  SEATGEEK_ALLOWED_PARAMS,
+  SEATGEEK_ATTRIBUTION,
   SEATGEEK_BASE_URL,
   SEATGEEK_PRIMARY_COVERAGE,
   SeatGeekClient,
+  assertNoPersonalData,
   describeAuthFailure,
   parseEvent,
 } from "./client.js";
@@ -213,6 +217,129 @@ describe("SeatGeek vendored spec", () => {
     expect(
       Object.getOwnPropertyNames(Object.getPrototypeOf(client) as object),
     ).not.toContain("recommendations");
+  });
+});
+
+describe("SeatGeek personal data (terms 4.4)", () => {
+  it("sends no coordinate, postal code, or user identifier", async () => {
+    const http = new FakeHttp().enqueue({ body: { events: [] } });
+    await make(http).listEvents({
+      performerId: 8741,
+      city: "Chicago",
+      state: "IL",
+      country: "US",
+    });
+    const url = http.lastRequest?.url ?? "";
+    for (const forbidden of [
+      "lat=",
+      "lon=",
+      "latitude",
+      "longitude",
+      "geoip",
+      "postal_code",
+      "user_id",
+      "user=",
+      "email",
+      "ip=",
+    ]) {
+      expect(url).not.toContain(forbidden);
+    }
+    // Only a coarse place name leaves the process.
+    expect(url).toContain("venue.city=Chicago");
+  });
+
+  it("rejects a parameter that is not on the allow-list", () => {
+    expect(() => {
+      assertNoPersonalData({ lat: "41.8781", lon: "-87.6298" });
+    }).toThrow(PersonalDataRejectedError);
+    expect(() => {
+      assertNoPersonalData({ geoip: "203.0.113.7" });
+    }).toThrow(PersonalDataRejectedError);
+    expect(() => {
+      assertNoPersonalData({ user_id: "u_123" });
+    }).toThrow(PersonalDataRejectedError);
+  });
+
+  it("rejects a precise coordinate even under an allowed parameter name", () => {
+    // The leak that matters is the one smuggled through a legitimate field.
+    expect(() => {
+      assertNoPersonalData({ "venue.city": "41.8781" });
+    }).toThrow(/coordinate/);
+    expect(() => {
+      assertNoPersonalData({ q: "-87.62980" });
+    }).toThrow(/coordinate/);
+  });
+
+  it("rejects a postal code offered as a city", () => {
+    expect(() => {
+      assertNoPersonalData({ "venue.city": "60614" });
+    }).toThrow(/postal code/);
+  });
+
+  it("rejects an email address anywhere in the query", () => {
+    expect(() => {
+      assertNoPersonalData({ q: "fan@example.com" });
+    }).toThrow(/email/);
+  });
+
+  it("allows the ordinary coarse query unchanged", () => {
+    expect(() => {
+      assertNoPersonalData({
+        "performers.id": 8741,
+        "venue.city": "Chicago",
+        "venue.state": "IL",
+        "venue.country": "US",
+        per_page: 20,
+        "datetime_utc.gte": "2026-07-29T00:00:00.000Z",
+      });
+    }).not.toThrow();
+  });
+
+  it("keeps the credential out of a rejection message", () => {
+    const err = (() => {
+      try {
+        assertNoPersonalData({ lat: "41.8781" });
+        return null;
+      } catch (e: unknown) {
+        return e;
+      }
+    })();
+    expect(String(err)).not.toContain(CLIENT_ID);
+    expect(String(err)).not.toContain(CLIENT_SECRET);
+  });
+
+  it("has no postal-code or coordinate parameter on the allow-list at all", () => {
+    for (const banned of [
+      "venue.postal_code",
+      "postal_code",
+      "lat",
+      "lon",
+      "geoip",
+      "range",
+    ]) {
+      expect(SEATGEEK_ALLOWED_PARAMS.has(banned)).toBe(false);
+    }
+  });
+});
+
+describe("SeatGeek attribution (terms 3.1)", () => {
+  it("requires the logo, not a credit string", () => {
+    // "Event data provided by SeatGeek" does not satisfy 3.1.
+    expect(SEATGEEK_ATTRIBUTION.logoRequired).toBe(true);
+    expect(SEATGEEK_ATTRIBUTION.logoAssetPage).toBe(
+      "https://seatgeek.com/press",
+    );
+    expect(typeof SEATGEEK_ATTRIBUTION).not.toBe("string");
+  });
+
+  it("links every instance to the SeatGeek homepage", () => {
+    expect(SEATGEEK_ATTRIBUTION.linkUrl).toBe("https://seatgeek.com");
+  });
+
+  it("permits proportional resizing only", () => {
+    expect(SEATGEEK_ATTRIBUTION.logoModification).toBe(
+      "proportional-resize-only",
+    );
   });
 });
 

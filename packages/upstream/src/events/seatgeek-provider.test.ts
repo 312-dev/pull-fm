@@ -81,6 +81,62 @@ describe("sanitizeOutboundUrl (non-commercial: no affiliate parameters)", () => 
 });
 
 describe("SeatGeekEventsProvider", () => {
+  it("bounds the performer-id cache to a week (terms 7.13)", () => {
+    // Not a tuning knob: a cache long enough to be a local copy of their
+    // performer catalogue is what "systematic storage" means.
+    expect(PERFORMER_ID_TTL_SECONDS).toBeLessThanOrEqual(7 * 24 * 60 * 60);
+    expect(EVENTS_TTL_SECONDS).toBeLessThanOrEqual(24 * 60 * 60);
+  });
+
+  it("carries the logo attribution the terms require, not a credit string", async () => {
+    const http = new FakeHttp()
+      .enqueue(performersResponse())
+      .enqueue(eventsResponse());
+    const { provider } = build(http);
+    const result = await provider.findEventsForArtist({
+      artistMbid: MBID,
+      artistName: "Radiohead",
+      country: "US",
+    });
+
+    for (const attribution of [
+      result.attribution,
+      result.events[0]?.attribution,
+    ]) {
+      expect(attribution?.logoRequired).toBe(true);
+      expect(attribution?.logoAssetPage).toBe("https://seatgeek.com/press");
+      // Every rendered instance must link to their homepage, not the event.
+      expect(attribution?.linkUrl).toBe("https://seatgeek.com");
+    }
+  });
+
+  it("declares that this data may not be exposed to a crawler or a model", () => {
+    const http = new FakeHttp().enqueue(performersResponse());
+    const { provider } = build(http);
+    // Terms 7.13. Visible at the integration point so the token-API surface
+    // cannot include it by accident.
+    expect(provider.metadata.redistributionRestricted).toBe(true);
+  });
+
+  it("sends no personal data even when a caller supplies a location", async () => {
+    const http = new FakeHttp()
+      .enqueue(performersResponse())
+      .enqueue(eventsResponse());
+    const { provider } = build(http);
+    await provider.findEventsForArtist({
+      artistMbid: MBID,
+      artistName: "Radiohead",
+      city: "Chicago",
+      state: "IL",
+      country: "US",
+    });
+    for (const request of http.requests) {
+      expect(request.url).not.toMatch(
+        /lat=|lon=|latitude|longitude|geoip|postal_code|user_id|email/,
+      );
+    }
+  });
+
   it("resolves a performer id once, then queries by id", async () => {
     const http = new FakeHttp()
       .enqueue(performersResponse())

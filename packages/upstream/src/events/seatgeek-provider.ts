@@ -3,13 +3,16 @@
  *
  * TWO-LEVEL CACHE, and the split is the whole design:
  *
- *   performer:<mbid>          -> SeatGeek performer id, cached for 30 days
+ *   performer:<mbid>           -> SeatGeek performer id, cached for 7 days
  *   events:<performerId>:<geo> -> the event list, cached for 6 hours
  *
  * Name resolution is the expensive, unreliable half (slug guessing fails, `q`
  * search is fuzzy), and its answer almost never changes. Event lists change at
  * most daily. Caching them together would force a name resolution every time an
  * event list expired, which is exactly the cost the id cache exists to remove.
+ *
+ * Both TTLs are bounded by terms 7.13 (no systematic downloading or storage),
+ * not by how volatile the data is. See vendor-specs/seatgeek-api-terms.
  *
  * A resolution miss is a normal empty result, not an error: most artists in a
  * discovery feed are not on tour, and a plausible number are simply not in
@@ -36,9 +39,24 @@ import type {
 } from "./types.js";
 import { sanitizeOutboundUrl } from "./types.js";
 
-/** Performer ids are stable; only a catalogue merge would change one. */
-export const PERFORMER_ID_TTL_SECONDS = 30 * 24 * 60 * 60;
-/** Event data changes daily at most, so six hours is generous and cheap. */
+/**
+ * Performer ids are stable, but the TTL is set by their terms, not by how often
+ * the data changes.
+ *
+ * Terms 7.13 forbid systematically downloading and/or storing SeatGeek
+ * Materials. A cache long enough to amount to a local copy of their performer
+ * catalogue is what that clause is aimed at, so this is deliberately short of
+ * what the data would technically tolerate. DO NOT raise it as an
+ * "optimisation": the seven days is a compliance boundary, and the saving from
+ * a longer TTL is a handful of requests per artist per week.
+ */
+export const PERFORMER_ID_TTL_SECONDS = 7 * 24 * 60 * 60;
+/**
+ * Event data changes daily at most, so six hours is generous and cheap.
+ *
+ * Short enough to read as ordinary operational caching rather than the
+ * systematic storage terms 7.13 prohibits.
+ */
 export const EVENTS_TTL_SECONDS = 6 * 60 * 60;
 
 /**
@@ -94,7 +112,6 @@ function geoKey(q: EventsQuery): string {
     q.country?.toUpperCase() ?? "",
     q.state?.toUpperCase() ?? "",
     normalizeKey(q.city ?? ""),
-    q.postalCode ?? "",
   ].join("|");
 }
 
@@ -104,6 +121,9 @@ export class SeatGeekEventsProvider implements EventsProvider {
     primaryCoverage: SEATGEEK_PRIMARY_COVERAGE,
     attribution: SEATGEEK_ATTRIBUTION,
     pricingUnavailable: true,
+    // Terms 7.13: no exposure to a search engine, directory, or AI/ML system.
+    // Consumers must keep this data off any general-purpose token API surface.
+    redistributionRestricted: true,
   };
 
   readonly #client: SeatGeekClient;
@@ -115,11 +135,13 @@ export class SeatGeekEventsProvider implements EventsProvider {
   }
 
   /**
-   * MBID -> SeatGeek performer id, cached for 30 days.
+   * MBID -> SeatGeek performer id, cached for a week.
    *
    * Negative results are cached too (as 0). Without that, every artist not in
    * SeatGeek's catalogue costs a name search on every single feed render, which
-   * is most of the artists in a discovery feed.
+   * is most of the artists in a discovery feed. A cached zero also stores none
+   * of their material, which is the cheapest kind of cache to justify under
+   * terms 7.13.
    */
   async performerIdFor(
     artistMbid: string,
@@ -186,7 +208,6 @@ export class SeatGeekEventsProvider implements EventsProvider {
           city: query.city,
           state: query.state,
           country: query.country,
-          postalCode: query.postalCode,
           perPage: query.limit ?? 20,
         });
         // The raw vendor rows are cached, not our mapped shape, so a change to
