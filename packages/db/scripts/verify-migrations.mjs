@@ -190,6 +190,41 @@ try {
       expect: "upstream_cache_provider_chk",
     },
     {
+      // The magic-link-only decision, enforced in the schema rather than by
+      // memory. Widening this set is a migration and therefore a review; see
+      // apps/bff/src/routes/v1/auth.ts for why social and passkeys are
+      // deferred rather than merely unimplemented.
+      name: "an auth method other than magic_auth is rejected",
+      sql: `INSERT INTO users (workos_user_id, auth_method)
+            VALUES ('u_social', 'social')`,
+      expect: "users_auth_method_chk",
+    },
+    {
+      // With magic-link sign-in the address IS the thing a user proves control
+      // of, so two live rows sharing one would be two accounts one person can
+      // sign into and cannot tell apart.
+      //
+      // Both values are lowercase because 0001's users_email_lower CHECK
+      // already refuses anything else, so a mixed-case probe would be caught
+      // one constraint earlier and would prove nothing about this index. Case
+      // insensitivity is covered twice over: the column is citext and the
+      // stored form is forced to lowercase.
+      name: "two live accounts cannot share an email address",
+      sql: `INSERT INTO users (workos_user_id, email) VALUES ('u_dupe_a', 'dupe@example.com');
+            INSERT INTO users (workos_user_id, email) VALUES ('u_dupe_b', 'dupe@example.com')`,
+      expect: "users_active_email_idx",
+    },
+    {
+      // Erasure means gone, not tombstoned: a soft-deleted account must not
+      // block the same person signing up again.
+      name: "a soft-deleted account does not block reuse of its address",
+      sql: `INSERT INTO users (workos_user_id, email, deleted_at)
+              VALUES ('u_gone', 'reuse@example.com', now());
+            INSERT INTO users (workos_user_id, email)
+              VALUES ('u_fresh', 'reuse@example.com')`,
+      expect: null,
+    },
+    {
       name: "duplicate wishlist entry for the same recording is rejected",
       sql: `INSERT INTO users (workos_user_id) VALUES ('u_dup');
             INSERT INTO wishlist_items (user_id, artist_name, title, recording_mbid)
