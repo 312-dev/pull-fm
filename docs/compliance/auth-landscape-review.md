@@ -56,6 +56,38 @@ None of those reduces exposure. Several increase it materially.
 handled on its own terms rather than by rewriting working authentication code. See "What would have
 to be true for this to be wrong" below.
 
+### The strongest case against this recommendation
+
+One of the two independent research passes reached the opposite conclusion about the incumbent, and
+it deserves to be stated in its own terms rather than paraphrased away. Its argument: WorkOS is
+US-only per its own DPA, offers no credential export path, is B2B-positioned so we are a non-customer
+they tolerate rather than serve, and is **the only vendor here with a CVE against the hosted login
+service itself** (CVE-2025-23017, an MFA bypass by enrolling a new factor). On that reading, $0 is
+the only axis WorkOS wins.
+
+Three of those four are true. Here is why they still do not flip the recommendation, and where the
+argument does land:
+
+- **The export objection does not apply to us.** It is the strongest general-purpose criticism of
+  WorkOS and it is nearly irrelevant here, because `PLAN.md` section 4 already decided we issue no
+  passwords. There are no hashes to hold hostage. The same pass applied "largely moot for a
+  passwordless app" to other vendors and then scored WorkOS down for it; that is inconsistent, and
+  the consistent reading is that credential export is a non-criterion for this project.
+- **The service CVE cuts the other way.** CVE-2025-23017 was found, patched by the vendor on
+  2025-01-07 and disclosed with a no-exploitation finding, and **we would have done nothing**. That
+  is the hosted model working. Compare the alternative: 31 advisories in Better Auth, each of which
+  is our pager.
+- **The B2B-positioning point is real but is a continuity risk, not an exposure risk**, and it is
+  already mitigated by M23 plus the no-password decision, and made less likely by a $100M Series C at
+  a $2B valuation.
+- **The residency point is correct and is the one that lands.** It is why this document gives it top
+  billing as the single genuine reason to move, and why Descope is second on the shortlist rather
+  than absent.
+
+The honest summary: the case against WorkOS is a good case, and it is a case about **compliance
+posture**, not about blast radius. The criterion given was minimise exposure and risk. On exposure,
+WorkOS still wins, because it holds nothing of ours and cannot reach the vault.
+
 ### Ranked shortlist
 
 | #     | Option                       | Isolation                                   | Users in our DB                           | Cost @10k / @50k MAU                                                                         | EU                | Verdict                                       |
@@ -331,7 +363,7 @@ this review can match "somebody else is paid to pentest this annually".
 | ----------------- | ------- | ----------------- | ----------------- | ------------- | ----------------------------------- | ------------------------ | ------------- | ----------------------------------- |
 | **WorkOS**        | $0      | **$0**            | 1M MAU            | B2B           | **No (US only, per DPA)**           | Yes                      | $99/mo        | 8, one in the service               |
 | **Clerk**         | $0      | **$0**            | 50k MRU           | Hedged        | **No**                              | Yes                      | Free          | **6, two Critical, 5 in 13 months** |
-| **Stytch**        | $0      | not published     | 10k MAU           | B2B / agents  | **No (US only)**                    | Yes                      | $99           | **0**                               |
+| **Stytch**        | $0      | not published     | 10k MAU           | B2B / agents  | **No (US only)**                    | Yes                      | $99           | **0** (now Twilio)                  |
 | **Kinde**         | $0      | $716/mo           | 10,500 MAU        | Dev/SaaS      | **Yes (Dublin), free**              | **No, OTP only**         | Free          | **0**                               |
 | **Descope**       | $249/mo | $2,049/mo         | 7,500 MAU         | **Yes, both** | **Yes (Frankfurt), Growth $799**    | **Yes + Enchanted Link** | $249/mo       | **0**                               |
 | **Auth0**         | $0      | **not published** | **25k MAU**       | Yes           | Yes (EU, sub-region not selectable) | Yes                      | **Free**      | Many, session/CDN class             |
@@ -387,6 +419,19 @@ cuts in Auth0's favour:
 > summary is that Okta's **support plane** has been breached three times while the Auth0 identity plane
 > has not, and that Okta is the most phished identity brand on the internet.
 
+**Stytch is no longer independent, and that changes its risk profile.** Twilio announced the
+acquisition on 2025-10-30 and completed it on 2025-11-14. Stytch's own wording is
+
+> **VERBATIM** (https://changelog.stytch.com/announcements/2025-11-14-a-new-chapter-begins-stytch-joins-twilio)
+> "No immediate changes to your contracts, pricing, SDKs, API keys, or integrations"
+
+Note "immediate". Stytch's security policy URL now 307-redirects to Twilio legal pages, so the
+integration is already load-bearing. Two consequences. In its favour, Stytch inherits **the only
+verified public bug bounty in this survey**: Twilio runs one through HackerOne, alongside SOC 2 Type
+2 and ISO 27001/27017/27018. Against it, a free 10,000-MAU consumer tier sitting inside Twilio is a
+plausible future casualty, and Stytch's per-MAU rate above 10,000 is **not published**, so the cost
+of being wrong cannot be modelled in advance. Stytch fails the residency test anyway.
+
 **Clerk deserves one specific warning.** Its billing unit is the most generous here (50,000 free
 monthly retained users, and signups who never return are free), and custom domain is free on all
 tiers. But it has **five CVEs in thirteen months, two of them Critical**, and the classes are
@@ -394,7 +439,27 @@ middleware route-protection bypass, authorisation bypass on role and permission 
 `Clerk-Secret-Key`, OAuth bypass via OTP manipulation, and IDOR in `auth()`. Those are auth-bypass
 classes, not information leaks. For a solo operator with no on-call, that is a patching treadmill in
 a hosted vendor's SDKs, which is the worst of both models. It is also US-only, so it fails the
-residency test anyway.
+residency test anyway. Clerk is unusually straight about its own limits, which is worth crediting
+even while declining it:
+
+> **VERBATIM** (https://clerk.com/articles/clerk-security-how-we-protect-your-users)
+> "Clerk is not ISO 27001 certified. Its infrastructure providers, Google Cloud and Cloudflare, are"
+
+> **VERBATIM** (same page)
+> "Clerk does not run a paid bug-bounty program."
+
+**Exit paths differ far more than the marketing does.** Kinde offers self-service export of
+`users.ndjson` including hashed passwords and hash parameters, AES-256 encrypted, owner-approved, at
+no cost and with no support ticket. Clerk offers a dashboard CSV including `password_digest` and
+`password_hasher`. Stytch and Descope release hashes only via a support ticket. Auth0 requires a
+ticket **and blocks the operation entirely on the Free plan**. Cognito documents hash _import_ in
+detail and has **no documented hash export** at all. WorkOS states plainly that it does not export
+hashes while shipping first-party importers that ingest them from competitors.
+
+For Pull.fm this ordering is **almost entirely moot**, because `docs/PLAN.md` section 4 already
+resolved never to issue a password, so there are no hashes to export from anywhere. It is recorded
+because it is the single best predictor of how a vendor behaves when you try to leave, and because it
+would matter immediately if the no-password decision were ever revisited.
 
 **One cross-cutting recommendation regardless of vendor.** Descope ("Outbound Apps") and Kinde
 ("Connected Apps") both offer to store users' third-party OAuth tokens in the IdP's own vault. **Do
@@ -1191,8 +1256,10 @@ Claims that remain **unverified** and are flagged as such in the text: WorkOS IS
 (trust centre is JS-only); Stytch's per-MAU overage above 10k (not published); **Auth0's price at
 50,000 MAU** (self-serve tiers stop at 30,000); **Descope's SOC 2 / ISO 27001 / CSA STAR / PCI DSS**
 (trust centre 403, several security URLs 404; only FedRAMP High was confirmable); Descope's Pro-tier
-MAU inclusion (their own page contradicts itself, 10,000 vs 7,500) and its sub-processor list (no
-public page); Kinde's SOC 2 report tier (pricing table and compliance doc disagree) and its overage
+MAU inclusion and its sub-processor list (no public page); **whether Descope's EU region is actually
+plan-gated** (the docs say Growth-and-above, the pricing page lists multi-region as included across
+tiers, and the two flatly contradict each other, so get it in writing); Kinde's SOC 2 report tier
+(pricing table and compliance doc disagree) and its overage
 arithmetic (the on-page calculator disagrees with the stated 10,500 allowance); PropelAuth's data
 location, export path and company history; whether Neon backported the Better Auth fix without moving
 its version string; Firebase's per-MAU bands above 50k and whether its auth regionalisation preview
