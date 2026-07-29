@@ -69,9 +69,9 @@ GET /v1/config	none	-	Reads the in-memory provider status snapshot (services/ups
 # It is not in docs/UPSTREAM-TERMS.md and has no per-IP request ceiling we can
 # breach. Every one of these is `x-pullfm-dast: exclude` anyway, so none reaches
 # the scanner; classified here only because the register must be total.
-POST /v1/auth/start	none	workos	Calls WorkOS magic-auth. Not a metered music provider. Already dast:exclude.
-POST /v1/auth/verify	none	workos	As above.
-GET /v1/auth/callback	none	workos	As above.
+POST /v1/auth/start	none	workos	Calls WorkOS magic-auth. Not a metered music provider. Already dast:exclude. The call is now additionally gated by the EEA/UK/CH registration refusal (lib/registration-geo.ts), which runs at onRequest, so a refused region produces zero egress rather than a created directory record.
+POST /v1/auth/verify	none	workos	As above, and behind the same registration-region gate.
+GET /v1/auth/callback	none	workos	As above, and behind the same registration-region gate.
 POST /v1/auth/refresh	none	workos	As above.
 POST /v1/auth/logout	none	workos	As above.
 

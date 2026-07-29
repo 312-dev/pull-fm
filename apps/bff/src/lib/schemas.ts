@@ -67,6 +67,7 @@ const PROBLEM_DESCRIPTIONS: Record<number, string> = {
   409: "Conflicting state, or an Idempotency-Key reused with a different body.",
   422: "The request was understood but its contents are not acceptable.",
   429: "Rate limited. Retry after the interval in the Retry-After header.",
+  451: "Pull.fm is not offered in the caller's region. Retrying will not help, and no credential changes the answer.",
   501: "Not implemented on this deployment.",
   503: "A dependency is unavailable, or the service is in maintenance.",
 };

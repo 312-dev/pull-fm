@@ -112,6 +112,40 @@ export const errors = {
     new ApiError(429, "rate-limited", "Too Many Requests", detail),
 
   /**
+   * The service is not offered in the caller's region.
+   *
+   * 451 RATHER THAN 403, AND THE CHOICE IS ARGUED RATHER THAN INHERITED.
+   * RFC 7725 defines 451 for a refusal that is a legal position rather than an
+   * access-control outcome, which is exactly what this is: nothing is wrong
+   * with the caller's credential, there is nothing they could present that
+   * would work, and a retry is pointless. 403 says "you are not permitted",
+   * which a client reasonably answers by sending a credential, and 404 would be
+   * a lie about a route that plainly exists. A distinct code also lets a client
+   * render the real explanation instead of bouncing the user around a sign-in
+   * loop forever.
+   *
+   * THE MESSAGE IS DELIBERATELY UNINFORMATIVE ABOUT MECHANISM. It says the
+   * service is not offered where the caller is; it does not say what we think
+   * their country is, that a header was consulted, or which branch of
+   * lib/registration-geo.ts produced the answer. An unavailable region, an
+   * undetermined one, and a request that did not arrive through the edge all
+   * return this identical body, so the refusal cannot be used as an oracle for
+   * probing the control.
+   *
+   * It is also not hostile. The person on the other end has done nothing wrong,
+   * and a refusal that reads as an accusation is both unpleasant and a support
+   * ticket.
+   */
+  regionUnavailable: () =>
+    new ApiError(
+      451,
+      "region-unavailable",
+      "Unavailable For Legal Reasons",
+      "Pull.fm is not offered in your region, so this request was not carried out. " +
+        "No message was sent and no account was created.",
+    ),
+
+  /**
    * A required upstream is unavailable or the circuit breaker is open.
    *
    * Distinct from a generic 500 so clients can retry sensibly and so

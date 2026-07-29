@@ -54,12 +54,74 @@
  * Everything downstream is identical: the cookie is opened at the edge of
  * plugins/auth.ts and the access token inside it goes through the same JWKS
  * verification a bearer token does. See lib/session-cookie.ts.
+ *
+ * ---------------------------------------------------------------------------
+ * THE EEA / UK / SWITZERLAND REFUSAL LIVES ON THIS FILE'S ROUTES AND NOWHERE
+ * ELSE
+ *
+ * Pull.fm does not open accounts for people in the EEA, the United Kingdom or
+ * Switzerland (lib/registration-geo.ts carries the list and the whole argument
+ * about how the country is established). Three things about WHERE that is
+ * enforced are decisions rather than convenience, and all three were nearly
+ * wrong:
+ *
+ *   1. IT IS THE SIGN-IN SURFACE, NOT ALL TRAFFIC. The obligation attaches to
+ *      holding a person's personal data, and the account is where that
+ *      relationship forms. A catalogue read is not a data relationship, and
+ *      refusing every request would be a different product decision that
+ *      nobody made.
+ *
+ *   2. IT RUNS BEFORE THE IDENTITY PROVIDER IS CALLED, AND THAT IS THE WHOLE
+ *      POINT ON `/auth/start`. Read the block below this one: that route
+ *      CREATES A WORKOS USER for any address handed to it, verified against
+ *      the live API. A refusal that ran after the provider call - or only at
+ *      `/auth/verify` - would leave a personal-data record, at a processor, for
+ *      a person we just told we will not serve. That is an ORPHAN IDENTITY: a
+ *      record of somebody we refused, held by us, which is the precise outcome
+ *      this posture exists to avoid, and it would be worse than not blocking at
+ *      all because it would be invisible. The hook is `onRequest`, so it runs
+ *      before body parsing, before the send budgets and before one byte reaches
+ *      WorkOS.
+ *
+ *   3. IT IS ON `/auth/verify` AND `/auth/callback` TOO, not just `/auth/start`.
+ *      `establish()` is what writes the local `users` row, and both of those
+ *      routes call it. Blocking only the first step would refuse the code and
+ *      then happily complete registration for anyone who obtained a code from
+ *      somewhere else, which makes the control decorative.
+ *
+ * WHAT IS DELIBERATELY NOT BLOCKED, because refusing it would harm an existing
+ * user rather than prevent a new relationship:
+ *
+ *   `/auth/logout`   Refusing a revocation traps a live session open. A logout
+ *                    must work from anywhere, always.
+ *   `/auth/refresh`  An account that already exists keeps working. Nobody is
+ *                    deleted, disabled, or locked out by this change; the
+ *                    refusal is about forming a NEW relationship. An existing
+ *                    user travelling in a listed country keeps their session,
+ *                    their personal API tokens and every other route.
+ *
+ * Be honest about the residual: an existing user in a listed country who lets
+ * their refresh token lapse cannot obtain a fresh magic link, because
+ * `/auth/start` cannot tell them apart from a new registration without asking
+ * the database whether the address has an account - and answering differently
+ * for an address that exists is exactly the enumeration oracle that route
+ * spends thirty lines refusing to be. The oracle is the worse of the two, so
+ * the residual stands and is written down here rather than discovered later.
  */
 
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type {
+  FastifyInstance,
+  FastifyReply,
+  FastifyRequest,
+  onRequestHookHandler,
+} from "fastify";
 
 import { errors } from "../../lib/errors.js";
 import { annotate } from "../../lib/openapi.js";
+import {
+  COUNTRY_HEADER,
+  decideRegistrationGeo,
+} from "../../lib/registration-geo.js";
 import { problemResponses } from "../../lib/schemas.js";
 import {
   clearSessionCookie,
@@ -116,6 +178,65 @@ export function registerAuthRoutes(
   services: Services,
 ): void {
   const cfg = services.cfg;
+
+  /**
+   * Refuses account formation from the EEA, the UK and Switzerland.
+   *
+   * `onRequest`, so the refusal precedes body parsing, the send budgets and any
+   * call to WorkOS. See the header of this file for why it is attached to these
+   * three routes and not to the others, and lib/registration-geo.ts for how the
+   * country is established and why an unverifiable peer fails closed.
+   *
+   * DEPLOY_ENV IS THE SWITCH, NOT AN ENVIRONMENT VARIABLE OF ITS OWN. `local`
+   * is the only deployment with no Cloudflare edge and no origin nginx in front
+   * of it, so it is the only one where a missing country header is the expected
+   * state rather than the control being broken. Deriving the posture from a
+   * value that already describes the deployment means there is no separate knob
+   * that can be set to `false` in production by mistake, and no way for staging
+   * and production to disagree with each other.
+   *
+   * NOTHING IS WRITTEN TO THE AUDIT TRAIL HERE, ON PURPOSE. A refusal row would
+   * carry `ip`, which is personal data about a person whose personal data we
+   * just declined to hold; lib/audit.ts already makes that argument twice, for
+   * the magic-auth rows and for the directory reaper. A counter records that
+   * refusals happened and in what volume, which is what an operator needs, and
+   * it identifies nobody.
+   */
+  const refuseRestrictedRegion: onRequestHookHandler = (
+    request,
+    _reply,
+    done,
+  ) => {
+    const decision = decideRegistrationGeo({
+      // The SOCKET peer, never `request.ip`. `trustProxy` is on, so `request.ip`
+      // is a header value and a header is what this check exists to distrust.
+      peerAddress: request.socket.remoteAddress,
+      countryHeader: request.headers[COUNTRY_HEADER],
+      enforced: cfg.DEPLOY_ENV !== "local",
+    });
+
+    if (decision.allowed) {
+      done();
+      return;
+    }
+
+    // The `country` label is bounded, which is the only reason it is allowed to
+    // exist: `decideRegistrationGeo` returns null unless the value matched
+    // /^[A-Z]{2}$/, so the label space is the 676 possible two-letter codes and
+    // not "whatever the caller sent". An unbounded label here would be the
+    // metrics-endpoint-becomes-the-outage failure the onResponse hook in
+    // server.ts already warns about, driven by a header a client controls.
+    services.metrics.counter(
+      "pullfm_registration_region_refusals_total",
+      "Sign-in attempts refused because Pull.fm is not offered in the caller's region.",
+      { reason: decision.reason, country: decision.country ?? "none" },
+    );
+
+    // Thrown rather than sent, so the central error handler produces the same
+    // problem+json shape, with the request id in `instance`, that every other
+    // refusal in this API produces.
+    done(errors.regionUnavailable());
+  };
 
   /** Seals a session into the cookie and attaches it to the reply. */
   function attachSessionCookie(
@@ -249,11 +370,12 @@ export function registerAuthRoutes(
   app.post(
     "/auth/start",
     {
+      onRequest: refuseRestrictedRegion,
       schema: {
         operationId: "authStart",
         summary: "Request a magic-link sign-in code",
         description:
-          "Sends a one-time code to the address. Step one of two; exchange the code at POST /v1/auth/verify. The response is identical whether or not the address has an account, so it cannot be used to find out. Rate limited; a 429 carries Retry-After. An address that is sent a code and never verified leaves no account behind.",
+          "Sends a one-time code to the address. Step one of two; exchange the code at POST /v1/auth/verify. The response is identical whether or not the address has an account, so it cannot be used to find out. Rate limited; a 429 carries Retry-After. An address that is sent a code and never verified leaves no account behind. Pull.fm is offered in the United States; a request from a region where it is not offered is refused with 451 before anything is sent.",
         tags: ["auth"],
         body: {
           type: "object",
@@ -278,7 +400,7 @@ export function registerAuthRoutes(
             },
             required: ["status", "expiresInSeconds", "message"],
           },
-          ...problemResponses(400, 429, 503),
+          ...problemResponses(400, 429, 451, 503),
         },
         ...annotate({ authz: "public", dast: "exclude" }),
       },
@@ -324,11 +446,15 @@ export function registerAuthRoutes(
   app.post(
     "/auth/verify",
     {
+      // Both steps, not just the first. `establish()` below writes the local
+      // `users` row, so a block that stopped at `/auth/start` would still let a
+      // code obtained elsewhere complete a registration from a refused region.
+      onRequest: refuseRestrictedRegion,
       schema: {
         operationId: "authVerify",
         summary: "Exchange a magic-link code for a session",
         description:
-          "Step two of two. On success the response carries the session in the transport you asked for. Every rejected code returns the same 401 with the same body, so a failure says nothing about which part was wrong. Attempts are rate limited; a 429 carries Retry-After. Choose `cookie` for a browser client: the tokens are then sealed into an HttpOnly cookie and never appear in the response body at all.",
+          "Step two of two. On success the response carries the session in the transport you asked for. Every rejected code returns the same 401 with the same body, so a failure says nothing about which part was wrong. Attempts are rate limited; a 429 carries Retry-After. Choose `cookie` for a browser client: the tokens are then sealed into an HttpOnly cookie and never appear in the response body at all. Refused with 451 from a region where Pull.fm is not offered.",
         tags: ["auth"],
         body: {
           type: "object",
@@ -353,7 +479,7 @@ export function registerAuthRoutes(
         },
         response: {
           200: sessionResponse,
-          ...problemResponses(400, 401, 429, 503),
+          ...problemResponses(400, 401, 429, 451, 503),
         },
         ...annotate({ authz: "public", dast: "exclude" }),
       },
@@ -406,6 +532,10 @@ export function registerAuthRoutes(
   app.get(
     "/auth/callback",
     {
+      // Also calls `establish()`, so it is also a way to end up with an account.
+      // A deployment that turns the hosted flow on must not acquire a second,
+      // unguarded registration path by doing so.
+      onRequest: refuseRestrictedRegion,
       schema: {
         operationId: "authCallback",
         summary: "INTERNAL. Hosted-redirect sign-in callback",
@@ -424,7 +554,7 @@ export function registerAuthRoutes(
         },
         response: {
           200: sessionResponse,
-          ...problemResponses(401, 429, 503),
+          ...problemResponses(401, 429, 451, 503),
         },
         ...annotate({ authz: "public", dast: "exclude" }),
       },
