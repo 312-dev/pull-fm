@@ -12,13 +12,20 @@ result.
 Each entry states what was decided, what was rejected, why, and **what it costs**, because a decision
 record with no downside in it is advocacy rather than a record.
 
-| ID       | Decision                                                                 | Status                                 |
-| -------- | ------------------------------------------------------------------------ | -------------------------------------- |
-| `SD-001` | Alerting runs on its own credential, not on the operator's personal ntfy | Decided. Production channel still open |
+| ID       | Decision                                                                  | Status                                                        |
+| -------- | ------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `SD-001` | Alerting runs on its own credential, not on the operator's personal ntfy  | **Superseded by `SD-002`.** Its premise was measurably wrong  |
+| `SD-002` | Alerting runs on a write-only ntfy credential scoped to `pullfm-staging*` | Decided and implemented. Verified by attempting to violate it |
 
 ---
 
 ## `SD-001` The alerting boundary is the credential, not the topic
+
+> **SUPERSEDED on 2026-07-29 by [`SD-002`](#sd-002-the-alerting-credential-is-write-only-and-scoped-to-pullfm-staging).
+> The principle in the title is right and survives. The arrangement it chose does not: it was
+> measured on the node and it does not have a credential at all.** Left in place unedited, because
+> the reasoning below is exactly the reasoning that produced the gap and deleting it would destroy
+> the evidence. Read `SD-002` for what is true now.
 
 **Decided:** 2026-07-29
 **Owner:** `ope@312.dev`
@@ -116,3 +123,133 @@ it, plus the file modes, the `--check` behaviour that prints the endpoint host w
 path, and the installer. This entry exists because the decision is a **trust-boundary** decision and
 belongs where the trust boundaries are recorded, not only where the shell scripts are. If the two
 ever disagree, the scripts are the fact and this entry is wrong.
+
+---
+
+## `SD-002` The alerting credential is write-only and scoped to `pullfm-staging*`
+
+**Decided:** 2026-07-29
+**Owner:** `ope@312.dev`
+**Applies to:** every environment that can send an alert
+**Supersedes:** [`SD-001`](#sd-001-the-alerting-boundary-is-the-credential-not-the-topic)
+
+### What `SD-001` got wrong, and how that was found
+
+`SD-001` reasoned about which credential to put on a Pull.fm node, rejected the operator's `alerter`
+token as too broad, and chose anonymous `ntfy.sh` with a 96-bit topic name instead. Its closing
+claim is that the credential boundary was fixed and only the confidentiality of the stream was left
+open.
+
+**That is backwards, and it was established by probing rather than by reading.** From the staging
+node, on 2026-07-29, with the endpoint exactly as deployed:
+
+| Attempted from the Pull.fm node, unauthenticated                    | Result                                     |
+| ------------------------------------------------------------------- | ------------------------------------------ |
+| Read a topic the node had never been given                          | **200**, the message came back             |
+| Read the personal fleet's `box-stack-...` backup and health channel | **200**, and the `/sse` stream stayed open |
+| Publish to a topic name invented on the spot                        | **200**                                    |
+
+So the arrangement `SD-001` chose does not have a narrow credential. **It has no credential.** On
+`ntfy.sh` an unauthenticated client may read and write every topic on the instance, which makes
+anonymous access **strictly broader than the `alerter` token that `SD-001` rejected**: `alerter` is
+write-only on three topics, anonymous is read-write on all of them.
+
+And the instance is not Pull.fm's own. `hetzner/box-stack/NTFY_ALERT_URL` records that the personal
+fleet's restic-failure alerts and its five-minute health watchdog publish to `ntfy.sh` as well,
+confirmed on the box. **Pull.fm and the personal fleet were already sharing an alerting instance,
+and that instance has no access control in either direction.** The document that exists to prevent
+that coupling had created it.
+
+The failure mode is worth naming because it will recur: **absence of a credential reads as safety.**
+"There is no token on the node to steal" sounds like the strongest possible answer to "what can a
+stolen token do", right up to the moment somebody asks what an unauthenticated client is permitted
+to do, which nobody had.
+
+### What was decided
+
+Staging alerting moves to the operator's **self-hosted** ntfy at `https://ntfy.graysons.network`,
+which already runs `auth-default-access: deny-all`, with:
+
+- a **dedicated ntfy user**, `pullfm-staging`, that is not `alerter` and never becomes it;
+- **one access rule**: `write-only` on `pullfm-staging*`, and nothing else, anywhere;
+- a **bearer token** issued to that user alone, stored as `pull-fm/staging/ALERT_NTFY_TOKEN` and
+  delivered to the node by `install-alert-env.sh`, which already read that item and needed no change.
+
+**The scope is per environment, not `pullfm-*` as `SD-001` proposed.** `pullfm-*` would let a
+compromised staging node publish forgeries into the production alert topic, which is the same
+bury-the-real-alert attack `SD-001` was written about, merely relocated inside Pull.fm. Production
+gets its own user and its own `pullfm-prod*` rule; the two never share a token. The cost of the
+tighter rule is one extra line on the ntfy server per environment.
+
+### The verification, because a least-privilege claim nobody has attacked is an assumption
+
+Run from the staging node, sourcing the credential from the **deployed** `/etc/pullfm/alert.env`
+rather than from a copy:
+
+| Attempt                                                                  | Required | Got     |
+| ------------------------------------------------------------------------ | -------- | ------- |
+| Read `pullfm-staging` (its own topic - write-only must be literal)       | refused  | **403** |
+| Read `security-critical`, `security-warn`, `security-info`               | refused  | **403** |
+| Publish to `security-critical`, `security-warn`, `security-info`         | refused  | **403** |
+| Publish to the personal fleet's `box-stack-...` topic                    | refused  | **403** |
+| Publish to `pullfm-prod`                                                 | refused  | **403** |
+| Publish to `pullfm`, `pullfmevil`, `notpullfm-staging` (prefix boundary) | refused  | **403** |
+| `GET` and `DELETE /v1/users`                                             | refused  | **401** |
+| Publish to `pullfm-staging`                                              | allowed  | **200** |
+
+Delivery was then proven rather than assumed: `pullfm-alert` exited **0**, its spool line records
+`"delivered":true,"delivery":"ntfy"`, the message was **read back off the server with a different,
+admin credential**, and `pullfm-job-alert` - which reads `alert.env` itself rather than going through
+`pullfm-alert` - was fired separately and also arrived. A publish returning 200 is an acknowledgement,
+not evidence that anything is on the topic, which is why the read-back is a separate credential.
+
+One honest detail: **`write-only` is not literally true**. The token can read exactly one topic, the
+per-account `st_...` sync topic ntfy issues to every user, which nothing else publishes to. Checked in
+both directions: the token reads its own and is refused `403` on `alerter`'s and on an invented
+`st_...` name.
+
+### What this costs, stated rather than implied
+
+- **`SD-001` was right that `ntfy.sh` needs nobody's infrastructure to be up, and that property is
+  now gone.** Pull.fm's only notification path depends on the personal box, its Cloudflare tunnel and
+  one container. A box outage and a Pull.fm outage look identical from outside, and the second is
+  exactly when the first is least likely to be noticed. Undelivered is at least a recorded fact:
+  `pullfm-alert` journals, spools `delivered:false`, and exits 4.
+- **Thirty days of alert bodies now sit at rest on shared personal hardware.** `cache-duration` is
+  `720h`, and the bodies name hosts, units and journal tails from a node holding third parties'
+  credentials. This is a better position than `ntfy.sh`, where they were readable by anyone who
+  learned the topic name, but it is not a clean one.
+- **The ACL binds the credential, not the node.** The staging node still has unrestricted outbound
+  HTTPS, so a compromised node can publish anonymously to `ntfy.sh` regardless of what its token
+  allows. Egress filtering is the only fix and it belongs with the production network design.
+
+Both of the first two, and the third, are in the private register as `PULLFM-RISK-014` and
+`PULLFM-RISK-015`, with owners and expiry dates.
+
+### What the topic name is now worth
+
+Nothing on its own, and that is the point of the change. Reading requires a token; the only token
+issued for `pullfm-staging` cannot read. So the endpoint is **routing, not a capability**, which is
+why the stored value is a plain readable `pullfm-staging` rather than 96 bits of entropy and why it
+can be written in a runbook. `install-alert-env.sh` still treats it as a secret - `--check` prints
+the host and strips the path - and that is now belt-and-braces rather than the control. Anything in
+this repository that still says the topic name is the entire access control describes the retired
+arrangement.
+
+### What is still open
+
+**Production.** The mechanism is proven and the remaining work is two commands on the ntfy server
+(`ntfy user add pullfm-prod`, `ntfy access pullfm-prod 'pullfm-prod*' write-only`), a token, and two
+1Password items named `pull-fm/prod/ALERT_NTFY_URL` and `pull-fm/prod/ALERT_NTFY_TOKEN`. No code
+changes: `install-alert-env.sh` derives both item titles from `PULLFM_ALERT_ENV_LABEL`.
+
+**The external observer does not exist.** `infra/observability/README.md` section 4 records that a
+watchdog on a dead node does not alert. This decision adds a second instance of the same shape: an
+alert channel on a box that is not watched by Pull.fm. Both are closed by the one external uptime
+checker `docs/PLAN.md` section 9 already names, and by nothing else.
+
+### Where the operational detail lives
+
+`infra/observability/README.md` section 2, next to the scripts. If the two disagree, the scripts and
+the ntfy ACL are the facts and this entry is wrong. The ACL is readable at any time with
+`ntfy access` on the box and is the single authoritative statement of what Pull.fm can do.

@@ -42,95 +42,202 @@ already referenced by the committed job-failure handler, it is free, it needs no
 account, it self-hosts, and the mobile clients are free. Nothing about the
 decision was close.
 
-**Instance: NOT the operator's personal one, and not hardcoded anywhere.** That
-part was close, and it is worth writing down properly.
+**Instance: the operator's self-hosted ntfy, on a dedicated write-only
+credential that cannot touch anything else on it.** That part was close, it was
+got wrong once, and the correction is the interesting part.
 
-### The obvious option, and why it was rejected
+### The arrangement this replaced, and why it was worse than it looked
 
-The operator runs an ntfy instance on a personal Hetzner box, with a publish
-token already in the same 1Password vault this project reads its secrets from.
-Wiring Pull.fm into it is about four minutes of work. The argument for it is
-real: it is already monitored, the operator already has the app installed and
-already looks at it, and an alert channel the operator actually reads is worth
-more than a technically-cleaner one they do not.
+Until 2026-07-29 the channel was an **anonymous `ntfy.sh` topic** with 96 bits of
+entropy in its name. The reasoning behind that choice is preserved verbatim in
+[`../../security/DECISIONS.md`](../../security/DECISIONS.md) `SD-001`: the
+operator's personal `alerter` token is a publish credential for the personal
+box's `security-critical` / `security-warn` / `security-info` topics, where
+CrowdSec, Falco, auditd and AIDE report. Putting that token on a node holding
+other people's Last.fm session keys would let a compromise of Pull.fm inject
+noise into the channel that reports intrusions on unrelated personal
+infrastructure. Drowning the real Falco alert is the standard next move after
+landing on a host, so that was a real attack path and rejecting the token was
+correct.
 
-The argument against is specific rather than architectural, and it is what
-decided it.
+**Choosing anonymous `ntfy.sh` instead was not.** Probed from the staging node,
+against the endpoint exactly as deployed:
 
-**That token is not scoped to a topic Pull.fm would own.** The 1Password entry
-for it records what it is: a write-only publish token for the personal box's
-`security-critical`, `security-warn` and `security-info` topics, used by
-CrowdSec, Falco, auditd, AIDE and the canary handlers. Its note says, correctly,
-that write-only is the design so that a compromised container can inject noise
-but cannot read the detection stream.
+```
+read a topic the node was never given            -> 200, message returned
+read the personal fleet's box-stack-... channel    -> 200, and /sse stayed open
+publish to a topic name invented on the spot     -> 200
+```
 
-Now put that token on a Pull.fm node. A Pull.fm node stores **other people's
-Last.fm session keys**, which do not expire, and other people's ListenBrainz
-tokens. It is a more attractive target than anything else on the personal
-network, and a compromise of it would hand the attacker publish access to the
-channel that reports intrusions on the personal box. Injecting noise into a
-detection feed is not a theoretical concern; drowning the real Falco alert is
-the standard next move after landing on a host.
+Anonymous access on `ntfy.sh` is **read and write on every topic on the
+instance**. That is strictly broader than the `alerter` token it was chosen over:
+`alerter` is write-only on three topics, anonymous is read-write on all of them.
+And `hetzner/box-stack/NTFY_ALERT_URL` shows the personal fleet's restic-failure
+and health-watchdog alerts publish to `ntfy.sh` too, so Pull.fm and the personal
+fleet were **already sharing an instance with no access control in either
+direction**. The decision written to prevent that coupling had produced it.
 
-So the coupling is not "two systems share a notification service". It is "the
-system holding third-party credentials can suppress the detection of its own
-compromise spreading". That is a real attack path created by a convenience.
+The lesson, because it generalises: **absence of a credential reads as safety.**
+"No token on the node to steal" answers the wrong question. The right one is what
+an unauthenticated client is permitted to do, and on a public ntfy the answer is
+everything.
 
-### Is a dedicated topic enough isolation?
+### What is in place now
 
-**No, and this is the part most likely to be got wrong.** A dedicated
-`pullfm-alerts` topic sounds like the answer and does not address any of the
-above, because on ntfy the isolation boundary is the **credential**, not the
-topic. A token that can publish to `pullfm-*` and to `security-*` gives the same
-blast radius whichever topic Pull.fm actually uses.
+The self-hosted instance at `https://ntfy.graysons.network` already runs
+`auth-default-access: deny-all`, so every publisher and subscriber needs an
+explicit grant. Pull.fm has exactly one:
 
-The minimum acceptable form of "use the personal instance" is therefore:
+| Item        | Value                                                                  |
+| ----------- | ---------------------------------------------------------------------- |
+| ntfy user   | `pullfm-staging` - not `alerter`, and never becomes it                 |
+| Access rule | `write-only` on `pullfm-staging*`. There is no second rule             |
+| Credential  | A bearer token issued to that user, `pull-fm/staging/ALERT_NTFY_TOKEN` |
+| Topic       | `pullfm-staging`                                                       |
 
-- a **dedicated ntfy user** for Pull.fm, and
-- a **publish-only access rule** on `pullfm-*` and nothing else, and
-- a token that is not the `alerter` token and never becomes it.
+**The scope is per environment rather than `pullfm-*`.** A `pullfm-*` rule would
+let a compromised staging node publish forgeries into the production alert topic,
+which is the bury-the-real-alert attack above relocated inside Pull.fm.
+Production gets `pullfm-prod` with its own user, its own token and its own
+`pullfm-prod*` rule.
 
-That is a five-minute change on the ntfy instance and it is the operator's to
-make, on their infrastructure, awake, with their own eyes on the ACL. It is not
-something to do on their behalf overnight, so it was not done.
+The delivery path is unchanged and needed no code edit: `install-alert-env.sh`
+already read both `pull-fm/{env}/ALERT_NTFY_URL` and
+`pull-fm/{env}/ALERT_NTFY_TOKEN`, and `pullfm-alert` already sent the token as a
+bearer header when one is present.
 
-### What was done instead
+### Verified by attempting to violate it
 
-The channel is **injected at deploy time and absent from git**:
+A least-privilege claim that has not been attacked is an assumption. Run from the
+staging node with the credential sourced from the deployed `/etc/pullfm/alert.env`:
 
-- `pullfm-alert` reads `PULLFM_NTFY_URL` from `/etc/pullfm/alert.env`. It has no
-  default and no fallback.
-- `alert.env` is written by `install-alert-env.sh` out of 1Password, at 0600,
-  root-owned, and is never printed, logged, or passed as an argv (where `ps`
-  would show it to every user on the box).
-- The value currently stored is a **dedicated ntfy.sh topic with 96 bits of
-  entropy in its name**, created for this project and used by nothing else.
+```
+READ  pullfm-staging      403     # write-only is literal
+READ  security-critical   403     # and -warn, -info
+WRITE security-critical   403     # and -warn, -info
+WRITE box-stack-...         403     # the personal fleet's own channel
+WRITE pullfm-prod         403     # staging cannot forge a production alert
+WRITE pullfm / pullfmevil / notpullfm-staging   403    # prefix boundary holds
+GET, DELETE /v1/users     401
+WRITE pullfm-staging      200     # the one thing it may do
+```
 
-**On a public ntfy instance the topic name is the entire access control.**
-Anyone who learns it can read every alert Pull.fm sends and publish forgeries
-into it. That is why the URL is treated as a credential in both directions, why
-this repository never contains it, and why `--check` prints the endpoint host
-but strips the path.
+Then the positive case, proven rather than assumed: `pullfm-alert` exited **0**,
+its spool line reads `"delivered":true,"delivery":"ntfy"`, and the message was
+**read back off the server with a different, admin credential**. A 200 on publish
+is an acknowledgement, not evidence anything landed, which is why the read-back
+uses a credential that is allowed to read. `pullfm-job-alert`, which sources
+`alert.env` itself instead of going through `pullfm-alert`, was fired separately
+and also arrived.
 
-### What the operator should decide when awake
+Re-run any of this at any time; the ACL is authoritative and self-describing:
 
-| Question                                  | Recommendation                                                                                                                                                                                                |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Keep ntfy.sh for **staging**?             | Yes. Staging alerts concern staging. No user credentials are involved, it costs nothing, and it depends on none of the operator's own infrastructure being up.                                                |
-| Use ntfy.sh for **production**?           | **No.** Production alert bodies name hosts, units and journal tails from a system holding third-party credentials. That belongs on an instance with a read ACL, which the free tier of ntfy.sh does not have. |
-| Use the personal instance for production? | Acceptable **only** with a dedicated user and a publish-only rule scoped to `pullfm-*`. Never the `alerter` token.                                                                                            |
-| Something else?                           | Any ntfy-compatible endpoint works with no code change. Change one 1Password value and re-run the installer.                                                                                                  |
+```bash
+ssh root@<box> 'docker exec $(docker ps --format "{{.Names}}" | grep ^ntfy-) ntfy access'
+```
 
-Whatever is chosen, the change is one value in 1Password and one command on the
-node. Nothing in this repository has to be edited, which is the property that
-made deferring the decision safe.
+One honest detail: **`write-only` is not literally true.** The token can read one
+topic, the per-account `st_...` sync topic ntfy issues to every user, which nothing
+else publishes to. It is refused `403` on `alerter`'s sync topic and on an
+invented `st_...` name, so it is scoped to its own account rather than to `st_*`.
+
+### What the topic name is worth now, which is different from before
+
+**Nothing on its own.** Reading requires a token and the only token issued cannot
+read, so the endpoint is routing rather than a capability. That is why the stored
+value is a plain `pullfm-staging` instead of 96 bits of entropy and why it is
+safe to write in a runbook.
+
+`install-alert-env.sh` still treats it as a secret - the file is 0600 root-owned,
+never printed, never logged, never passed as an argv where `ps` would show it, and
+`--check` prints the endpoint host while stripping the path. That is now defence
+in depth rather than the control. **Anywhere in this repository that still says
+"on ntfy the topic name is the entire access control" is describing the retired
+arrangement**, and is true only of a public instance.
+
+### KNOWN GAP created by this change: `--check` now reports ARMED on a node that cannot deliver
+
+**This is the one thing to fix next in this directory.** It is written here rather
+than fixed in place only because `install-alert-env.sh` is not this change's to
+edit.
+
+Moving to an authenticated endpoint made the token mandatory, and neither the
+installer nor `--check` knows that:
+
+- `install-alert-env.sh` resolves the token with `|| true`, which was correct when
+  an anonymous instance was legitimate. If `pull-fm/{env}/ALERT_NTFY_TOKEN` is
+  missing it writes `PULLFM_NTFY_TOKEN=` and prints `armed`.
+- `--check` deliberately reports on the FILE rather than the network. With an
+  empty token it prints `ARMED` and exits 0.
+- Measured: that node is refused **403 on every publish**.
+
+`pullfm-alert` still exits 4 and spools `"delivered":false`, so it is not silent
+at the moment of an alert. But the two commands whose entire job is to answer
+"can this node tell anyone anything" both answer **yes** when the answer is no,
+and `docs/RUNBOOK-INCIDENT.md` section 10 records that this project has twice
+shipped a control that looked configured and was absent.
+
+Two fixes, both small. First, refuse to write an unauthenticated env file unless
+that is explicitly what was wanted:
+
+```bash
+TOKEN=$(opfield "${TOKEN_ITEM}" password || true)
+[ -n "${TOKEN}" ] || [ "${PULLFM_ALLOW_ANONYMOUS_NTFY:-0}" = 1 ] || {
+  echo "install-alert-env.sh: ${TOKEN_REF} resolved to an empty value." >&2
+  echo "The endpoint runs auth-default-access: deny-all (DECISIONS.md SD-002), so" >&2
+  echo "an empty token writes a node that reads as ARMED and is refused 403 on" >&2
+  echo "every publish. Create the item, or set PULLFM_ALLOW_ANONYMOUS_NTFY=1." >&2
+  exit 65
+}
+```
+
+Second, make `--check` ask the server instead of the filesystem. ntfy has an
+authorization probe that **stores nothing and wakes nobody**: an empty-body POST
+with `Cache: no` and `Firebase: no`. Verified on 2026-07-29 by firing it three
+times and confirming the topic's stored message count did not move.
+
+```bash
+  probe=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST \
+    -H 'Cache: no' -H 'Firebase: no' -H 'Content-Length: 0' \
+    ${PULLFM_NTFY_TOKEN:+-H "Authorization: Bearer ${PULLFM_NTFY_TOKEN}"} \
+    "${PULLFM_NTFY_URL}")
+  case "${probe}" in
+    200) echo "ARMED: ${DEST} (${perms}), endpoint host ${host}, publish authorised" ;;
+    401) echo "NOT ARMED: the token is invalid. Re-run the installer."; exit 1 ;;
+    403) echo "NOT ARMED: the credential may not publish to this topic (missing or wrong-scoped token)."; exit 1 ;;
+    *)   echo "NOT ARMED: endpoint unreachable (curl said '${probe}')."; exit 1 ;;
+  esac
+```
+
+That turns `--check` from a statement about a file into the statement it claims
+to make, and it is the difference between `make alerts-armed` being a control and
+being a formality.
+
+### What this costs
+
+Recorded in full in `SD-002` and in the private risk register as
+`PULLFM-RISK-014` and `PULLFM-RISK-015`. In short:
+
+- **The independence is gone.** `SD-001` was right that `ntfy.sh` needs nobody's
+  infrastructure to be up. Pull.fm's only notification path now depends on the
+  personal box, its Cloudflare tunnel and one container, and a box outage is
+  hardest to notice at exactly the moment it matters. Undelivered is still a
+  recorded fact: journal, `delivered:false` in the spool, exit code 4.
+- **Thirty days of alert bodies sit at rest on shared personal hardware**
+  (`cache-duration: 720h`), and those bodies name hosts, units and journal tails.
+  Better than being world-readable to anyone who learns a topic name, not clean.
+- **The ACL binds the credential, not the node.** Outbound HTTPS from the node is
+  unrestricted, so a compromised node can still publish anonymously to `ntfy.sh`
+  whatever its token allows. Egress filtering is the fix and belongs with the
+  production network design.
 
 ### Related, and already recorded
 
-`docs/PLAN.md` section 10 already records the same class of problem in the other
+`docs/PLAN.md` section 10 records the same class of problem in the other
 direction: "**Blast-radius isolation is partially false.** The Hetzner project is
-isolated; the Cloudflare account is shared with the personal fleet." Alerting was
-about to become the second entry on that list. It is not.
+isolated; the Cloudflare account is shared with the personal fleet." Alerting is
+now the second entry on that list, deliberately and with an expiry date, rather
+than accidentally and undocumented as it was before.
 
 ---
 

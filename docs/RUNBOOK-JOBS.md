@@ -209,9 +209,20 @@ of these happened rather than "something failed":
 | `timeout`                      | `timed-out`     | Killed at `RuntimeMaxSec`. Treat the run as incomplete.    |
 | `signal` or `core-dump`        | `killed`        | Check the OOM killer first.                                |
 
-**Arming a node is one command**, and the value in it is a credential rather
-than a setting: on ntfy the topic name is the entire access control, so the URL
-is stored in 1Password and never appears in this repository.
+**Arming a node is one command**, and it installs a bearer token as well as an
+endpoint. Since 2026-07-29 the channel is the operator's self-hosted ntfy running
+`auth-default-access: deny-all`, and the credential Pull.fm holds is **write-only
+on `pullfm-staging*` and nothing else** - proven by attempting to read its own
+topic, to read and publish to the personal fleet's `security-*` topics, and to
+publish to `pullfm-prod`, all of which are refused 403. The reasoning and the
+full verification are in [`../security/DECISIONS.md`](../security/DECISIONS.md)
+`SD-002`; the reason it is not simply an anonymous public topic any more is that
+anonymous access to a public ntfy is read-write on **every** topic on that
+instance, which was measured rather than assumed.
+
+Both values stay in 1Password and out of this repository. The topic name is no
+longer itself the access control, but the token is, so `alert.env` is still 0600
+root-owned and `--check` still prints the endpoint host while stripping the path.
 
 ```bash
 # From the operator's machine, with `op` signed in:
