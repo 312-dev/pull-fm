@@ -259,6 +259,60 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public' AND c.relkind = 'S';
 
 -- ---------------------------------------------------------------------------
+-- Group 4b: the server-side query ceilings, which are the T10 mitigation and
+-- the ONLY form of it that survives the pooled endpoint.
+--
+-- WHY THIS IS ASSERTED HERE RATHER THAN TRUSTED TO HAVE BEEN DONE.
+--
+-- `apps/bff/src/lib/db.ts` sets statement_timeout on the pg.Pool and
+-- node-postgres sends it in the libpq StartupMessage. `DATABASE_URL` points at
+-- Neon's POOLED endpoint, which is PgBouncer in transaction mode, and PgBouncer
+-- DISCARDS unlisted startup parameters rather than forwarding them:
+-- `ignore_startup_parameters` means ignore. Measured through a pooler with
+-- statement_timeout 3000, the backend reported current_setting = '0' and
+-- pg_sleep(6) ran to completion.
+--
+-- So on the request path the application's setting does nothing, and the role
+-- default below is the entire ceiling. If these rows are missing, every pooled
+-- connection in this deployment is unbounded and THREAT-MODEL T10 has no
+-- mitigation - while every other check in this file still passes and the
+-- application still looks correctly configured, because it is. That is exactly
+-- the shape of defect this file exists to catch, so it is asserted rather than
+-- assumed to have survived since the day it was applied.
+--
+-- Asserted against pg_db_role_setting, the catalog the pooler cannot get
+-- between: what is recorded here is what a backend applies at session start.
+-- What this CANNOT see is a pooled server connection that predates the setting
+-- and is still parked; that is a transient the pooler ages out, and it is
+-- covered in the header of set-role-timeouts.sql rather than here.
+--
+-- The values live in infra/neon/sql/set-role-timeouts.sql. Changing one without
+-- the other fails this check, which is the point.
+-- ---------------------------------------------------------------------------
+
+INSERT INTO _pullfm_privcheck (category, check_, expected, actual, ok)
+SELECT
+  'query ceilings',
+  format('%s role default %s', e.role, e.setting),
+  e.want,
+  coalesce(got.val, '<NOT SET: this role is UNBOUNDED>'),
+  got.val IS NOT DISTINCT FROM e.want
+FROM (VALUES
+  ('pullfm_app',   'statement_timeout',                   '30s'),
+  ('pullfm_app',   'idle_in_transaction_session_timeout', '60s'),
+  ('neondb_owner', 'statement_timeout',                   '15min'),
+  ('neondb_owner', 'idle_in_transaction_session_timeout', '5min')
+) AS e(role, setting, want)
+LEFT JOIN LATERAL (
+  SELECT split_part(cfg, '=', 2) AS val
+  FROM pg_roles r
+  JOIN pg_db_role_setting s ON s.setrole = r.oid AND s.setdatabase = 0,
+       unnest(s.setconfig) AS cfg
+  WHERE r.rolname = e.role
+    AND split_part(cfg, '=', 1) = e.setting
+) AS got ON true;
+
+-- ---------------------------------------------------------------------------
 -- Group 5: FUTURE tables. The check that stops the next migration breaking
 -- production silently.
 --
