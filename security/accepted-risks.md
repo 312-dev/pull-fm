@@ -58,7 +58,7 @@ register:
       - T30
     description: "Each per-environment Cloudflare token is zone-scoped for DNS and TLS but holds Workers R2 Storage Write at ACCOUNT scope, because cloudflare_r2_bucket is an account-scoped resource. The consequence is that the staging token can create, modify and delete any R2 bucket on the account, including pull-fm-tfstate (Terraform state) and any future production backup bucket, and the production token can do the same to staging's. R2 write is therefore the one dimension in which staging and production are not isolated from each other, and it reaches the backup repository that Gate 4's restore drill depends on."
     justification: "Cloudflare publishes no narrower permission that covers bucket create and delete. The two bucket-scoped groups (Workers R2 Storage Bucket Item Read and Write, scope com.cloudflare.edge.r2.bucket) grant object operations only, so a token holding them cannot manage the bucket resource itself and terraform plan fails with 'failed to make http request'. The alternatives are worse: taking R2 out of Terraform means the backup bucket stops being described by IaC and Gate 0's zero-drift assertion no longer covers it, and a separate bucket-only token per environment cannot create the bucket in the first place, so it does not remove the account-scoped credential, only adds a second one."
-    compensating_controls: "The account holds exactly two R2 buckets, both Pull.fm's, re-confirmed on 2026-07-29 by enumerating both the default and the EU jurisdiction endpoints (pull-fm-tfstate and pull-fm-backups-staging), so the reachable blast radius today is Pull.fm's own data rather than the personal fleet's. Terraform state is a separate credential (pull-fm/infra/R2_TFSTATE) so a revoked environment token does not lock the operator out of state. No workflow in this repository holds either token; both live in 1Password and are resolved per invocation. CORRECTION 2026-07-29: this entry previously claimed object versioning was enabled on the state bucket and that a destructive write was therefore recoverable. It is not enabled and a destructive write is NOT recoverable. See PULLFM-RISK-008 for the evidence."
+    compensating_controls: "The account holds exactly two R2 buckets, both Pull.fm's, re-confirmed on 2026-07-29 by enumerating both the default and the EU jurisdiction endpoints (pull-fm-tfstate and pull-fm-backups-staging), so the reachable blast radius today is Pull.fm's own data rather than the personal fleet's. Terraform state is a separate credential (pull-fm/infra/R2_TFSTATE) so a revoked environment token does not lock the operator out of state. No workflow in this repository holds either token; both live in 1Password and are resolved per invocation. CORRECTION 2026-07-29: this entry previously claimed object versioning was enabled on the state bucket and that a destructive write was therefore recoverable. R2 does not support object versioning at all, so that was never a control rather than a control left switched off. Cloudflare's S3 compatibility matrix lists PutBucketVersioning and GetBucketVersioning as unimplemented and omits ListObjectVersions. A destructive write by a holder of either token is recoverable only from the pre-apply snapshots written by infra/lib/tfstate-snapshot.sh, which live in the same bucket under the same credential and therefore do not survive a hostile holder of that credential. See PULLFM-RISK-008."
     owner: "ope@312.dev"
     accepted_on: 2026-07-29
     expires_on: 2027-01-20
@@ -115,20 +115,51 @@ register:
     example: false
 
   - id: PULLFM-RISK-008
-    title: "Neon role passwords are stored in Terraform state in plaintext"
+    title: "Database credential is plaintext in Terraform state, on a store that cannot version"
     status: accepted
     severity: high
     threat_ids:
       - T26
       - T27
       - T09
-    description: "Neon returns role passwords through its API, and the kislerdm/neon provider stores them. neon_role.password is a computed, sensitive attribute that provider/resource_role.go populates on every read, calling GetProjectBranchRolePassword whenever the role listing omits it, so the value lands in state on refresh and not only on create. neon_project.connection_uri and connection_uri_pooler carry the same password inline. No provider setting prevents this and none can: marking the outputs sensitive keeps the value out of plan output and CI logs, and does nothing about the state file. The effect is that the Cloudflare R2 bucket pull-fm-tfstate is the trust boundary for the production database owner credential, which is the identity that can DROP any table and ALTER any schema in the application database."
-    justification: "The alternatives are all worse or unavailable. Removing the owner role from Terraform would mean the production database role is not described by infrastructure as code, which defeats the Gate 0 zero-drift assertion and moves the credential from one store to another rather than removing it. Encrypting state at rest with a customer-managed key is not supported by the S3 backend against R2. Using a different Terraform provider does not help, because the plaintext arrives from the Neon API rather than from the provider's choices. The exposure is therefore accepted and the boundary is hardened instead, which is the honest shape of the problem: the credential has to live somewhere, and a private versioned object store guarded by a separate credential is a defensible somewhere."
-    compensating_controls: "Verified on 2026-07-29 rather than assumed. The bucket is private: the R2 managed r2.dev public domain reports enabled false, there are zero custom domains attached, no CORS configuration exists, and anonymous requests to the S3 endpoint are refused. The state credential is a separate R2 access key pair (1Password pull-fm/infra/R2_TFSTATE) held apart from the per-environment Cloudflare tokens, so state stays readable when an environment credential is revoked mid-incident. The credential never enters CI: no workflow in the repository holds it. The application no longer uses this credential at runtime, because the BFF authenticates as the least-privilege pullfm_app role whose password is not in state at all, having been created by SQL rather than through the Neon API. Rotation is a documented one-minute procedure. THE VERSIONING CONTROL DOES NOT EXIST DESPITE BEING DOCUMENTED: see review notes."
+    description: "Neon returns role passwords through its API and the kislerdm/neon provider stores them. neon_role.password is a computed, sensitive attribute that provider/resource_role.go repopulates on every read, calling GetProjectBranchRolePassword whenever the role listing omits it, so the value lands in state on refresh and not only on create. neon_project.connection_uri and connection_uri_pooler carry the same password inline. No provider setting prevents this and none can: marking outputs sensitive keeps the value out of plan output and CI logs and does nothing about the state file. The Cloudflare R2 bucket pull-fm-tfstate is therefore the trust boundary for the production database owner credential, the identity that can DROP any table in the application database. Compounding this, R2 cannot version objects, so the state object has exactly one version and there is no platform-level undo for a bad or hostile write."
+    justification: "Three alternatives were considered rather than assumed away, and the choice is a trade rather than an obvious win. Keeping state on R2 costs nothing, adds no vendor, and keeps state in the same account the rest of the infrastructure already depends on, at the price of no versioning and no server-side encryption with a customer-managed key. Moving to HCP Terraform, whose free tier stores state encrypted at rest with real version history, would genuinely fix both of those and is the strongest alternative on the merits; it is not taken here because it hands a third party the plaintext production database credential, adds a vendor dependency to the one workflow that has to keep working during an incident, and is a migration rather than a fix to apply mid-change. Moving to AWS S3 would give versioning plus SSE-KMS but reintroduces an AWS account and its billing to a project that consolidated away from exactly that. Removing the owner role from Terraform is not an option at all, because the plaintext arrives from the Neon API rather than from any provider choice, so it would relocate the credential without removing it while also defeating the Gate 0 zero-drift assertion. The exposure is therefore accepted and the boundary is hardened instead."
+    compensating_controls: "Verified by probing the live bucket on 2026-07-29 rather than by reading documentation. The bucket is private: the R2 managed r2.dev domain reports enabled false, zero custom domains are attached, no CORS configuration exists, and anonymous requests to the S3 endpoint are refused. The state credential is a separate R2 access key pair (1Password pull-fm/infra/R2_TFSTATE) held apart from the per-environment Cloudflare tokens, so state stays readable when an environment credential is revoked mid-incident. No workflow in the repository holds it. The application does not use this credential at runtime: the BFF authenticates as the least-privilege pullfm_app role, whose password is created by SQL and is therefore not in state at all. Pre-apply state snapshots (infra/lib/tfstate-snapshot.sh) replace the versioning that R2 cannot provide, and are verified readable before the apply proceeds rather than after. Rotation is a documented procedure and, because R2 keeps one version of the live key, overwriting it genuinely destroys the old credential."
     owner: "ope@312.dev"
     accepted_on: 2026-07-29
     expires_on: 2026-10-27
-    review_notes: "Owner is Grayson Adams. FINDING THAT MUST BE FIXED BEFORE THIS IS RENEWED: object versioning is NOT enabled on pull-fm-tfstate, contradicting infra/terraform/README.md, infra/neon/README.md and neon-migration.md sections 6 and 7.1, all of which state that it is on and one of which makes it the rollback procedure for a bad apply. Two independent probes agree: GetBucketVersioning returns an empty configuration at exit 0, which in S3 semantics means never enabled, and head-object on the live state object returns no VersionId. A third cross-check was unavailable because R2 does not implement ListObjectVersions. Consequence: a corrupted or truncated state write is unrecoverable and the documented rollback path does not work. Enabling it is a dashboard toggle and was NOT performed here because bucket configuration was out of scope for this change. Second finding: the R2_TFSTATE key pair is account-scoped rather than bucket-scoped, confirmed by using it to list objects in pull-fm-backups-staging in the EU jurisdiction, so the state credential also reaches the backup bucket and the isolation claim is narrower than it reads. Third finding, lower severity: pull-fm-tfstate is NOT in the EU jurisdiction, although infra/terraform/README.md documents creating it with --jurisdiction eu and every backend.hcl.example points at the .eu. endpoint while the live backend.hcl uses the non-EU one; the backups bucket is correctly EU. RETIREMENT CONDITION: this risk is retired only when the owner password is no longer in state, which realistically means Neon shipping a way to create a role without returning its password, or the owner role leaving Terraform management. Neither is likely inside one window, so expect to renew and to tighten the boundary instead. At review, re-run the four probes above and confirm each compensating control still holds rather than assuming it does."
+    review_notes: "Owner is Grayson Adams. CORRECTED FINDING, and the correction matters more than the original: object versioning on pull-fm-tfstate is not merely unconfigured, R2 DOES NOT SUPPORT IT. Cloudflare's S3 compatibility matrix lists PutBucketVersioning and GetBucketVersioning as unimplemented and omits ListObjectVersions entirely. The first pass at this entry concluded versioning was switched off and recommended enabling it, which was not actionable. The reason the mistake was available is worth keeping, because it will recur with other R2 features: get-bucket-versioning returns an empty configuration at exit 0 while get-bucket-policy returns an explicit NotImplemented, and an empty versioning configuration is exactly what S3 returns for a bucket where versioning was never enabled. One unsupported API refuses loudly and the other shrugs. CONSEQUENCE THAT WAS FIXED IN THIS CHANGE: three documents described restoring a previous version of the state object as the rollback for a bad apply, a recovery path that had never existed. All three are corrected and infra/lib/tfstate-snapshot.sh now provides a real one, wired into the apply procedure in the runbook. WHAT THE SNAPSHOTS DO NOT COVER: they live in the same bucket under the same credential as the state they protect, so they answer a bad apply and not bucket loss, account suspension (see PULLFM-RISK-001) or a hostile credential holder. The --local flag is the answer for import-heavy applies. RETIREMENT CONDITION: this retires only when the owner password is no longer in state, which realistically requires Neon to offer role creation that does not return a password, or the owner role to leave Terraform management. Neither is likely inside one window, so expect to renew and tighten rather than close. At review, re-run the four bucket probes, confirm snapshots exist and are recent, and revisit the HCP Terraform option in the justification, since the argument against it is about migration cost and that argument weakens every time this is renewed. Related: PULLFM-RISK-009 (the state credential is not bucket-scoped) and PULLFM-RISK-010 (the bucket is not EU-pinned)."
+    example: false
+
+  - id: PULLFM-RISK-009
+    title: "The Terraform state R2 credential is account-scoped, so it also reaches backups"
+    status: accepted
+    severity: medium
+    threat_ids:
+      - T26
+      - T27
+    description: "The R2 access key pair in 1Password as pull-fm/infra/R2_TFSTATE exists specifically to be a separate failure domain from the per-environment Cloudflare tokens, so that state stays reachable when an environment credential is revoked during an incident. It is not scoped to the state bucket. Proved on 2026-07-29 by using it to list objects in pull-fm-backups-staging through the EU jurisdiction endpoint, a bucket it has no reason to touch. A holder of the state credential can therefore read, overwrite and delete the database backup repository as well as Terraform state, which means the two are not independent failure domains and the separation they were created to provide is narrower than every document describing it implies. The blast radius is the union rather than either half: the plaintext production database password from state, plus the ability to destroy the backups that would otherwise be the recovery path."
+    justification: "This is a scoping mistake rather than a platform limitation, which makes it cheap to fix and hard to justify leaving open for long. It is accepted only for the window needed to mint and swap in a bucket-scoped replacement, because rotating the state credential requires updating 1Password and re-running init across four Terraform roots, and doing that in the same change that restructured the database roles and the rollback mechanism would make a bad apply harder to attribute. The exposure while it stands is bounded by the credential never entering CI, never being committed, and living only in 1Password resolved per invocation."
+    compensating_controls: "R2 offers bucket-scoped API tokens, so unlike PULLFM-RISK-006 there is no vendor limitation to work around here and the fix is available immediately. Backup objects are encrypted by pgBackRest with a key held outside Cloudflare, so read access to pull-fm-backups-staging yields ciphertext rather than user data; the meaningful harm from this credential is destruction rather than disclosure. The account holds exactly two buckets, both Pull.fm's, re-confirmed on 2026-07-29 by enumerating the default and EU endpoints, so the reachable surface is Pull.fm's own data and not the personal fleet's. The credential is not held by any workflow in this repository."
+    owner: "ope@312.dev"
+    accepted_on: 2026-07-29
+    expires_on: 2026-10-27
+    review_notes: "Owner is Grayson Adams. RECOMMENDED FIX, and it should not wait for the expiry: mint two bucket-scoped R2 API tokens, one for pull-fm-tfstate with object read and write, one for the backup repository, and retire the account-scoped pair. Then re-prove the isolation the way the gap was found, by attempting to list the other bucket with each token and confirming it is refused. An isolation claim that has not been tested by trying to violate it is an assumption. Escalate to high once production backups contain real user data, because at that point the destruction path in the description stops being theoretical. Note the asymmetry with PULLFM-RISK-006, which is NOT fixable this way: that one is account-scoped because cloudflare_r2_bucket needs bucket lifecycle permissions that Cloudflare only grants at account scope, whereas this credential only ever performs object operations and has no such excuse."
+    example: false
+
+  - id: PULLFM-RISK-010
+    title: "The Terraform state bucket is not in the EU jurisdiction the residency posture claims"
+    status: accepted
+    severity: low
+    threat_ids:
+      - T26
+    description: "pull-fm-tfstate is not EU-pinned. Verified on 2026-07-29 by enumerating both R2 endpoints with the state credential: the default endpoint returns pull-fm-tfstate and the EU jurisdiction endpoint returns only pull-fm-backups-staging. infra/terraform/README.md documented creating the state bucket with wrangler r2 bucket create pull-fm-tfstate --jurisdiction eu, and every backend.hcl.example pointed at the .eu. endpoint, so the documented configuration was not merely inconsistent with reality, it was broken: an R2 jurisdiction endpoint only sees buckets created in that jurisdiction, so anyone following the runbook failed at terraform init with a missing bucket rather than falling back. The residency question that remains is narrower than the documentation gap: docs/PLAN.md and the privacy posture assume EU-only hosting, and one bucket in the estate is not EU-pinned."
+    justification: "Terraform state holds infrastructure identifiers and credentials, not user personal data, so this is not the same question the backups bucket answers and it is not a GDPR data-residency breach on its own. The bucket that does hold user data, pull-fm-backups-staging, is correctly EU-pinned by modules/backup-storage, and that is enforced by Terraform rather than by a runbook step. Recreating the state bucket in the EU jurisdiction cannot be done in place: an R2 bucket's jurisdiction is fixed at creation, so it means creating a second bucket, copying every state object, re-initialising four Terraform roots against the new endpoint, and doing so while the objects being moved contain the production database credential. That is a migration with a real chance of losing or exposing state, undertaken to correct a residency claim about metadata. The documentation half of this finding is fixed rather than accepted."
+    compensating_controls: "Every backend.hcl.example and the bootstrap instructions in infra/terraform/README.md now match reality, so the broken-init half of this finding is closed and cannot silently mislead anyone. The bucket is private and access-controlled regardless of jurisdiction, per the probes recorded in PULLFM-RISK-008. Cloudflare R2 without a jurisdiction is not equivalent to non-EU storage, it is unpinned, so this is an absence of a guarantee rather than a positive placement outside the EU. The user-data bucket is EU-pinned and that placement is enforced in Terraform."
+    owner: "ope@312.dev"
+    accepted_on: 2026-07-29
+    expires_on: 2026-10-27
+    review_notes: "Owner is Grayson Adams. DO NOT recreate or delete pull-fm-tfstate to close this; it holds live state and the jurisdiction is immutable after creation, so any fix is a copy-and-cutover that needs its own plan and its own verified snapshot. DECISION REQUIRED AT REVIEW, and it is a decision rather than a task: either accept permanently on the grounds that state is metadata and record that in docs/PLAN.md so the EU-only claim is stated precisely rather than broadly, or schedule the bucket migration alongside another change that already requires re-initialising every root. Prefer the first unless a customer or auditor asks the question, because the migration moves plaintext production credentials for a claim that does not concern user data. If a new state bucket is ever created for any other reason, create it EU-pinned and this closes for free. Reviewed together with PULLFM-RISK-008 and PULLFM-RISK-009, which are the same bucket seen from different angles."
     example: false
 ---
 
@@ -237,29 +268,47 @@ and the dates need operator confirmation before they should be treated as real a
 rather than templates. `PULLFM-RISK-006` is not an example: it is a live acceptance created when
 `PULLFM-RISK-005` was closed.
 
-| ID              | Title                                                | Severity | Expires    |
-| --------------- | ---------------------------------------------------- | -------- | ---------- |
-| PULLFM-RISK-001 | Shared Cloudflare account                            | high     | 2026-10-26 |
-| PULLFM-RISK-006 | Env Cloudflare tokens hold account-scoped R2 write   | medium   | 2027-01-20 |
-| PULLFM-RISK-003 | KEK escrow has no second holder                      | high     | 2026-10-15 |
-| PULLFM-RISK-004 | DAST active scan is nightly, not per-pull-request    | low      | 2026-10-31 |
-| PULLFM-RISK-007 | Production Postgres reachable from the internet      | high     | 2026-10-27 |
-| PULLFM-RISK-008 | Neon role passwords are plaintext in Terraform state | high     | 2026-10-27 |
+| ID              | Title                                                            | Severity | Expires    |
+| --------------- | ---------------------------------------------------------------- | -------- | ---------- |
+| PULLFM-RISK-001 | Shared Cloudflare account                                        | high     | 2026-10-26 |
+| PULLFM-RISK-006 | Env Cloudflare tokens hold account-scoped R2 write               | medium   | 2027-01-20 |
+| PULLFM-RISK-003 | KEK escrow has no second holder                                  | high     | 2026-10-15 |
+| PULLFM-RISK-004 | DAST active scan is nightly, not per-pull-request                | low      | 2026-10-31 |
+| PULLFM-RISK-007 | Production Postgres reachable from the internet                  | high     | 2026-10-27 |
+| PULLFM-RISK-008 | DB credential plaintext in state, on a store that cannot version | high     | 2026-10-27 |
+| PULLFM-RISK-009 | State R2 credential is account-scoped, reaches backups           | medium   | 2026-10-27 |
+| PULLFM-RISK-010 | State bucket is not EU-pinned                                    | low      | 2026-10-27 |
 
-`PULLFM-RISK-007` and `PULLFM-RISK-008` were both created by the Neon migration
-and neither is an example. They are the two halves of the same change: moving
-the database to a managed vendor removed the network control (007) and put the
-production database credential into an object store (008). Read them together,
-because the compensating control for one is load-bearing for the other. The
-least-privilege `pullfm_app` role narrows 007, and it also means the credential
-the application holds is not the credential sitting in Terraform state.
+### The four entries added on 2026-07-29
 
-**`PULLFM-RISK-008` carries an unfixed finding rather than only an acceptance.**
-Object versioning on `pull-fm-tfstate` is documented in three places as being
-enabled and is not. That was found by probing the bucket rather than by reading
-the documentation, the documented rollback procedure for a bad apply depends on
-it, and turning it on is a dashboard toggle. It is recorded rather than fixed
-because bucket configuration was out of scope for the change that found it.
+`PULLFM-RISK-007` through `010` were all created by the Neon migration and none is an example.
+They share an expiry date deliberately, so they are re-argued together with the Phase 6 paid-plan
+decision rather than drifting into four separate conversations.
+
+`007` and `008` are the two halves of the migration itself: moving the database to a managed vendor
+removed the network control (`007`) and put the production database credential into an object store
+(`008`). Read them together, because the compensating control for one is load-bearing for the other.
+The least-privilege `pullfm_app` role narrows `007`, and it also means the credential the
+application holds at runtime is not the credential sitting in Terraform state.
+
+`009` and `010` are properties of that object store found while checking whether it was a safe place
+to put a database credential. Both were found by probing the live bucket rather than by reading the
+documentation, and in both cases the documentation was wrong.
+
+**Two findings here were corrections to this register's own first draft**, which is worth recording
+because it is the failure mode the register exists to catch:
+
+- `008` originally said object versioning was switched off and recommended enabling it. **R2 does
+  not support object versioning at all**, so that recommendation was not actionable and the problem
+  was worse than stated: three documents described a rollback that had never been possible. The
+  documents are corrected and `infra/lib/tfstate-snapshot.sh` now provides a rollback that works.
+- `006` claimed object versioning made a destructive write recoverable. Same correction.
+
+The general lesson is in `008`'s review notes: R2 answers `GetBucketVersioning` with an empty
+configuration at exit 0, while answering `GetBucketPolicy` with an explicit `NotImplemented`. An
+empty versioning configuration is exactly what S3 returns for a bucket where versioning was never
+enabled, so an unsupported feature was indistinguishable from an unconfigured one. **Expect the same
+shape from other R2 features, and check the compatibility matrix rather than the API response.**
 
 ### Retired
 
