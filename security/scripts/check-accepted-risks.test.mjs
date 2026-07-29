@@ -170,6 +170,30 @@ test("a file with no frontmatter fence fails", () => {
   assert.ok(findings(r).some((x) => x.field === "<parse>"));
 });
 
+// The two cases below are regressions found by the Phase 8 audit on
+// 2026-07-29. Both emptied the register while exiting 0, which is the worst
+// available outcome for this gate: it does not merely miss a finding, it
+// asserts that every accepted risk is valid when none was read at all. They
+// are grouped here because they share that shape and neither is caught by any
+// per-entry rule, only by counting what the parser actually saw.
+test("a duplicate top-level key cannot silently empty the register", () => {
+  const r = check("duplicate-root-key.md");
+  assert.equal(r.code, 1);
+  assert.ok(
+    findings(r).some((x) => /duplicate top-level key/.test(x.message)),
+    "a second `register:` must be rejected, not allowed to blank the first",
+  );
+});
+
+test("a stray `---` cannot truncate the register", () => {
+  const r = check("early-fence.md");
+  assert.equal(r.code, 1);
+  assert.ok(
+    findings(r).some((x) => /outside the frontmatter/.test(x.message)),
+    "entries after an early fence must be counted and reported, not dropped",
+  );
+});
+
 test("a missing register file is a usage error (exit 2), not a pass", () => {
   const r = run(["--file", resolve(FIXTURES, "does-not-exist.md"), "--json"]);
   assert.equal(

@@ -130,6 +130,16 @@ jobs:
       - name: "Gate 8: action pinning"
         run: node security/scripts/check-action-pinning.mjs
 
+      # AUDIT 2026-07-29. `security/zap/context/pullfm-api.context.yaml` and
+      # `security/zap/rules/alert-filters.yaml` both state that this script
+      # "fails CI if a copy drifts from this file". It was wired into no
+      # workflow, no package.json script, and no Makefile target, so the
+      # shared fragments inlined into both ZAP plans could diverge from their
+      # source with nothing to notice. The drift has not happened yet, which is
+      # luck rather than enforcement.
+      - name: "Gate 8: ZAP plan fragments match their source"
+        run: node security/scripts/check-zap-fragments.mjs
+
       - name: "security tooling self-tests"
         run: |
           node --test security/scripts/check-accepted-risks.test.mjs

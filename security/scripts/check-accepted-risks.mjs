@@ -151,10 +151,37 @@ function extractFrontmatter(text) {
   }
   for (let i = 1; i < lines.length; i += 1) {
     if (lines[i].trim() === "---") {
-      // Return with 1-based original line numbers preserved for error messages.
-      return lines
+      // AUDIT 2026-07-29. A bare `---` renders as a horizontal rule in a
+      // markdown review, so inserting one part-way through the register looked
+      // like formatting and silently truncated the data: 7 of 9 entries stopped
+      // being validated and the run stayed green, because an empty-ish register
+      // is a legitimate state (see the zero-length branch in `validate`).
+      //
+      // The register is written as `- id: PULLFM-RISK-NNN`, so counting those
+      // markers in the WHOLE file and comparing against the frontmatter is a
+      // cheap, format-independent check that the parser saw everything an
+      // author wrote. It cannot be defeated by moving the fence, because the
+      // orphaned entries are still in the file being counted.
+      const frontmatter = lines
         .slice(1, i)
         .map((content, idx) => ({ content, no: idx + 2 }));
+
+      const ENTRY_MARKER = /^\s*-\s+id:\s*PULLFM-RISK-/;
+      const inFrontmatter = frontmatter.filter((l) =>
+        ENTRY_MARKER.test(l.content),
+      ).length;
+      const inFile = lines.filter((l) => ENTRY_MARKER.test(l)).length;
+      if (inFile !== inFrontmatter) {
+        throw new RegisterParseError(
+          `${String(inFile - inFrontmatter)} register entr${
+            inFile - inFrontmatter === 1 ? "y is" : "ies are"
+          } outside the frontmatter and would not be validated. ` +
+            "An early `---` truncates the register while still parsing cleanly. " +
+            "Move the closing fence past every entry, or delete the stray fence.",
+          i + 1,
+        );
+      }
+      return frontmatter;
     }
   }
   throw new RegisterParseError("frontmatter is never closed by a second `---`");
@@ -193,6 +220,18 @@ function parseRegister(text) {
           no,
         );
       const [, key, rest] = m;
+      // AUDIT 2026-07-29. Duplicate keys at indent 4 were already rejected;
+      // duplicates at indent 0 were not, so a second bare `register:` line
+      // anywhere in the frontmatter replaced the parsed list with an empty one
+      // and every entry vanished at exit 0. YAML itself treats a duplicate key
+      // as an error, and so does this now, at both levels.
+      if (Object.hasOwn(root, key)) {
+        throw new RegisterParseError(
+          `duplicate top-level key \`${key}\`. A second \`${key}:\` silently ` +
+            "discards everything parsed under the first one.",
+          no,
+        );
+      }
       if (rest === "") {
         root[key] = [];
         currentList = root[key];

@@ -64,12 +64,24 @@ jobs:
       # Local rules first and separately: they encode this project's own
       # invariants, they are validated against fixtures, and they must never be
       # masked by a registry outage.
-      - name: semgrep (project rules)
+      - name: semgrep (project rules, blocking)
         # --severity=ERROR is deliberate. The BOLA rule is a WARNING tripwire,
-        # not a gate: the 99-test BOLA suite is the actual proof of isolation.
-        # Without this filter a warning fails the build, which pressures people
-        # to weaken the rule rather than investigate what it flagged.
+        # not a gate: the BOLA suite is the actual proof of isolation. Without
+        # this filter a warning fails the build, which pressures people to
+        # weaken the rule rather than investigate what it flagged.
         run: semgrep scan --config=.semgrep/ --error --severity=ERROR --metrics=off
+
+      # AUDIT 2026-07-29. `--severity` does not down-rank a rule, it REMOVES it
+      # from the run: `--severity=ERROR` reports "Rules run: 6" against a
+      # ruleset of 7. So the WARNING tripwire above was not merely non-blocking,
+      # it was never evaluated and printed nowhere. A tripwire nobody can read
+      # is dead code, and this is the same defect as the incident the comment
+      # above describes, resolved in the other direction.
+      #
+      # This step evaluates the WARNING rules and prints them. It has no
+      # --error, so it reports without gating, which is what "tripwire" meant.
+      - name: semgrep (project rules, advisory)
+        run: semgrep scan --config=.semgrep/ --severity=WARNING --metrics=off
 
       # Registry packs second. Output goes to stdout as well as SARIF, because
       # writing only to a file hides the reason for a non-zero exit.
@@ -100,6 +112,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # AUDIT 2026-07-29: `--include-dev-deps` is load bearing, not tidiness.
+      # Trivy SUPPRESSES development dependencies by default, and 100% of this
+      # repository's advisories are dev dependencies. Without the flag this job
+      # printed "pnpm-lock.yaml | pnpm | 0" and exited 0 while the lockfile
+      # carried a CRITICAL with a published fix (vitest CVE-2026-47429,
+      # arbitrary code execution) plus two HIGHs. Gate 8 reads "zero
+      # high/critical from Trivy", and that was true only because Trivy was not
+      # looking. Dev dependencies execute in CI against a checked-out tree with
+      # a GITHUB_TOKEN, which is precisely THREAT-MODEL T27.
       - name: trivy filesystem scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -110,6 +131,19 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           format: table
+        env:
+          TRIVY_INCLUDE_DEV_DEPS: "true"
+
+      # A second, independent opinion on the same lockfile. Trivy and the npm
+      # advisory database disagree often enough that one of them alone is a
+      # single point of failure for the whole dependency gate, and this one
+      # needs no vulnerability database download to be current.
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: pnpm audit
+        run: pnpm audit --audit-level high
       - name: generate SBOM
         if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

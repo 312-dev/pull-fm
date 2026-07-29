@@ -100,6 +100,25 @@ rules:
   # Upstream ToS compliance: MusicBrainz requires a descriptive User-Agent with
   # contact info on every request and enforces 1 req/s. Calls must route through
   # our rate-limited client, never raw fetch.
+  #
+  # AUDIT 2026-07-29: the original pattern was
+  #   \bfetch\s*\(\s*["'`][^"'`]*musicbrainz\.org
+  # which requires the host to appear as a literal INSIDE the first string
+  # argument to fetch. Three shapes were demonstrated to slip past it and reach
+  # the network unmetered:
+  #
+  #   fetch(`${MUSICBRAINZ_BASE_URL}/artist/${id}`)   the constant is exported
+  #   fetch("https://" + HOST + "/ws/2/...")          host assembled from parts
+  #   new ProviderClient({ name: "musicbrainz", ... }) with no rateLimiter
+  #
+  # The third is the dangerous one, because it looks like using the sanctioned
+  # abstraction. `rateLimiter` is optional on ProviderClientOptions, so a second
+  # MusicBrainz client with no pacing compiles, type-checks, and doubles the
+  # egress rate against a provider that revokes without appeal.
+  #
+  # The three rules below cover host-in-a-literal, host-by-constant, and
+  # client-without-a-limiter respectively. The last two are cheap identifier
+  # checks precisely so they cannot be defeated by rearranging a string.
   # -------------------------------------------------------------------------
   - id: pullfm-musicbrainz-must-use-ratelimited-client
     languages: [typescript, javascript]
@@ -113,4 +132,53 @@ rules:
       exclude:
         - "**/musicbrainz/client.ts"
         - "**/*.test.ts"
-    pattern-regex: (?i)\bfetch\s*\(\s*["'`][^"'`]*musicbrainz\.org
+    pattern-either:
+      # The host as a literal anywhere in the call, not only in the first
+      # string argument. `[^;]` bounds the window to one statement so this
+      # cannot run away across a file.
+      - pattern-regex: (?i)\bfetch\s*\([^;]{0,300}?musicbrainz\.org
+      # The host assembled from fragments to avoid containing itself.
+      - pattern-regex: (?i)["'`]musicbrainz["'`]\s*\+
+      - pattern-regex: (?i)\+\s*["'`]musicbrainz\.
+
+  # -------------------------------------------------------------------------
+  # The base URL is an internal detail of the sanctioned client. Anything that
+  # needs it is, by construction, about to make an unmetered request.
+  # -------------------------------------------------------------------------
+  - id: pullfm-musicbrainz-base-url-is-internal
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      MUSICBRAINZ_BASE_URL is internal to the rate-limited MusicBrainz client.
+      Importing it means building a request outside the 1 req/s queue. Call
+      MusicBrainzClient instead; it is injected on the upstream bundle.
+    paths:
+      exclude:
+        - "**/musicbrainz/client.ts"
+        # The package barrel re-exports it for the client's own tests.
+        - "**/upstream/src/index.ts"
+        - "**/*.test.ts"
+    pattern-regex: \bMUSICBRAINZ_BASE_URL\b
+
+  # -------------------------------------------------------------------------
+  # A ProviderClient aimed at MusicBrainz with no `rateLimiter` is the failure
+  # that looks most like correct code. `rateLimiter` is optional on the options
+  # type because most providers pace themselves with a quota counter instead;
+  # MusicBrainz is the one provider for which it is a licence condition.
+  # -------------------------------------------------------------------------
+  - id: pullfm-musicbrainz-provider-client-needs-limiter
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      A ProviderClient pointed at MusicBrainz was constructed without a
+      rateLimiter. MusicBrainz allows 1 request/second for the WHOLE service,
+      per IP, so a second unpaced client multiplies the egress rate and gets the
+      IP blocked with no appeals process. Pass the shared RateLimiter, or use
+      MusicBrainzClient which requires one at construction.
+    paths:
+      exclude:
+        - "**/musicbrainz/client.ts"
+        - "**/*.test.ts"
+    patterns:
+      - pattern-regex: (?is)new\s+ProviderClient\s*\(\s*\{[^}]{0,400}musicbrainz[^;]{0,400}
+      - pattern-not-regex: rateLimiter

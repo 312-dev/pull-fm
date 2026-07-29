@@ -97,17 +97,66 @@ regexes = [
   # op:// references contain a POINTER to a secret, never a secret value.
   '''op://[A-Za-z0-9 _./-]+''',
   # Obvious placeholders used in docs and examples.
-  '''(?i)(REPLACE_ME|CHANGEME|CHANGE_ME|YOUR_[A-Z_]+_HERE|<[a-z-]+>|xxxx+|placeholder|example\.com)''',
+  #
+  # AUDIT 2026-07-29: `xxxx+` was removed from this list. It matched anywhere
+  # inside the rule's match region, so a real key merely CONTAINING four
+  # consecutive x characters was suppressed:
+  #   sk_live_xxxxZmFrZUtleUZvclRlc3RpbmcxMjM0NTY   ->  0 findings
+  # Removing it restores both `workos-api-key` and `stripe-access-token` on that
+  # string. A four-character run inside a base62 secret is not rare; it is a
+  # 1-in-a-few-hundred-thousand event across a key space we generate constantly.
+  # `REPLACE_ME`, `CHANGEME` and the rest are safe because no real credential
+  # contains them.
+  '''(?i)(REPLACE_ME|CHANGEME|CHANGE_ME|YOUR_[A-Z_]+_HERE|<[a-z-]+>|placeholder|example\.com)''',
+  # The two documentation sample tokens, allowlisted BY VALUE rather than by
+  # the path they happen to live in. Value scoping is what makes this safe: a
+  # real token pasted into the same file is still caught, and these two remain
+  # exempt wherever they appear, which matters because gitleaks scans full
+  # history and a doc edit cannot retract what an old commit already contains.
+  #
+  # An all-`x` run of 43 characters cannot be a real token: the generator emits
+  # base64url from a CSPRNG, so this is a 62^-43 event.
+  '''pfm_(live|test)_x{20,}''',
+  # The illustrative response body in docs/api/personal-api-tokens.md. Pinned
+  # exactly, so a DIFFERENT token in that file is still a finding.
+  '''pfm_live_kQ3n8xF2sVb7YtR1pLmA9dGhJ0zW4cE6uN5oI2sK8yQ''',
 ]
 
 [[allowlists]]
 description = "Paths that legitimately contain fixture/sample credential-shaped strings"
+#
+# AUDIT 2026-07-29. Two entries here were far wider than their description and
+# exempted exactly the files most likely to receive a real credential by
+# copy-paste. Both were verified by putting an identical, valid-format
+# `sk_live_...` key into four paths and running the repo's own scan command:
+# the copy under `apps/bff/src/` produced three findings and exit 1, while the
+# copies in `.env.example`, `docs/runbook.md` and
+# `infra/terraform/envs/prod/terraform.tfvars.example` produced none.
+#
+#   '''(^|/).*\.example$'''    exempted `.env.example` (12 KB, deliberately
+#                              un-gitignored) and all four
+#                              `terraform.tfvars.example` templates. A template
+#                              whose entire purpose is "fill this in with your
+#                              Cloudflare / Hetzner / WorkOS token" is the LAST
+#                              file that should be exempt. `.env.example` even
+#                              asserts "gitleaks blocks any commit containing
+#                              one", which was false for that file.
+#
+#   '''(^|/)docs/.*\.md$'''    exempted every markdown file under any docs
+#                              directory at any depth, which is where working
+#                              `curl -H "Authorization: ..."` examples get
+#                              pasted while debugging.
+#
+# Neither is replaced with a narrower path rule, because there is no path whose
+# contents we can promise in advance. The placeholder REGEXES above are the
+# right mechanism: they exempt values that cannot be secrets, rather than
+# locations we hope will not contain them. A genuine sample that trips a rule
+# should carry an inline `gitleaks:allow` comment, which is auditable in the
+# diff that introduces it.
 paths = [
   '''\.gitleaks\.toml$''',
   '''(^|/)LICENSE$''',
   '''(^|/)pnpm-lock\.yaml$''',
   '''(^|/)\.terraform\.lock\.hcl$''',
-  '''(^|/)docs/.*\.md$''',
-  '''(^|/).*\.example$''',
   '''(^|/)security/testdata/''',
 ]
