@@ -57,6 +57,7 @@ import {
   SeatGeekEventsProvider,
   lastfmCap,
   type CacheStore,
+  type CanonicalStore,
   type CrosswalkStore,
   type EventsProvider,
   type FetchLike,
@@ -69,6 +70,7 @@ import {
 
 import type { Config } from "../config.js";
 import type { Queryable } from "../lib/db.js";
+import { createKillSwitchSource } from "../lib/kill-switch.js";
 
 /** Minimal logger surface. Never receives a credential; see .semgrep/pullfm.yml. */
 export interface UpstreamLogger {
@@ -115,6 +117,21 @@ export interface UpstreamBundle {
    * depend on whether the local path exists.
    */
   readonly musicbrainz: MusicBrainzClient;
+  /**
+   * The canonical dump, for EXISTENCE PROBES ONLY, and undefined when the local
+   * MusicBrainz data is switched off.
+   *
+   * Narrowly exposed, and the undefined is the control rather than a
+   * convenience. `MB_LOCAL_ENABLED` decides whether this deployment trusts the
+   * local dump at all, and expressing that as a value which is simply ABSENT
+   * means a consumer cannot forget to check the flag - there is nothing to call.
+   * That is the structural version of the lesson in config.ts: a boolean a call
+   * site has to remember to consult is a boolean a call site will forget.
+   *
+   * Nothing here may treat a miss as "does not exist"; see
+   * services/artist-lookup-gate.ts, which is the only consumer.
+   */
+  readonly canonical: CanonicalStore | undefined;
   readonly crosswalk: CrosswalkResolver;
   readonly crosswalkStore: CrosswalkStore;
   readonly previews: PreviewResolver;
@@ -193,7 +210,26 @@ export function buildUpstream(
           },
         };
 
-  const killSwitch = new KillSwitch();
+  /**
+   * The kill switch, now with both of its levers attached.
+   *
+   * It was constructed with no arguments here until 2026-07-29, which made it
+   * dead capability: `security/DAST-RUNBOOK.md` §6 named "provider kill
+   * switches engaged" as an unsatisfiable precondition of the active scan, and
+   * `GET /v1/config` promised clients they would see a thrown switch within
+   * seconds of a switch that could not be thrown.
+   *
+   * `UPSTREAM_DISABLED_PROVIDERS` pins a decision across a restart;
+   * `UPSTREAM_KILL_SWITCH_DIR` throws it without one. Both are disable-only and
+   * both default to off. See lib/kill-switch.ts.
+   */
+  const killSwitch = new KillSwitch(cfg.UPSTREAM_DISABLED_PROVIDERS, {
+    source: createKillSwitchSource({
+      dir: cfg.UPSTREAM_KILL_SWITCH_DIR,
+      pollMs: cfg.UPSTREAM_KILL_SWITCH_POLL_MS,
+      log: opts.log,
+    }),
+  });
   const queryable = asUpstreamQueryable(db);
   const cacheStore = new PgCacheStore(queryable);
 
@@ -265,11 +301,16 @@ export function buildUpstream(
    * `true`. See the flag's comment in config.ts for the four layers that fail
    * closed and the one that is not ours.
    */
+  // ONE store instance, shared by the client and by the existence gate. A
+  // second one would keep its own unavailability backoff, so a missing `mb`
+  // schema would be rediscovered twice and counted twice.
+  const canonicalStore = new PgCanonicalStore(queryable);
+
   const musicbrainz = new LocalFirstMusicBrainzClient({
     userAgent: cfg.MUSICBRAINZ_USER_AGENT,
     rateLimiter: musicbrainzLimiter,
     killSwitch,
-    canonical: new PgCanonicalStore(queryable),
+    canonical: canonicalStore,
     enabled: cfg.MB_LOCAL_ENABLED,
     ...withFetch,
     ...withEvents,
@@ -347,6 +388,8 @@ export function buildUpstream(
     listenbrainz,
     lastfm,
     musicbrainz,
+    // Absent unless the operator has turned the local dump on. See the field.
+    canonical: cfg.MB_LOCAL_ENABLED ? canonicalStore : undefined,
     crosswalk,
     crosswalkStore,
     previews,

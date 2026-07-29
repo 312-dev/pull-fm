@@ -161,6 +161,102 @@ describe("fail-closed configuration", () => {
   });
 });
 
+/**
+ * The kill switch, whose config path is the reason it is no longer dead
+ * capability. `security/DAST-RUNBOOK.md` §6 recorded that it had "no admin
+ * route, env var or config path that throws it"; these tests are what stop that
+ * sentence becoming true again.
+ */
+describe("the provider kill switch", () => {
+  test("defaults to disabling nothing", () => {
+    expect(loadConfig(baseEnv()).UPSTREAM_DISABLED_PROVIDERS).toEqual([]);
+    expect(loadConfig(baseEnv()).UPSTREAM_KILL_SWITCH_DIR).toBe("");
+  });
+
+  test("accepts a list of real providers", () => {
+    const cfg = loadConfig(
+      baseEnv({ UPSTREAM_DISABLED_PROVIDERS: "lastfm, deezer" }),
+    );
+    expect(cfg.UPSTREAM_DISABLED_PROVIDERS).toEqual(["lastfm", "deezer"]);
+  });
+
+  test("REFUSES TO START on a misspelled provider", () => {
+    // The SeatGeek lesson. A documented switch that silently does nothing is
+    // worse than no switch, because it is budgeted for. Anyone who sets
+    // `last.fm` believing they have stopped calling Last.fm must not boot a
+    // node that is still calling Last.fm.
+    expect(() =>
+      loadConfig(baseEnv({ UPSTREAM_DISABLED_PROVIDERS: "last.fm" })),
+    ).toThrow(/is not a provider/);
+  });
+
+  test("names the accepted providers in the failure", () => {
+    let message = "";
+    try {
+      loadConfig(baseEnv({ UPSTREAM_DISABLED_PROVIDERS: "spotify" }));
+    } catch (err) {
+      message = err instanceof Error ? err.message : "";
+    }
+    expect(message).toContain("listenbrainz");
+    expect(message).toContain("seatgeek");
+  });
+
+  test("tolerates whitespace and empty entries, which a shell produces", () => {
+    expect(
+      loadConfig(baseEnv({ UPSTREAM_DISABLED_PROVIDERS: " , lastfm , " }))
+        .UPSTREAM_DISABLED_PROVIDERS,
+    ).toEqual(["lastfm"]);
+  });
+});
+
+describe("the erasure ledger configuration", () => {
+  const LEDGER = {
+    ERASURE_LEDGER_ENDPOINT: "https://acct.eu.r2.cloudflarestorage.com",
+    ERASURE_LEDGER_BUCKET: "pull-fm-backups-staging",
+    ERASURE_LEDGER_ACCESS_KEY_ID: "AKIAFIXTURENOTAREALKEY",
+    ERASURE_LEDGER_SECRET_ACCESS_KEY: "fixture-not-a-real-credential",
+  };
+
+  test("is absent by default, which is a supported deployment", () => {
+    expect(loadConfig(baseEnv()).erasureLedger).toBeNull();
+  });
+
+  test("resolves to one object when fully configured", () => {
+    const cfg = loadConfig(baseEnv(LEDGER));
+    expect(cfg.erasureLedger).toMatchObject({
+      bucket: "pull-fm-backups-staging",
+      // Must match PULLFM_BACKUP_PREFIX_LEDGER in infra/lib/backup-common.sh.
+      prefix: "ledger/deletions",
+    });
+  });
+
+  test("REFUSES a partial configuration", () => {
+    // "Endpoint and bucket set, credential missing" is the shape a
+    // half-finished deployment takes, and it would boot a service that believes
+    // every erasure is durable at the moment of the request while every ledger
+    // write fails. That belief is what the 2026-07-29 drill falsified.
+    const { ERASURE_LEDGER_SECRET_ACCESS_KEY: _omitted, ...partial } = LEDGER;
+    expect(() => loadConfig(baseEnv(partial))).toThrow(
+      /ERASURE_LEDGER_SECRET_ACCESS_KEY/,
+    );
+  });
+
+  test("names every missing part rather than only the first", () => {
+    expect(() =>
+      loadConfig(
+        baseEnv({ ERASURE_LEDGER_ENDPOINT: LEDGER.ERASURE_LEDGER_ENDPOINT }),
+      ),
+    ).toThrow(/ERASURE_LEDGER_BUCKET.*ERASURE_LEDGER_ACCESS_KEY_ID/s);
+  });
+
+  test("normalises a prefix written with slashes", () => {
+    const cfg = loadConfig(
+      baseEnv({ ...LEDGER, ERASURE_LEDGER_PREFIX: "/ledger/deletions/" }),
+    );
+    expect(cfg.erasureLedger?.prefix).toBe("ledger/deletions");
+  });
+});
+
 describe("token prefix follows the data environment", () => {
   test("production issues pfm_live, everything else issues pfm_test", () => {
     expect(loadConfig(baseEnv()).apiTokenPrefix).toBe("pfm_test");

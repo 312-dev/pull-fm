@@ -11,7 +11,41 @@
  * silently ends up serving production traffic.
  */
 
+import { ALL_PROVIDERS, type ProviderName } from "@pull-fm/upstream";
 import { z } from "zod";
+
+/**
+ * A comma-separated list of provider names, validated against the real list.
+ *
+ * REJECTS AN UNKNOWN NAME RATHER THAN IGNORING IT, and that is the whole point
+ * of this schema existing instead of a `.split(",")`. This variable is the
+ * startup half of the kill switch: a deployment that sets
+ * `UPSTREAM_DISABLED_PROVIDERS=last.fm` believing it has stopped calling
+ * Last.fm must not boot serving Last.fm traffic. Refusing to start is the
+ * fail-closed answer in a file whose stated rule is fail-fast.
+ */
+const providerListSchema = z
+  .string()
+  .default("")
+  .transform((raw, ctx) => {
+    const known = new Set<string>(ALL_PROVIDERS);
+    const out: ProviderName[] = [];
+    for (const part of raw.split(",")) {
+      const name = part.trim();
+      if (name === "") continue;
+      if (!known.has(name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            `"${name}" is not a provider. A misspelled kill switch is a kill switch that does nothing, ` +
+            `so this refuses to start rather than ignoring it. Known providers: ${[...ALL_PROVIDERS].join(", ")}.`,
+        });
+        return z.NEVER;
+      }
+      out.push(name as ProviderName);
+    }
+    return out;
+  });
 
 /** Comma-separated `id:base64key` pairs, e.g. "kek:v1=BASE64,kek:v2=BASE64". */
 const kekSetSchema = z
@@ -392,6 +426,93 @@ const schema = z.object({
     .default("false")
     .transform((v) => v === "true"),
 
+  /**
+   * The per-provider kill switch, startup half.
+   *
+   * Comma-separated provider names that start disabled, e.g.
+   * `UPSTREAM_DISABLED_PROVIDERS=lastfm,deezer`. Empty by default, because an
+   * empty list is the only honest default: a deployment that disables a
+   * provider by accident is an outage, and a deployment that fails to disable
+   * one is a licence exposure that the runtime lever below can close in
+   * seconds.
+   *
+   * An unknown name is a STARTUP FAILURE rather than a no-op; see
+   * `providerListSchema`. That asymmetry is the SeatGeek lesson: a documented
+   * switch that silently does nothing is worse than no switch, because it is
+   * budgeted for.
+   *
+   * This one needs a restart. `UPSTREAM_KILL_SWITCH_DIR` does not.
+   */
+  UPSTREAM_DISABLED_PROVIDERS: providerListSchema,
+
+  /**
+   * The per-provider kill switch, RUNTIME half. A directory of flag files.
+   *
+   *   touch /etc/pullfm/kill/lastfm    # stops Last.fm calls within the poll
+   *   rm    /etc/pullfm/kill/lastfm    # resumes them within the poll
+   *
+   * Empty disables the lever, exactly as `MAINTENANCE_FLAG_FILE` does, and for
+   * the same reason: a path that is not configured must not be guessed at. The
+   * two levers compose in one direction only - either saying "off" means off,
+   * and neither can turn a provider back on that the other stopped. See
+   * lib/kill-switch.ts for the argument against an admin route.
+   */
+  UPSTREAM_KILL_SWITCH_DIR: z.string().default(""),
+
+  /** How long a flag-directory listing may be reused. */
+  UPSTREAM_KILL_SWITCH_POLL_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(60_000)
+    .default(1_000),
+
+  /**
+   * The out-of-band erasure ledger, written INLINE by the deletion cascade.
+   *
+   * WHY THESE EXIST AT ALL. The 2026-07-29 restore drill falsified a published
+   * claim: `deletion_log` was named in legal/privacy-policy.md and
+   * docs/api/deletion-and-backups.md as the authoritative list for re-applying
+   * erasures after a restore, and it cannot be, because it is a table inside
+   * the database being restored. Rolling back past an erasure rolls back the
+   * erasure and its own evidence in the same instant.
+   *
+   * The ledger is one immutable R2 object per erasure, outside Postgres. An
+   * exporter on a ten-minute timer already writes it, which makes ten minutes
+   * the erasure-durability RPO; these variables let the request itself write
+   * the object, which reduces that exporter to a reconciler.
+   *
+   * ALL FOUR OR NONE. A partially configured ledger is refused at startup (see
+   * loadConfig), because "endpoint set, credential missing" is a deployment
+   * that believes it has synchronous durability and does not.
+   *
+   * UNSET IS A SUPPORTED DEPLOYMENT and degrades to the timer, loudly: see
+   * services/erasure-ledger.ts. It is not made mandatory in production because
+   * the alternative failure - an Article 17 route that refuses to erase because
+   * an object-store credential is missing - is a worse compliance outcome than
+   * a ten-minute RPO.
+   */
+  ERASURE_LEDGER_ENDPOINT: z.string().url().optional(),
+  ERASURE_LEDGER_BUCKET: z.string().min(1).optional(),
+  ERASURE_LEDGER_ACCESS_KEY_ID: z.string().min(1).optional(),
+  ERASURE_LEDGER_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+  /** Must match `PULLFM_BACKUP_PREFIX_LEDGER` in infra/lib/backup-common.sh. */
+  ERASURE_LEDGER_PREFIX: z.string().default("ledger/deletions"),
+  /**
+   * Per-request ceiling on the R2 round trips.
+   *
+   * The ledger write is on the critical path of an interactive DELETE, and it
+   * is the step that must complete before anything irreversible happens. A
+   * hung object store has to become a fast, retryable failure rather than a
+   * request that never returns.
+   */
+  ERASURE_LEDGER_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(30_000)
+    .default(5_000),
+
   CORS_ORIGINS: z
     .string()
     .default("")
@@ -508,8 +629,26 @@ const schema = z.object({
 
 export type RawConfig = z.infer<typeof schema>;
 
+/**
+ * The resolved erasure-ledger destination, or null when none is configured.
+ *
+ * Derived into one object rather than left as five loose variables so that
+ * "configured" is a single, non-partial thing the wiring can branch on. A
+ * half-configured ledger cannot be represented here at all.
+ */
+export interface ErasureLedgerConfig {
+  readonly endpoint: string;
+  readonly bucket: string;
+  readonly accessKeyId: string;
+  readonly secretAccessKey: string;
+  readonly prefix: string;
+  readonly timeoutMs: number;
+}
+
 export interface Config extends Omit<RawConfig, "CREDENTIAL_KEKS"> {
   readonly CREDENTIAL_KEKS: ReadonlyMap<string, string>;
+  /** Null when the deployment has no out-of-band ledger; see the schema. */
+  readonly erasureLedger: ErasureLedgerConfig | null;
   readonly isProduction: boolean;
   /** Effective JWKS endpoint after the production derivation below. */
   readonly workosJwksUrl: string;
@@ -579,6 +718,50 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  /**
+   * The erasure ledger is all four values or none of them.
+   *
+   * A partial configuration is refused rather than ignored. "Endpoint and
+   * bucket set, credential missing" is the shape a half-finished deployment
+   * takes, and it would boot a service that believes every erasure is durable
+   * at the moment of the request while every ledger write fails. That belief is
+   * exactly what the 2026-07-29 drill falsified once already.
+   */
+  const ledgerParts = {
+    ERASURE_LEDGER_ENDPOINT: cfg.ERASURE_LEDGER_ENDPOINT,
+    ERASURE_LEDGER_BUCKET: cfg.ERASURE_LEDGER_BUCKET,
+    ERASURE_LEDGER_ACCESS_KEY_ID: cfg.ERASURE_LEDGER_ACCESS_KEY_ID,
+    ERASURE_LEDGER_SECRET_ACCESS_KEY: cfg.ERASURE_LEDGER_SECRET_ACCESS_KEY,
+  };
+  const ledgerSet = Object.entries(ledgerParts).filter(
+    ([, v]) => v !== undefined,
+  );
+  if (ledgerSet.length !== 0 && ledgerSet.length !== 4) {
+    const missing = Object.entries(ledgerParts)
+      .filter(([, v]) => v === undefined)
+      .map(([k]) => k);
+    throw new Error(
+      "invalid configuration:\n  ERASURE_LEDGER_*: the erasure ledger needs all four values or none. " +
+        `Missing: ${missing.join(", ")}. A partially configured ledger boots a service that claims ` +
+        "synchronous erasure durability it does not have.",
+    );
+  }
+
+  const erasureLedger: ErasureLedgerConfig | null =
+    cfg.ERASURE_LEDGER_ENDPOINT === undefined ||
+    cfg.ERASURE_LEDGER_BUCKET === undefined ||
+    cfg.ERASURE_LEDGER_ACCESS_KEY_ID === undefined ||
+    cfg.ERASURE_LEDGER_SECRET_ACCESS_KEY === undefined
+      ? null
+      : {
+          endpoint: cfg.ERASURE_LEDGER_ENDPOINT,
+          bucket: cfg.ERASURE_LEDGER_BUCKET,
+          accessKeyId: cfg.ERASURE_LEDGER_ACCESS_KEY_ID,
+          secretAccessKey: cfg.ERASURE_LEDGER_SECRET_ACCESS_KEY,
+          prefix: cfg.ERASURE_LEDGER_PREFIX.replace(/^\/+|\/+$/g, ""),
+          timeoutMs: cfg.ERASURE_LEDGER_TIMEOUT_MS,
+        };
+
   // A wildcard CORS origin on an API that serves per-user data would let any
   // site read it with the user's credentials.
   if (cfg.DEPLOY_ENV !== "local" && cfg.CORS_ORIGINS.includes("*")) {
@@ -644,6 +827,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     ...cfg,
+    erasureLedger,
     isProduction,
     workosJwksUrl,
     workosApiBaseUrl,
