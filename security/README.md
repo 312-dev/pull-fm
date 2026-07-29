@@ -77,6 +77,19 @@ That is an inventory of where to push and when. Publishing the **method** costs 
 and is worth a lot to a reader, so the method stays. Publishing the **current state of our weakest
 controls** is the part that only helps one side, so it moved.
 
+### If you followed a path here and found nothing
+
+Comments across this repository cite `security/accepted-risks.md` and
+`security/AUDIT-<date>.md` as the source of a decision: in `.trivyignore.yaml`, `.gitleaks.toml`,
+`package.json`, the ZAP plans and scripts, the DAST workflow, the rate-limit and upstream-budget
+code, and the Terraform modules. **Those paths no longer resolve here, and the citations are
+deliberately left alone.** They record which finding produced which line of code, which is the useful
+part, and rewriting two dozen comments to say "somewhere else" would lose that for nothing. Read them
+as references into the private repository.
+
+None of them is a code path. Nothing in this repository reads those files at runtime or in CI; the
+only executable dependency was the validator, and it is handled above.
+
 ### What stays public, and is meant to
 
 `SECURITY.md`, `THREAT-MODEL.md`, `BOLA-TESTING.md`, `API-SECURITY-CHECKLIST.md`, this README,
