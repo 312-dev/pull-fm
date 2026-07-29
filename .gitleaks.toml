@@ -120,6 +120,15 @@ regexes = [
   # The illustrative response body in docs/api/personal-api-tokens.md. Pinned
   # exactly, so a DIFFERENT token in that file is still a finding.
   '''pfm_live_kQ3n8xF2sVb7YtR1pLmA9dGhJ0zW4cE6uN5oI2sK8yQ''',
+  # The synthetic probe value the Phase 8 audit used to demonstrate that the
+  # `xxxx+` stopword above suppressed real keys (security/AUDIT-2026-07-29.md
+  # F5). It is invented, never issued, and decodes to the ASCII string
+  # "fakeKeyForTesting1234". It is pinned here rather than edited out of the
+  # report because gitleaks scans full HISTORY: the commit that introduced it
+  # keeps the line whatever the current file says, so an edit alone would leave
+  # the gate permanently red. The value is exact, so the same prefix with
+  # different bytes is still a finding.
+  '''sk_live_xxxxZmFrZUtleUZvclRlc3RpbmcxMjM0NTY''',
 ]
 
 [[allowlists]]
