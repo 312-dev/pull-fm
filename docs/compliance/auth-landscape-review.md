@@ -90,12 +90,13 @@ WorkOS still wins, because it holds nothing of ours and cannot reach the vault.
 
 ### Ranked shortlist
 
-| #     | Option                       | Isolation                                   | Users in our DB                           | Cost @10k / @50k MAU                                                                         | EU                | Verdict                                       |
-| ----- | ---------------------------- | ------------------------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------- | --------------------------------------------- |
-| **1** | **Stay on WorkOS**           | Hosted, isolated                            | No (exportable; no password hashes exist) | **$0 / $0**                                                                                  | **No**            | **Recommended**                               |
-| 2     | Descope                      | Hosted, isolated                            | No                                        | $249 / ~$2,049 list; EU region gated at $799. Plausibly ~$0 on non-profit or startup pricing | **Frankfurt**     | Best option **if residency binds**            |
-| 3     | Hanko (Cloud or self-hosted) | Separate process, **own separate Postgres** | Self-hosted: yes, in a DB of its own      | $0 / ~$429 Cloud                                                                             | **German vendor** | Best isolation; weakest assurance             |
-| 4     | Auth0                        | Hosted, isolated                            | No                                        | $0 / $3,500                                                                                  | EU, no sub-region | Cheap EU fallback; Okta support-plane history |
+| #     | Option                       | Isolation                                             | Users in our DB                           | Cost @10k / @50k MAU                                                                         | EU                 | Verdict                                       |
+| ----- | ---------------------------- | ----------------------------------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------ | --------------------------------------------- |
+| **1** | **Stay on WorkOS**           | Hosted, isolated                                      | No (exportable; no password hashes exist) | **$0 / $0**                                                                                  | **No**             | **Recommended**                               |
+| 2     | Descope                      | Hosted, isolated                                      | No                                        | $249 / ~$2,049 list; EU region gated at $799. Plausibly ~$0 on non-profit or startup pricing | **Frankfurt**      | Best option **if residency binds**            |
+| 3     | SuperTokens, self-hosted     | Separate process, **private port, no public surface** | Yes                                       | $0 self-hosted                                                                               | Wherever we run it | Best self-hosted option; you own the patching |
+| 4     | Hanko (Cloud or self-hosted) | Separate process, **own separate Postgres**           | Self-hosted: yes, in a DB of its own      | $0 / ~$429 Cloud                                                                             | **German vendor**  | Best DB isolation; weakest assurance          |
+| 5     | Auth0                        | Hosted, isolated                                      | No                                        | $0 / not published                                                                           | EU, no sub-region  | Cheap EU fallback; Okta support-plane history |
 
 Everything else is eliminated:
 
@@ -117,9 +118,13 @@ Everything else is eliminated:
 - **Kinde, Cognito:** no magic link.
 - **Supabase Auth standalone on Neon:** unsupported integration, and CVE-2026-31813 was an
   Apple-provider auth bypass. We use Apple sign-in.
-- **Keycloak, Zitadel, Logto, Authentik, Casdoor, Kratos, SuperTokens:** self-hosting an identity
-  service with no on-call. SuperTokens additionally puts MFA and account linking behind a paid
-  enterprise licence and its Node SDK went four months without a commit while the core shipped 383.
+- **Keycloak:** no built-in magic link at all; the path would be a third-party SPI JAR on the
+  security boundary. **Logto:** four CVSS 9.1 auth bypasses disclosed 2026-07-23 and still unpatched.
+  **Casdoor:** 21 CVEs, bus factor 1, and CERT/CC could not reach the maintainers. **Zitadel:** an
+  open bug breaking registration on Neon, no email magic link, ~56 CVEs. **Authentik:** 72% of
+  advisories high or critical, with audit logging paywalled. **Ory Kratos:** three OSS releases in
+  21 months and security-release SLAs are an Enterprise feature. **FusionAuth:** proprietary EULA,
+  not open source, audit reports NDA-gated.
 
 **A finding that changes how to read "diversification".** Better Auth Inc. took over Auth.js
 stewardship on 2025-09-22 and announced it is **joining Vercel on 2026-07-07**. The same three or
@@ -128,7 +133,7 @@ and `@auth/pg-adapter`. **Choosing Auth.js instead of Better Auth is not supply-
 diversification; it is the same supply chain.** The Vercel post is silent on licence, trademark and
 governance, which is the open question for anyone planning multi-year.
 
-**Why Hanko is third and not second.** It has the best isolation property of anything surveyed: its
+**Why Hanko is fourth and not second.** It has the best isolation property of anything surveyed: its
 own process **and its own database**, so it never holds credentials to the Postgres containing the
 credential vault. But it has **no published third-party audit**, four to five active contributors, an
 unverified funding position, and $429/mo at 50k MAU on Cloud. Descope outranks it purely on assurance
@@ -173,10 +178,14 @@ doing any engineering. Their own FAQ invites the request.
    hardcoded three-table list and would otherwise pass green over a broken cascade.
 
 **For "self-host a service" to be right**, the operator has to genuinely want to run identity
-infrastructure. Keycloak carries 3,060 open issues and a JVM; Zitadel is AGPL-3.0 with 1,097 open
-issues; all of them are a patch obligation on the path to other people's credentials. The threat
+infrastructure, and the product has to be **SuperTokens**. It is the only one of the eight that adds
+no new public attack surface, has zero CVEs across core and SDK, keeps magic link and social in the
+Apache-2.0 portion, and ships an official Fastify integration. Even then it is a patch obligation on
+the path to other people's credentials, with a bus factor of two and no public audit. The threat
 model's own framing applies: this trades a vendor risk we have already mitigated for an operational
-risk we have no capacity to absorb.
+risk we have no capacity to absorb. Note also that the two most obvious choices are the wrong ones,
+which is the value of having checked: Keycloak has no magic link, and Logto currently has four
+unpatched CVSS 9.1 auth bypasses.
 
 **For "adopt Neon Auth" to be right**, it would have to reach GA, support separate frontend and
 backend deployments, and track Better Auth releases closely rather than pinning six months back. All
@@ -569,52 +578,115 @@ vendor's database, which forfeits the only real advantage this category had over
 ## Category 3: self-hosted services (separate process, no vendor)
 
 This is the category the brief asked me to take seriously, on the grounds that it may dominate both
-ends: no vendor, but still process-isolated. It does have that property, and it is the right shape in
-the abstract. It loses on a single constraint that no amount of architecture fixes.
+ends: no vendor, but still process-isolated. Eight products were checked against live LICENSE files,
+NVD/GHSA, and vendor docs. The results reorder the category substantially, and one product comes out
+better than I expected.
 
-**Project health, verified via the GitHub API on 2026-07-29.** Every one of these is alive. None is
-a Lucia-style trap.
+### Licences are not what the badges say
 
-| Project          | Licence                        | Latest release              | Open issues | Stars  |
-| ---------------- | ------------------------------ | --------------------------- | ----------- | ------ |
-| Keycloak         | Apache-2.0                     | 26.7.0 (2026-07-09)         | **3,060**   | 35,876 |
-| Authentik        | NOASSERTION (split)            | 2026.5.6 (2026-07-22)       | 1,194       | 22,528 |
-| SuperTokens core | NOASSERTION (split)            | v12.0.8 (2026-07-28)        | 152         | 15,239 |
-| Zitadel          | **AGPL-3.0**                   | v4.16.1 (2026-07-17)        | **1,097**   | 14,568 |
-| Logto            | MPL-2.0                        | v1.41.0 (2026-06-30)        | 168         | 14,251 |
-| Casdoor          | Apache-2.0                     | v3.125.0 (2026-07-24)       | 118         | 14,075 |
-| Ory Kratos       | Apache-2.0                     | v26.2.0 (**2026-03-20**)    | 218         | 13,794 |
-| Hanko            | NOASSERTION (AGPL-3.0 backend) | backend/v3.0.4 (2026-07-27) | 50          | 8,990  |
+Two of the eight are misreported by GitHub's licence detection, and both matter:
 
-Two observations from that table alone. Kratos's last tagged release is **four months old** while its
-default branch is current, which is a release-cadence question worth answering before adoption. And
-the licences are not uniform: **Zitadel is AGPL-3.0** and Hanko's backend is AGPL-3.0, which is fine
-if we neither modify nor redistribute, but is a condition to be aware of rather than a detail.
+- **Zitadel relicensed from Apache-2.0 to AGPL-3.0-only** with v3 on 2025-03-31. Contributions are
+  still taken inbound under Apache-2.0, which is exactly the arrangement that makes a second
+  relicensing possible.
+- **FusionAuth is not open source in any sense.** It is a proprietary EULA granting only "a limited,
+  non-exclusive, non-transferable, non-sublicensable, license to install, execute, display and
+  otherwise use" [VERBATIM], forbidding modification and redistribution. The server source is not on
+  GitHub and `fusionauth-containers` carries no LICENSE file at all.
+- **Authentik** and **SuperTokens** both ship a proprietary carve-out inside an otherwise
+  permissive repo. SuperTokens gates `account_linking, multi_tenancy, dashboard_login, mfa, security,
+oauth, saml` behind its enterprise licence; **`passwordless` and `thirdparty` are not on that
+  list**, so magic link and social are fully Apache-2.0. Authentik paywalls **enhanced audit
+  logging**, which is the single feature you would most want on a service adjacent to a credential
+  vault.
 
-**NOT RESEARCHED in this pass:** per-project CVE history (Keycloak, Authentik and Casdoor were
-expected to carry auth-bypass CVEs), third-party audit status, and the precise Apache-2.0-versus-Ory-
-Network feature split for Kratos including whether passwordless magic link is in the OSS build. The
-delegated survey did not return before the search budget was exhausted. These are **not assumed**,
-and the absence of a CVE list here must not be read as an absence of CVEs. Given the Lucia lesson,
-the opposite is more likely: a mature identity server with no disclosed CVEs would be the surprising
-result.
+### The CVE picture, and two live unpatched sets
 
-**Why the whole category loses anyway.** The constraint is in the brief: **solo operator, no
-on-call.** Self-hosting an identity service means owning the patch cycle for the component that
-guards other people's credentials. Keycloak's 3,060 open issues and Zitadel's 1,097 are not
-indictments, they are the normal surface area of software this size, and that is the point: it is a
-lot of software to keep current, at 2am, alone, for a donation-funded hobby project. Trading a vendor
-risk that is already mitigated (M23 export, no password hashes, $0 cost) for an unbounded operational
-obligation is not a reduction in exposure. It is a transfer of exposure from a party that is paid to
-carry it to one who has no capacity to.
+| Project     | CVEs 2023-2026                | Worst                                                | Note                                                          |
+| ----------- | ----------------------------- | ---------------------------------------------------- | ------------------------------------------------------------- |
+| SuperTokens | **0**                         | n/a                                                  | NVD and GHSA both return zero, core and Node SDK              |
+| Ory Kratos  | 2, 0 critical                 | 7.2 admin-API SQLi                                   | Cleanest of the OSS-governed set                              |
+| Keycloak    | 64 advisories, **0 critical** | JWT algorithm confusion auth bypass                  | Dominant theme is `redirect_uri` and SAML                     |
+| Logto       | **12, all July 2026**         | **4 unpatched at CVSS 9.1**                          | See below                                                     |
+| Authentik   | 39, 6 critical                | authenticated RCE; auth bypass via `X-Forwarded-For` | **72% high or critical**                                      |
+| Zitadel     | ~56, six at 9.0+              | 9.8 IdP auto-linking account takeover                | 13 in the first 7 months of 2026                              |
+| Casdoor     | **21**                        | 9.9 cross-tenant authz bypass                        | See below                                                     |
+| FusionAuth  | 0 since 2022                  | n/a                                                  | Closed source; security fixes ship **without CVE assignment** |
 
-The one exception worth naming is **Hanko**, and only because of a property none of the others share:
-self-hosted, it runs with **its own separate Postgres**, so a compromise of the auth service does not
-hand over the database containing the credential vault. Every other option in this table would either
-share our Postgres or need credentials to it. That is a real architectural advantage and it is why
-Hanko, not Kratos, is second on the shortlist.
+**Logto is presently unsafe to deploy.** CERT/CC disclosed six vulnerabilities on 2026-07-23,
+including **four at CVSS 9.1**: unverified email-based SSO account linking, OIDC nonce bypass, MFA
+not enforced during SSO, and principal collision via unnormalised email. There is no vendor advisory
+and no release since; the latest tag, v1.41.0, **predates the disclosure**. This corrects my earlier
+note that Logto looked healthy on release cadence: cadence is not the same as response.
 
----
+**Casdoor has the worst risk profile in the set.** Twenty-one CVEs, fourteen of them in 2026, twelve
+authn/authz bypasses in eighteen months, bus factor of one, and CERT/CC's own note VU#780781 states
+VERBATIM: "Unfortunately, we were unable to reach the Casdoor team to coordinate this vulnerability,
+and a patch is not yet available." Its repo has published **zero** advisories ever. Default
+credentials are `built-in/admin` / `123`.
+
+**Keycloak's 64 advisories with zero criticals is a better record than the raw count suggests**, and
+its 2019 Cure53 audit is public. But it fails us on a plain feature gap: **there is no built-in
+magic link.** No email-link authenticator exists, so the single most important path in our design
+would be a third-party SPI JAR sitting on the security boundary, re-verified on every upgrade. That
+is a worse position than any vendor risk it removes.
+
+### The axis I under-weighted: how much new public surface does it add
+
+This is the property that separates the category, and I had not scored it.
+
+| Project                      | New public exposure                                        |
+| ---------------------------- | ---------------------------------------------------------- |
+| **SuperTokens**              | **None.** Core listens on a private port behind an API key |
+| Ory Kratos                   | Public :4433, admin :4434 kept private                     |
+| FusionAuth                   | One hostname, admin UI and OAuth share a port              |
+| Keycloak, Zitadel, Authentik | Own hostname and certificate                               |
+| Logto                        | **Two** public hostnames and two certificates              |
+| Casdoor                      | **Mandatory**: it is both the login page and the admin UI  |
+
+SuperTokens' documentation is explicit: "You should never call the SuperTokens core API from your
+frontend" and "This ensures that only your backend can query the SuperTokens core" [VERBATIM]. That
+is a materially different shape from everything else here. There is no auth hostname to defend, no
+admin UI exposed to the internet, and no certificate to rotate.
+
+### Two products are disqualified by our specific stack
+
+**Zitadel has an open bug against Neon.** Issue #11912, filed 2026-03-24 and still open, is titled
+"Registration fails with 'User could not be found'" with the environment recorded as Neon. It is a
+read-after-write consistency failure between its event store and its projections. That is our exact
+database, and the symptom is broken registration. Zitadel also has no email magic link (its
+passwordless means passkeys) and its recommended production shape is three nodes of 4 CPU / 16 GB.
+
+**Ory Kratos has a release-stream problem, not a code problem.** Two CVEs and clean Apache-2.0
+governance, but only three OSS releases in twenty-one months against 509 commits, and the README
+lists "Regular security releases, including CVE patches, with service level agreements" as an
+**Enterprise** benefit. There is also no OSS admin console, no hosted login UI, and no built-in rate
+limiting. Its passwordless flow is a six-digit code, not a clickable link.
+
+### Where this leaves the category
+
+**SuperTokens self-hosted is the strongest self-hosted option, and I ranked it too low earlier.** It
+is the only one that adds no new public attack surface, it has a verifiable zero-CVE record across
+both core and Node SDK, magic link and social sit in the Apache-2.0 portion with no password required,
+and it ships an **official in-repo Fastify integration** (confirmed live in `lib/ts/framework`, which
+lists `fastify` alongside express, koa and hapi). Postgres 13+, no extensions, and a documented
+footprint small enough for a 1 GB instance at 100k MAU.
+
+Its honest costs: a JVM process, **bus factor 2** (two developers write roughly 80% of commits), no
+public third-party audit, an `ee/` directory to stay out of, and two real footguns. With no
+`POSTGRESQL_*` environment variables the Docker image **silently falls back to an in-memory
+database**, and `API_KEYS` defaults to none. Its connection pool has a hard 5-second connect timeout,
+so it wants Neon's direct endpoint rather than the pooler.
+
+**The category still loses, and the reason is unchanged.** Every option here, SuperTokens included,
+means the operator owns the patch cycle for the component guarding other people's credentials. The
+constraint in the brief is solo, no on-call. Trading a vendor risk that is already mitigated (M23
+export, no password hashes, $0 cost, annual third-party pentests) for an unbounded operational
+obligation is not a reduction in exposure. It is a transfer of exposure from a party paid to carry it
+to one with no capacity to.
+
+That said, if self-hosting is ever chosen, the answer is **SuperTokens**, not Kratos and emphatically
+not Keycloak, Logto or Casdoor.
 
 ## Category 4: passkey-first
 
@@ -705,11 +777,13 @@ released (24.0.3, 2026-07-24), but the SDK is a thin HTTP client over a separate
 core** that owns the database connection. VERBATIM: "**SuperTokens Core**: A HTTP service that
 contains the core business logic for authentication. It interfaces with the database and gets queried
 by the backend SDK." There is no embedded mode. That places SuperTokens in the self-hosted-service
-category, and it means adopting it adds a second stateful service. **MFA and account linking are
-behind a paid enterprise licence** (`ee/` carve-out). Its Node SDK went **four months without a
-commit** (2026-03-23 to 2026-07-13) while the core shipped 383. Fastify support is genuinely
-first-class, which is more than Auth.js manages. Zero advisories anywhere, which given 328 stars on
-the SDK is more plausibly low researcher attention than exceptional quality.
+category, where it is assessed in full and where it ranks first. Its `ee/` carve-out gates MFA,
+account linking and SAML, but **not `passwordless` or `thirdparty`**, so the paths we need are
+Apache-2.0. Its Node SDK went four months without a commit (2026-03-23 to 2026-07-13) while the core
+shipped 383, though the core backports across six older majors. Fastify support is genuinely
+first-class, which is more than Auth.js manages. Zero advisories anywhere; given the SDK's modest
+star count that is partly low researcher attention rather than proof of quality, but the core is
+never internet-facing, which limits who can look.
 
 **Better Auth: the only serious in-process candidate, and still not recommended.** 29,372 stars, MIT,
 created 2024-05-19, pushed the day of this review. **Bus factor is the best in this category**: over
@@ -1259,13 +1333,22 @@ Claims that remain **unverified** and are flagged as such in the text: WorkOS IS
 MAU inclusion and its sub-processor list (no public page); **whether Descope's EU region is actually
 plan-gated** (the docs say Growth-and-above, the pricing page lists multi-region as included across
 tiers, and the two flatly contradict each other, so get it in writing); Kinde's SOC 2 report tier
-(pricing table and compliance doc disagree) and its overage
-arithmetic (the on-page calculator disagrees with the stated 10,500 allowance); PropelAuth's data
-location, export path and company history; whether Neon backported the Better Auth fix without moving
-its version string; Firebase's per-MAU bands above 50k and whether its auth regionalisation preview
-ever shipped; Cognito's certifications and whether a true clickable magic link is achievable
-natively; Better Auth's and Hanko's audit status beyond "none found"; and two aggregator-sourced Okta
-incident claims (Oct 2025, Jun 2026) that no primary source corroborated.
+(pricing table and compliance doc disagree) and its overage arithmetic (the on-page calculator
+disagrees with the stated 10,500 allowance); PropelAuth's data location, export path and company
+history; whether Neon backported the Better Auth fix without moving its version string; Firebase's
+per-MAU bands above 50k; Cognito's certifications and whether a true clickable magic link is
+achievable natively; Better Auth's and Hanko's audit status beyond "none found"; two
+aggregator-sourced Okta incident claims (Oct 2025, Jun 2026) that no primary source corroborated;
+whether **FusionAuth's EULA permits a public consumer app's end users** (the "unaffiliated third
+parties" clause is ambiguous and there is no explicit CIAM carve-out); whether Casdoor's unpatched
+SAML CVEs have since been silently fixed in the v3.x line; whether **Authentik's task system uses
+`LISTEN/NOTIFY`**, which is the decisive Neon-compatibility question for it; and the trust-centre
+contents for Logto, SuperTokens and Zitadel, all JS-rendered or bot-blocked, so unknown rather than
+absent.
+
+**No self-hosted vendor documents Neon serverless Postgres.** Every Neon-compatibility statement in
+Category 3 is inference, with one exception: the Zitadel registration bug, which is a filed issue
+naming Neon explicitly.
 
 **Where two independent research passes disagreed**, both figures are reported rather than one being
 silently chosen: Auth0 at 50k MAU ($3,500/mo on Essentials versus "not public"), and Descope's
