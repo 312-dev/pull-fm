@@ -1,0 +1,47 @@
+# =============================================================================
+# Pull.fm - Trivy suppressions.
+#
+# Every entry here is an assertion that a finding cannot be a true positive.
+# If one of those assertions stops holding, the entry is a vulnerability, so
+# each carries its reason and an expiry, in the spirit of
+# security/accepted-risks.md.
+#
+# THIS FILE IS NOT A PLACE TO SILENCE A DEPENDENCY ADVISORY. There is no
+# `vulnerabilities:` section and there should not be one: the Gate 8 clause is
+# "zero high/critical from Trivy", and an ignored CVE is a red gate wearing a
+# green tick. Fix the dependency instead.
+# =============================================================================
+
+secrets:
+  # AUDIT 2026-07-29. Found by running the CI invocation verbatim rather than
+  # by reading the workflow: `.github/workflows/security.yml` runs Trivy with
+  # `scanners: vuln,secret,misconfig` and `exit-code: 1`, and Trivy's secret
+  # scanner flags two lines inside `.gitleaks.toml` itself as a Stripe secret
+  # key at CRITICAL. So the `deps` job had a SECOND, independent reason to be
+  # red that had nothing to do with the vitest advisory, and it would have
+  # stayed red after the dependency bump with no obvious cause.
+  #
+  # The flagged value is the synthetic probe from AUDIT-2026-07-29 F5. It
+  # base64-decodes to `fakeKeyForTesting123456`, which is how it can be SHOWN
+  # to be non-credential rather than asserted to be. It lives in
+  # `.gitleaks.toml` because gitleaks scans full history and the commit that
+  # introduced it keeps the line whatever the current file says, so it had to
+  # be pinned by value rather than edited out.
+  #
+  # SCOPED BY PATH, NOT SUPPRESSED GLOBALLY. `.trivyignore` with a bare
+  # `stripe-secret-token` line also clears this, and was rejected: it would
+  # disable the rule for every current and future file in the repository, which
+  # is exactly the defect F4 recorded in the gitleaks path allowlist. This
+  # narrow form is defensible because `.gitleaks.toml` is a scanner
+  # CONFIGURATION file whose contents are credential patterns and allowlisted
+  # sample values by construction, and because gitleaks still scans it with
+  # value-scoped allowlists, so a different secret appearing in the same file
+  # is still a finding from the other scanner.
+  - id: stripe-secret-token
+    paths:
+      - ".gitleaks.toml"
+    statement: >-
+      Synthetic probe value pinned by value in the gitleaks allowlist
+      (AUDIT-2026-07-29 F5). Decodes to fakeKeyForTesting123456. Re-verify at
+      expiry that the file still contains no live credential.
+    expired_at: 2027-01-29

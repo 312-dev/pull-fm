@@ -131,6 +131,14 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           format: table
+          # AUDIT 2026-07-29 (second pass). `.trivyignore.yaml` is NOT
+          # auto-detected: Trivy 0.72 picks up a bare `.trivyignore` by default
+          # and ignores the YAML form unless it is named. Without this line the
+          # file is a suppression that looks configured and is never read, which
+          # is the same defect as the gitignored semgrep ruleset this repo
+          # already recorded. Proved: `trivy fs .` exits 1 with two findings,
+          # `--ignorefile .trivyignore.yaml` exits 0.
+          trivyignores: .trivyignore.yaml
         env:
           TRIVY_INCLUDE_DEV_DEPS: "true"
 
