@@ -1,19 +1,23 @@
 # Pull.fm Terms of Service and Application End User Licence Agreement
 
-> # STOP. THIS DOCUMENT CANNOT BE PUBLISHED.
+> # THE VOID CLAUSE IS FIXED.
 >
-> **Section 16 selects no governing law and no venue.** Both are still
-> placeholders. Published as written, **the dispute framework is void**: there is
-> no chosen law, no forum, and no consent to jurisdiction, and sections 11, 12
-> and 13 (warranty disclaimer, liability cap, indemnity) are left resting on a
-> choice-of-law clause that chose nothing.
+> **Section 16 now selects a law and a forum.** 312.dev LLC is organised in
+> **Illinois**, supplied by the operator on 2026-07-29, so the governing-law and
+> venue placeholders are filled and the dispute framework that the warranty
+> disclaimer (11), the liability cap (13) and the indemnity (14) rest on is no
+> longer resting on nothing. Section 1 carries the same fact.
 >
-> **This is not a drafting decision and it must not be guessed.** The controller
-> is **312.dev LLC**, and its state of organisation is a fact about that company:
-> read it off the certificate of formation or the registered-agent record. Whoever
-> publishes this is the person who knows it; the drafter did not.
->
-> Section 1 has the same placeholder, for the same fact.
+> **Section 2 now claims a territorial refusal, and the claim was checked before
+> it was written.** `apps/bff/src/lib/registration-geo.ts` holds the country
+> list, three authentication routes enforce it before the identity provider is
+> contacted, and two test suites cover it. Section 2 says what the control does
+> and, just as deliberately, what it does not: it refuses account creation rather
+> than blocking access, and it is address-based geolocation rather than proof of
+> residence. A terms document that said "United States residents only" while
+> European sign-ups succeeded would be a false statement in a binding agreement,
+> which is worse than the gap it was meant to cover, so the sentence was written
+> only after the code was read.
 >
 > **Before publishing, run:**
 >
@@ -22,8 +26,7 @@
 > ```
 >
 > It exits non-zero while any placeholder remains and prints each one with a
-> file and line. It currently reports two `VOID IF PUBLISHED` markers, both in
-> section 16.
+> file and line.
 
 > # DRAFT - NOT LEGAL ADVICE, REQUIRES REVIEW
 >
@@ -47,7 +50,7 @@
 > event data at all. Section 8 and section 9 are that clause discharged.
 
 **Version:** DRAFT-0 (unpublished)
-**Last updated:** 2026-07-28
+**Last updated:** 2026-07-29
 **Effective:** not yet effective
 
 ---
@@ -55,13 +58,8 @@
 ## 1. Who we are and what this covers
 
 Pull.fm ("**Pull.fm**", "**we**", "**us**") is a music discovery service operated
-by **312.dev LLC**, a limited liability company organised under the laws of
-`[CONFIRM: state of organisation]`, United States.
-
-> **This placeholder identifies the party you would be contracting with, and it
-> also settles section 16.** It is one fact, needed in three places: here,
-> section 16's governing law, and section 16's venue. See the notice at the top
-> of this document.
+by **312.dev LLC**, a limited liability company organised under the laws of the
+**State of Illinois**, United States.
 
 These Terms are a binding agreement between you and 312.dev LLC. They cover:
 
@@ -84,11 +82,47 @@ availability in terms we can actually keep.
 
 ---
 
-## 2. Eligibility and your account
+## 2. Eligibility, where Pull.fm is offered, and your account
+
+**Pull.fm is offered to residents of the United States.** We **refuse to create
+an account** for anyone who appears to be in the **European Economic Area** (the
+27 EU member states plus Iceland, Liechtenstein and Norway), the **United
+Kingdom**, or **Switzerland**. Those three are named separately because they are
+three separate legal regimes rather than one: the UK has had its own data
+protection law since Brexit, and Switzerland was never in the EEA. The refusal
+also covers **European Union territory that is reported under its own country
+code** rather than its member state's, which is why a sign-up from Reunion or the
+Aland Islands is refused as well. `privacy-policy.md` section 9 sets out why this
+matters and what it means for which law applies to you.
+
+Four things about that refusal, stated precisely because each of them is a place
+this kind of clause usually overstates itself:
+
+- **It refuses registration, not access.** Pull.fm is not switched off in those
+  places. If you already have an account it keeps working, your session still
+  refreshes, you can still sign out, nothing was deleted, and the rest of the API
+  answers normally. What is refused is the creation of a new account.
+- **A refused attempt creates nothing and sends nothing.** The check runs before
+  we contact our identity provider, so no account is created, no record of your
+  address is created at that provider, and no sign-in email is sent to you. You
+  get an immediate explanation instead.
+- **It is decided from the network address your request arrives from**, as
+  reported by our content delivery network. That is the ordinary way this is
+  done and it is what we can offer, but it is not perfect: a virtual private
+  network or a mis-located address can defeat it in either direction. **We do not
+  claim that no resident of those regions can hold an account.** We claim that we
+  do not knowingly open one, that we take reasonable measures not to, and that
+  this is our stated intent.
+- **If we cannot determine where a request comes from, we refuse it.** That
+  includes requests over Tor. It is deliberate, because the alternative would
+  make the whole thing optional.
 
 You must be at least **16 years old** to use Pull.fm. We do not knowingly
 provide the service to anyone younger. If we learn that an account belongs to
-someone under 16, we will delete it.
+someone under 16, we will delete it. **Pull.fm never asks your age**, so this is
+a term you agree to rather than something we check;
+[`privacy-policy.md`](privacy-policy.md) section 11 states that plainly and says
+what follows from it.
 
 Accounts are created through **WorkOS AuthKit**, using an emailed one-time code
 ("magic link"). That is the whole sign-in surface: social sign-in, passkeys and
@@ -131,10 +165,7 @@ You may not:
   our [security policy](../SECURITY.md), which includes a safe harbour for good
   faith research.
 
-`[CONFIRM: whether the compiled client binaries are themselves distributed under
-Apache-2.0, in which case the "non-transferable, revocable" framing above is
-inconsistent with the licence actually granted and this section must be rewritten
-to cover only the hosted service.]`
+`[CONFIRM: whether the compiled client binaries are themselves distributed under Apache-2.0, in which case the "non-transferable, revocable" framing above is inconsistent with the licence actually granted and this section must be rewritten to cover only the hosted service.]`
 
 ---
 
@@ -296,11 +327,7 @@ in SeatGeek's own API Terms of Use.
 Except as stated in this section, these Terms create no rights in any person who
 is not a party to them.
 
-`[CONFIRM with counsel: that this clause is drafted so as to be effective under
-the governing law chosen in section 16, and that "at least as protective as"
-under SeatGeek clause 4.3 is satisfied by the combination of sections 7, 8, 9,
-11, 12, and 13. This is the specific judgement a non-lawyer cannot make and it is
-the whole point of the clause.]`
+`[CONFIRM with counsel: that this clause is drafted so as to be effective under Illinois law, which section 16 now selects, and that "at least as protective as" under SeatGeek clause 4.3 is satisfied by the combination of sections 7, 8, 9, 11, 13, and 14. This is the specific judgement a non-lawyer cannot make and it is the whole point of the clause.]`
 
 ---
 
@@ -411,36 +438,33 @@ Sections 6 (your content licence, as to content already lawfully processed), 7,
 
 ## 16. Governing law and disputes
 
-> ### THIS SECTION IS VOID AS WRITTEN
+> ### This section is no longer void, and one thing about it is deliberate
 >
-> The two placeholders below are **not** editorial notes. Until both are filled
-> in, this section selects no law and no forum, so it has no legal effect and
-> neither does anything that depends on it: the warranty disclaimer (11), the
-> liability cap (12), and the indemnity (13) all assume a governing law exists.
+> Both placeholders are filled: **312.dev LLC is organised in Illinois**, so
+> Illinois law governs and the Illinois courts are the forum. The warranty
+> disclaimer (11), the liability cap (13) and the indemnity (14) now rest on a
+> choice of law that chose something.
 >
-> **Do not guess the state.** It is the state of organisation of **312.dev LLC**,
-> a fact recorded on that company's formation documents. Fill it in section 1
-> at the same time; it is the same fact in both places.
->
-> `make legal` fails while either placeholder is present.
+> **No county is named, on purpose.** A venue clause is enforceable when it fixes
+> a state and a court system, and naming a county would have meant guessing the
+> LLC's principal place of business, which nobody has confirmed. Note also that
+> Illinois has **two** federal judicial districts, Northern and Southern, so
+> "the Northern District" would have been a guess as well. If the operator wants
+> a specific county and district, this clause can be narrowed later without
+> reopening anything.
 
-These Terms are governed by the laws of `[CONFIRM: state]`, United States,
+These Terms are governed by the laws of the **State of Illinois**, United States,
 without regard to its conflict-of-laws rules. The exclusive venue for any dispute
-is `[CONFIRM: county/state courts]`, and you and we each consent to personal
-jurisdiction there.
+arising out of or relating to these Terms or to Pull.fm is the **state and
+federal courts located in the State of Illinois**, and you and we each consent to
+personal jurisdiction and venue in those courts and waive any objection to them
+on grounds of inconvenient forum.
 
-If you are a consumer resident in the European Union, the United Kingdom, or
-another jurisdiction whose law gives you a non-waivable right to the protection
-of your local law or to bring proceedings in your local courts, nothing in this
-section removes that right.
+If you are a consumer resident in a jurisdiction whose law gives you a
+non-waivable right to the protection of your local law or to bring proceedings in
+your local courts, nothing in this section removes that right.
 
-`[CONFIRM with counsel: whether to include an arbitration clause and class-action
-waiver. This draft deliberately includes neither. For a free, non-commercial
-service with a USD 100 liability cap, arbitration adds cost and consumer-law risk
-without adding protection, but that is a judgement to confirm rather than assume.
-Note also that SeatGeek clause 4.3 requires terms "at least as protective" as
-theirs, so if SeatGeek's own terms compel arbitration, this section may need to
-match.]`
+`[CONFIRM with counsel: whether to include an arbitration clause and class-action waiver. This draft deliberately includes neither. For a free, non-commercial service with a USD 100 liability cap, arbitration adds cost and consumer-law risk without adding protection, but that is a judgement to confirm rather than assume. Note also that SeatGeek clause 4.3 requires terms "at least as protective" as theirs, so if SeatGeek's own terms compel arbitration, this section may need to match. Illinois-specific point now that the governing law is settled: the Biometric Information Privacy Act carries a private right of action, and whether an arbitration clause would or should reach a BIPA claim is exactly the kind of question this decision turns on.]`
 
 ---
 
@@ -469,10 +493,12 @@ it. If you do not accept it, delete your account.
 
 ## 19. Contact
 
-**312.dev LLC**
+**312.dev LLC**, Illinois, United States
 Email: `ope@312.dev`
 Security reports: see [`../SECURITY.md`](../SECURITY.md)
 
-`[CONFIRM: a postal address is required for a published consumer-facing legal
-document in several jurisdictions, and an EU Article 27 representative may be
-required. See privacy-policy.md section 12.]`
+**No postal address is published, and that is a decision rather than an
+oversight.** [`privacy-policy.md`](privacy-policy.md) section 2 records what was
+checked before making it, and names the two events that reverse it: entering an
+app store, and sending a first marketing email, which is when CAN-SPAM's physical
+address requirement attaches.

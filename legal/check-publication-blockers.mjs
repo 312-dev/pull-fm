@@ -33,8 +33,41 @@ import { dirname, join, relative, resolve } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
 
-/** Anything matching this is unresolved and blocks publication. */
-const MARKER = /\[(CONFIRM|OPEN)\b[^\]]*\]/g;
+/**
+ * Anything matching this is unresolved and blocks publication.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS PATTERN IS APPLIED TO THE WHOLE FILE, NOT LINE BY LINE, AND THAT IS THE
+ * CORRECTION RATHER THAN A STYLE CHOICE.
+ *
+ * `scan` used to `split("\n")` and match each line. A marker's text therefore
+ * had to fit on one line to be seen at all, and a marker that wrapped was
+ * INVISIBLE TO THIS GATE. Prettier reflows prose in these documents, so whether
+ * a blocker was counted depended on where a formatter happened to break the
+ * line.
+ *
+ * That is the exact failure this file exists to prevent, committed inside the
+ * file itself: on 2026-07-29 the terms carried three unresolved
+ * `[CONFIRM with counsel]` questions - compiled-binary licensing, the SeatGeek
+ * third-party-beneficiary clause, and arbitration - and every one of them
+ * spanned a line break. With the governing-law placeholders filled, this gate
+ * would have reported the terms as carrying ZERO blockers while carrying three.
+ * A green result from a check that cannot see is worse than no check, because
+ * it is the one someone relies on to publish.
+ *
+ * The `CLASSIFIED` table below already held entries for markers of that shape,
+ * which could never have fired. That mismatch was the visible symptom nobody
+ * read.
+ *
+ * WHY THE PATTERN IS SHAPED THE WAY IT IS. `[^\]]*` on a whole file would run
+ * to the next `]` ANYWHERE in the document if a marker were ever left unclosed,
+ * silently swallowing paragraphs into one enormous "marker". So the body allows
+ * a single newline and refuses a blank line: a marker may wrap, and it may not
+ * cross a paragraph boundary. An unclosed bracket therefore fails to match and
+ * shows up as a missing blocker in review, rather than as a match that eats the
+ * rest of the section.
+ */
+const MARKER = /\[(CONFIRM|OPEN)\b(?:[^\]\n]|\n(?!\s*\n))*\]/g;
 
 /**
  * Markers whose effect, if published unresolved, is worse than "incomplete".
@@ -161,24 +194,50 @@ function markdownFiles(dir) {
 }
 
 function scan(file) {
-  const lines = readFileSync(file, "utf8").split("\n");
-  const out = [];
-  lines.forEach((line, i) => {
-    for (const m of line.matchAll(MARKER)) {
-      const legend = isLegend(file, line);
-      const { kind, why } = legend
-        ? { kind: "legend", why: "Explains the markers; not one." }
-        : classify(m[0]);
-      out.push({
-        file: relative(ROOT, file),
-        line: i + 1,
-        marker: m[0],
-        kind,
-        why,
-        text: line.trim().slice(0, 160),
-      });
+  const text = readFileSync(file, "utf8");
+  const lines = text.split("\n");
+
+  // Offset of the first character of each line, so a match index in the whole
+  // file can be reported as the line the marker STARTS on. Reporting the line
+  // it ends on would point a reader at a continuation and hide the marker.
+  const lineStarts = [];
+  let at = 0;
+  for (const line of lines) {
+    lineStarts.push(at);
+    at += line.length + 1;
+  }
+  const lineOf = (index) => {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (lineStarts[mid] <= index) lo = mid;
+      else hi = mid - 1;
     }
-  });
+    return lo;
+  };
+
+  const out = [];
+  for (const m of text.matchAll(MARKER)) {
+    const i = lineOf(m.index);
+    const line = lines[i];
+    // Classification and the legend test both read the marker's own text rather
+    // than the line, so a wrapped marker classifies identically to a flat one.
+    // The legend test still needs a line, and the first line is the one that
+    // carries the legend's prose.
+    const legend = isLegend(file, line);
+    const { kind, why } = legend
+      ? { kind: "legend", why: "Explains the markers; not one." }
+      : classify(m[0].replace(/\s*\n\s*/g, " "));
+    out.push({
+      file: relative(ROOT, file),
+      line: i + 1,
+      marker: m[0].replace(/\s*\n\s*/g, " "),
+      kind,
+      why,
+      text: line.trim().slice(0, 160),
+    });
+  }
   return out;
 }
 
