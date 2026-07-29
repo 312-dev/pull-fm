@@ -277,12 +277,33 @@ PULLFM_HEALTHZ_URL=http://127.0.0.1:3000/healthz
 PULLFM_METRICS_TOKEN=${metrics_token}
 EOF
 
+  # --- SeatGeek events -------------------------------------------------------
+  #
+  # THE CREDENTIALS ARE SHIPPED AND THE FEATURE IS STAMPED OFF, and the split is
+  # the whole point rather than an inconsistency. Having the credential on the
+  # node is what makes enabling events a one-line edit and a restart the moment
+  # Gate L passes. Enabling it here is what put staging in breach of SeatGeek's
+  # terms on 2026-07-29: this function wrote SEATGEEK_ENABLED=true whenever an
+  # id existed, the BFF's own schema defaulted the flag to true as well, and the
+  # deployment served `features.events: true` while docs/PLAN.md §3 and §11.7
+  # both recorded the route as 501 pending Gate L.
+  #
+  # Gate L is a legal gate, not an engineering one. Until the DPAs are signed,
+  # an EU Article 27 representative is appointed, and a published EULA names the
+  # SeatGeek Entities as third-party beneficiaries per their clause 4.3, serving
+  # their data is a breach of contract that no amount of working code fixes.
+  #
+  # Flipping this to true is therefore a reviewed edit to this line, in a commit
+  # that can cite the signed documents, and NOT an environment variable that any
+  # `up` run can set by accident. The reverse direction stays instant: edit
+  # /etc/pullfm/bff.env on the node and restart, which is the hours-not-deploys
+  # obligation their terms impose.
   if [[ -n "${seatgeek_id}" ]]; then
     {
       printf 'SEATGEEK_CLIENT_ID=%s\n' "${seatgeek_id}"
       [[ -n "${seatgeek_secret}" ]] &&
         printf 'SEATGEEK_CLIENT_SECRET=%s\n' "${seatgeek_secret}"
-      printf 'SEATGEEK_ENABLED=true\n'
+      printf 'SEATGEEK_ENABLED=false\n'
     } >>"${dir}/bff.env"
   fi
 

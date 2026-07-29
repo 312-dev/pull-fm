@@ -335,10 +335,27 @@ const schema = z.object({
    * say our use breaches their terms. Their terms make "stop now" a legal
    * obligation measured in hours, not deploy cycles, so it must be a
    * configuration flip rather than a code change.
+   *
+   * IT DEFAULTS TO OFF, AND IT USED TO DEFAULT TO ON. Defaulting to on meant
+   * the flag was not a kill switch at all: it was a formality that any
+   * deployment holding a SeatGeek client id had already bypassed. Staging
+   * proved it on 2026-07-29, reporting `features.events: true` and
+   * `providers.events: ok` while docs/PLAN.md §3 and §11.7 both say the route
+   * is 501 pending Gate L.
+   *
+   * Gate L is not an engineering gate and it has not passed: the DPAs are
+   * unsigned, no EU Article 27 representative is appointed, and the EULA that
+   * has to name the SeatGeek Entities as third-party beneficiaries under their
+   * clause 4.3 is not published. Serving events before those are true is a
+   * breach of their terms, not a missing feature, so the failure mode of a
+   * forgotten environment variable must be "off". Turning events ON is now the
+   * act that takes a deliberate `SEATGEEK_ENABLED=true`; turning them off
+   * remains a config flip and a restart, which is what the hours-not-deploys
+   * obligation above actually requires.
    */
   SEATGEEK_ENABLED: z
     .enum(["true", "false"])
-    .default("true")
+    .default("false")
     .transform((v) => v === "true"),
 
   CORS_ORIGINS: z

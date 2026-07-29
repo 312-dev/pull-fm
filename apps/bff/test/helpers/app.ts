@@ -238,7 +238,14 @@ export async function buildTestApp(
     LASTFM_SHARED_SECRET: "lastfm-fixture-secret-not-a-credential",
     // Events are enabled so the compliance assertions (session-only, logo
     // attribution, coverage) run against a live route rather than a 501.
+    //
+    // BOTH LINES ARE LOAD-BEARING. SEATGEEK_ENABLED now defaults to false, so a
+    // fixture client id alone no longer turns the route on: the flag has to be
+    // set here explicitly, exactly as a real deployment would have to set it
+    // once Gate L passes. That is the point of the default. This harness opts
+    // in because the suite tests the route's behaviour, not the gate.
     SEATGEEK_CLIENT_ID: "seatgeek-fixture-client-id-not-a-secret",
+    SEATGEEK_ENABLED: "true",
     PUBLIC_BASE_URL: "http://127.0.0.1:3000",
     // The global per-IP floor is not what these suites test, and every request
     // in them arrives from 127.0.0.1. Left at its default the suite would
