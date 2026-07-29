@@ -245,4 +245,20 @@ export const LOCK_NAMESPACE = {
   expirySweep: 5,
   /** Background upstream cache warming (services/cache-warmer.ts). */
   cacheWarm: 6,
+  /**
+   * The MusicBrainz canonical-dump load (services/mb-canonical-refresh.ts and
+   * infra/mb-loader/mb-canonical-load.sh).
+   *
+   * TWO KEYS live in this namespace and they must stay distinct.
+   * `mb:canonical:refresh` is a SESSION lock held by the job for its whole run,
+   * so a second scheduled invocation declines. `mb:canonical:swap` is a
+   * TRANSACTION lock the loader takes around the table rename, so two loaders
+   * cannot interleave a swap. Giving them one key would make the loader block
+   * on the job that spawned it, from a different session, forever.
+   *
+   * The loader is a shell script and takes its lock in SQL, so the namespace
+   * number 7 is written literally there. Changing it here without changing
+   * infra/mb-loader/mb-canonical-load.sh silently unlocks the swap.
+   */
+  mbCanonicalRefresh: 7,
 } as const;
