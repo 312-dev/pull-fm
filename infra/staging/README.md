@@ -4,12 +4,23 @@ Terraform stops at "a booted node with a stable private address, an attached
 firewall and a load balancer in front of it". This directory is everything
 after that: TLS termination, the data plane, and the deploy loop.
 
-Two nodes, both `cpx12` (2 vCPU / 2 GB) in `hel1`:
+**ONE node**, `cpx21` (3 vCPU / 4 GB) in `hel1`, right-sized 2026-07-29 from a
+two-node-plus-load-balancer shape that cost EUR 26.33/mo to serve no traffic:
 
-| Node                     | Private IP | Runs                                                                           |
-| ------------------------ | ---------- | ------------------------------------------------------------------------------ |
-| `pullfm-staging-app-1`   | 10.20.1.11 | nginx (TLS origin), BFF container, deploy agent                                |
-| `pullfm-staging-cache-1` | 10.20.1.21 | Redis cache, Redis quota. No public IPv4. **The database is Neon, not a node** |
+| Node                   | Private IP | Runs                                                                                  |
+| ---------------------- | ---------- | ------------------------------------------------------------------------------------- |
+| `pullfm-staging-app-1` | 10.20.1.11 | nginx (TLS origin), BFF container, **both Redis instances**, deploy agent, six timers |
+
+`pullfm-staging-cache-1` (10.20.1.21) is **not created** pre-launch. The address
+is still reserved, the bootstrap script and compose file still exist unchanged,
+and `enable_cache_node = true` brings it back. The database is Neon, not a node.
+
+**Redis co-location is correct at one node and forbidden at more than one**, and
+Terraform enforces that rather than documenting it. The MusicBrainz token bucket
+lives in Redis and the limit is 1 req/s for the ENTIRE service, so two
+application nodes with their own local Redis would emit 2 req/s while each
+reported perfect compliance. `app_node_count > 1` with `enable_cache_node =
+false` fails `terraform plan`; prove it with `make infra-guards`.
 
 ---
 
@@ -44,41 +55,68 @@ together.
 
 ---
 
-## Ingress path, and the two non-obvious hazards
+## Ingress path, and the hazard that comes with switching it
+
+There are two supported paths and **the node config must match the one Terraform
+provisioned**. This is the single most dangerous coupling in the repository.
 
 ```
-client -> Cloudflare edge -> Hetzner LB (TCP passthrough + PROXY) -> nginx :443 -> BFF :3000
+direct        client -> Cloudflare edge -> nginx :443 -> BFF :3000
+              enable_load_balancer = false, PULLFM_INGRESS=direct  (current)
+
+load-balancer client -> Cloudflare edge -> Hetzner LB (TCP passthrough + PROXY)
+                     -> nginx :443 -> BFF :3000
+              enable_load_balancer = true, PULLFM_INGRESS=lb
 ```
 
-**PROXY protocol is mandatory at the origin.** The load balancer is configured
-with `proxyprotocol = true`, so every connection begins with a PROXY header. A
-listener that does not expect it reads that header as the first line of an HTTP
-request and returns 400 on every single connection - a failure that looks like
-an application bug and is not one. This is why `enable_proxy_protocol` and the
-`proxy_protocol` parameter on the nginx `listen` directives have to be changed
-together, in that order, and never independently.
+**PROXY protocol must agree with the load balancer, in both directions.** On the
+LB path every connection begins with a PROXY header, and a listener that does
+not expect it reads that header as the first line of an HTTP request and returns
+400 on every single connection - a failure that looks like an application bug
+and is not one. On the direct path the reverse holds: a listener that expects a
+header nobody sends fails just as completely.
 
-**The origin firewall does not protect the load-balanced path.** Load balancer
-traffic reaches the node on the _private_ interface, and Hetzner Cloud
-Firewalls filter the public interface only. Hetzner also cannot attach a
-firewall to a load balancer. So "only Cloudflare may reach the origin" is
-enforced at nginx, on `$proxy_protocol_addr`, against Cloudflare's published
-ranges - not by the Terraform firewall rule, which covers only the case of
-someone dialling the origin IP directly.
+The two halves are therefore derived from one value.
+`infra/staging-env.sh converge` reads the `ingress_mode` terraform output and
+passes it to `bootstrap.sh` as `PULLFM_INGRESS`, which renders
+`nginx-pullfm.conf.in` and writes `conf.d/00-pullfm-ingress.conf` in the same
+step. Rendering asserts that exactly four `listen` directives carried the
+placeholder and that none carries it afterwards, so an added listener that
+forgets it fails the bootstrap rather than producing a config that starts and
+rejects every request. `make infra-guards` runs `nginx -t` over both renders.
 
-Three layers, none of which is redundant with the others:
+**Which layer enforces "only Cloudflare" depends on the path, and this is the
+substantive difference between them.** On the LB path, load balancer traffic
+reaches the node on the _private_ interface and Hetzner Cloud Firewalls filter
+the public interface only, so the Terraform firewall rule does not protect it at
+all and the nginx allowlist is the sole enforcement. On the direct path the
+traffic does arrive on the public interface, so the firewall rule finally covers
+the path it was written for.
 
-1. **Origin firewall** - inbound 80/443 from Cloudflare ranges only. Covers a
-   direct-to-origin connection that bypasses the load balancer.
-2. **nginx allowlist on `$proxy_protocol_addr`** - covers the load-balanced
-   path, which layer 1 cannot see. Refreshed daily by `pullfm-cf-ranges.timer`;
-   the script refuses to install a suspiciously short list, because a truncated
-   fetch would lock out every real user.
+Three layers, none redundant with the others:
+
+1. **Origin firewall** - inbound 80/443 from Cloudflare ranges only. On the
+   direct path this covers the real ingress; on the LB path it covers only
+   someone dialling the origin IP directly.
+2. **nginx allowlist on `$remote_addr`** - the Cloudflare edge address on both
+   paths: directly when Cloudflare is the L3 peer, and after the realip rewrite
+   when a load balancer is in front. Refreshed daily by
+   `pullfm-cf-ranges.timer`; the script refuses to install a suspiciously short
+   list, because a truncated fetch would lock out every real user.
 3. **Authenticated Origin Pulls** - mTLS. Cloudflare presents a client
    certificate and nginx refuses the handshake without one. The origin-pull CA
    is shared by every Cloudflare customer, so the config additionally requires
    the subject to be `CN=origin-pull.cloudflare.net`; the issuer alone would
    prove only that the peer is _somebody's_ Cloudflare.
+
+**Removing the load balancer changed nothing about client IP**, which is the
+part worth checking rather than assuming. The PROXY header carried the
+CLOUDFLARE EDGE address, never the client's, because Cloudflare is the only peer
+the load balancer ever saw. The real client address has always come from
+`CF-Connecting-IP`, forwarded to the BFF as `X-Forwarded-For` and `X-Real-IP`
+only after mTLS and the allowlist have proved the peer is a Cloudflare edge. Per
+-IP rate limiting and the `ip` column in `audit_log` see identical values on
+both paths.
 
 ---
 

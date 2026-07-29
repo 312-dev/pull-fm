@@ -1,0 +1,21 @@
+[Unit]
+Description=Anonymize and expire the audit trail
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-JOBS.md
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=/etc/pullfm/deploy.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pullfm-job purge-audit
+
+# Exit 2 covers four things, none urgent on its own: a statement failed, a batch
+# ceiling was hit, the standing invariant of data-retention-policy.md 8.5 is
+# still violated, or the freshness signal fired. Exit 1 means the purge could not
+# run at all, so audit_log is once again an unbounded store of account
+# identifiers and IP addresses, which is the exact condition the job exists to
+# end and the one blocking publication of legal/privacy-policy.md.
+SuccessExitStatus=2
+OnFailure=pullfm-job-alert@%n.service
+
+RuntimeMaxSec=1800

@@ -1,0 +1,19 @@
+[Unit]
+Description=Reap unverified directory records hourly
+
+[Timer]
+# Hourly at :35. The entrypoint says "hourly or daily" and this takes the hourly
+# end, for the same reason the expiry sweep is hourly: AUTH_UNVERIFIED_REAP_
+# AFTER_S is 24 hours, so a daily job would make the true upper bound on an
+# unconsented record's life 48 hours and the stated window would bound nothing.
+# The window is a duration, not a cadence, so running hourly reaps nothing extra
+# on any given run; it only tightens the worst case to 25 hours.
+OnCalendar=*-*-* *:35:00
+AccuracySec=1s
+
+# TRUE, for the same reason as the expiry sweep: a missed run is time the window
+# is not an upper bound.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

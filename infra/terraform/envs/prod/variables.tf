@@ -32,19 +32,31 @@ variable "subnet_ip_range" {
 
 variable "app_node_count" {
   type        = number
-  description = "Number of BFF nodes."
-  default     = 2
+  description = "Number of BFF nodes. ONE pre-launch. Raising it requires enable_cache_node and enable_load_balancer, enforced as a plan-time error in the compute module rather than as advice here."
+  default     = 1
+}
+
+variable "enable_cache_node" {
+  type        = bool
+  description = "Provision a separate node for the shared Redis instances. FALSE pre-launch: Redis runs on the single application node. MANDATORY before app_node_count goes above one, because the MusicBrainz token bucket lives in Redis and the 1 req/s ceiling is global to the service."
+  default     = false
+}
+
+variable "enable_load_balancer" {
+  type        = bool
+  description = "Provision the Hetzner load balancer. FALSE pre-launch: the proxied Cloudflare records point straight at the application node, and nginx runs without PROXY protocol. Turning it on is a two-sided change; see infra/staging/README.md."
+  default     = false
 }
 
 variable "app_server_type" {
   type        = string
-  description = "BFF node server type. CAX only."
-  default     = "cax21"
+  description = "BFF node server type. This node now also runs the two Redis instances, so 4 GB rather than 8: a 768 MB BFF, 384 MB of capped Redis, nginx, and one 384 MB job container at a time still leaves half the machine free. CAX preferred; the cpx_1_ types are the in-stock fallback."
+  default     = "cax11"
 }
 
 variable "cache_server_type" {
   type        = string
-  description = "Shared Redis node server type. CAX only. Sized down from the cax31 the Postgres node needed: Redis holds 384 MB across two capped instances, not a database page cache."
+  description = "Server type for the separate Redis node, used only when enable_cache_node is true. Redis holds 384 MB across two capped instances, not a database page cache."
   default     = "cax11"
 }
 

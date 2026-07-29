@@ -57,6 +57,13 @@ module "compute" {
   cache_server_type = var.cache_server_type
   app_node_count    = var.app_node_count
 
+  # Both default FALSE, which is what makes this environment one node with Redis
+  # co-located on it and no load balancer. Raising app_node_count without also
+  # setting enable_cache_node is a plan-time error, on purpose: see the
+  # validation in ../../modules/compute/variables.tf.
+  enable_cache_node    = var.enable_cache_node
+  enable_load_balancer = var.enable_load_balancer
+
   app_firewall_id   = module.firewall.app_firewall_id
   cache_firewall_id = module.firewall.cache_firewall_id
 
@@ -90,22 +97,22 @@ locals {
     api-a = {
       name    = var.api_hostname
       type    = "A"
-      content = module.compute.load_balancer_ipv4
+      content = module.compute.ingress_ipv4
     }
     api-aaaa = {
       name    = var.api_hostname
       type    = "AAAA"
-      content = module.compute.load_balancer_ipv6
+      content = module.compute.ingress_ipv6
     }
     app-a = {
       name    = var.app_hostname
       type    = "A"
-      content = module.compute.load_balancer_ipv4
+      content = module.compute.ingress_ipv4
     }
     app-aaaa = {
       name    = var.app_hostname
       type    = "AAAA"
-      content = module.compute.load_balancer_ipv6
+      content = module.compute.ingress_ipv6
     }
   }
 }

@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# Pull.fm scheduled-job failure handler.
+#
+#   pullfm-job-alert <unit>
+#
+# Started by systemd through `OnFailure=pullfm-job-alert@%n.service` on each of
+# the four job units. It runs ONLY when a job unit fails, and because those
+# units carry `SuccessExitStatus=2`, "fails" means:
+#
+#   exit 1        the job could not run and changed nothing        <- the reason
+#   exit 125/126/127  the runner could not start the container         this file
+#   timeout       the job was killed at RuntimeMaxSec                  exists
+#   signal        the job was killed
+#
+# exit 0 and exit 2 never reach here. That asymmetry is the design: a sweeper
+# that ran and reported a problem is a Monday problem, and a sweeper that could
+# not run is the one that leaves a retention window unenforced while looking
+# exactly like a healthy one from the outside.
+#
+# ---------------------------------------------------------------------------
+# WHAT "ALERT" MEANS TODAY, STATED PLAINLY
+#
+# There is no alerting channel configured in this project. docs/PLAN.md names
+# ntfy and docs/RUNBOOK-INCIDENT.md section 6 lists the conditions, but of the
+# alerts on that list only the two Cloudflare billing ones are armed, and both
+# of those are armed inside Cloudflare rather than by anything here. Inventing a
+# channel would produce a file that looks like an alert path and delivers
+# nothing, which is worse than not having one.
+#
+# So this handler writes to the two surfaces that exist on any node without
+# further configuration, and treats delivery as an optional extra:
+#
+#   1. THE JOURNAL, at error priority, with the fixed token PULLFM-ALERT so it
+#      is greppable: `journalctl -t pullfm-job-alert -p err`.
+#   2. A SPOOL FILE, /var/log/pullfm/job-alerts.jsonl, one JSON object per
+#      failure. This is the surface a future poller reads, and it records
+#      whether delivery happened, so "nobody was told" is itself recorded.
+#   3. NTFY, if and only if /etc/pullfm/alert.env sets PULLFM_NTFY_URL. That
+#      file is not in git, is not created by bootstrap.sh, and does not exist.
+#      The day Gate 5's channel is armed, creating it is the whole change.
+#
+# The failed unit ALSO stays failed, which is a fourth surface that costs
+# nothing: `systemctl --failed` lists it until someone resets it, so a node that
+# stopped enforcing a retention window says so to anyone who logs in.
+#
+# THIS SCRIPT MUST NOT FAIL. An OnFailure handler that exits non-zero produces a
+# second failed unit and still no notification. Hence no `set -e`, every
+# external call guarded, and exit 0 at the end unconditionally.
+# ---------------------------------------------------------------------------
+set -uo pipefail
+
+UNIT=${1:-unknown.service}
+ALERT_ENV=${PULLFM_ALERT_ENV:-/etc/pullfm/alert.env}
+SPOOL_DIR=${PULLFM_ALERT_SPOOL_DIR:-/var/log/pullfm}
+SPOOL=${SPOOL_DIR}/job-alerts.jsonl
+
+show() {
+  systemctl show "${UNIT}" --property="$1" --value 2>/dev/null || true
+}
+
+RESULT=$(show Result)
+STATUS=$(show ExecMainStatus)
+CODE=$(show ExecMainCode)
+[ -n "${RESULT}" ] || RESULT=unknown
+[ -n "${STATUS}" ] || STATUS=unknown
+
+# The classification exists so the message says what happened rather than
+# "something failed". Each arm maps to a row in docs/RUNBOOK-JOBS.md.
+case "${RESULT}:${STATUS}" in
+  exit-code:1)
+    REASON="could-not-run"
+    DETAIL="The job could not run and CHANGED NOTHING. Whatever it bounds is unbounded until it succeeds."
+    ;;
+  exit-code:125 | exit-code:126 | exit-code:127)
+    REASON="runner-failed"
+    DETAIL="The container could not be started (docker exit ${STATUS}). The job did not run."
+    ;;
+  timeout:*)
+    REASON="timed-out"
+    DETAIL="The job was killed at RuntimeMaxSec. It may have done part of its work; treat the run as incomplete."
+    ;;
+  signal:* | core-dump:*)
+    REASON="killed"
+    DETAIL="The job was killed by a signal. Check for the OOM killer first: these run on a 2 GB node."
+    ;;
+  *)
+    REASON="unexpected"
+    DETAIL="Unclassified failure. Result=${RESULT} ExecMainStatus=${STATUS} ExecMainCode=${CODE}."
+    ;;
+esac
+
+TAIL=$(journalctl -u "${UNIT}" -n 8 --no-pager -o cat 2>/dev/null | tail -c 800 || true)
+WHEN=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+HOST=$(hostname 2>/dev/null || echo unknown)
+
+# --- 1. the journal --------------------------------------------------------
+{
+  echo "PULLFM-ALERT unit=${UNIT} reason=${REASON} result=${RESULT} status=${STATUS} host=${HOST}"
+  echo "${DETAIL}"
+  echo "runbook: docs/RUNBOOK-JOBS.md"
+  [ -n "${TAIL}" ] && echo "last output:" && echo "${TAIL}"
+} >&2
+
+# --- 3. optional delivery, attempted before the spool line is written so the
+#        spool can record whether it worked ---------------------------------
+DELIVERED=false
+DELIVERY="none-configured"
+
+if [ -f "${ALERT_ENV}" ]; then
+  # shellcheck disable=SC1090
+  . "${ALERT_ENV}" 2>/dev/null || true
+fi
+
+if [ -n "${PULLFM_NTFY_URL:-}" ]; then
+  DELIVERY="attempted"
+
+  # An array, not `${VAR:+-H "..."}`. The inline form looks like it works and
+  # does not: an unquoted expansion word-splits on the spaces inside the header
+  # value, so curl receives four broken arguments instead of two.
+  auth=()
+  [ -n "${PULLFM_NTFY_TOKEN:-}" ] &&
+    auth=(-H "Authorization: Bearer ${PULLFM_NTFY_TOKEN}")
+
+  if curl -fsS --max-time 10 \
+    -H "Title: Pull.fm job failed: ${UNIT}" \
+    -H "Priority: high" \
+    -H "Tags: rotating_light" \
+    "${auth[@]+"${auth[@]}"}" \
+    -d "${REASON} on ${HOST}
+${DETAIL}
+${TAIL}" \
+    "${PULLFM_NTFY_URL}" >/dev/null 2>&1; then
+    DELIVERED=true
+    DELIVERY="ntfy"
+  else
+    DELIVERY="ntfy-failed"
+    echo "PULLFM-ALERT delivery to ntfy FAILED. The journal and the spool are the only record." >&2
+  fi
+fi
+
+# --- 2. the spool ----------------------------------------------------------
+# Written last so `delivered` is a fact rather than an intention. 0640 root:adm
+# because it names units and hostnames, not because it holds a secret.
+if mkdir -p "${SPOOL_DIR}" 2>/dev/null; then
+  printf '{"ts":"%s","host":"%s","unit":"%s","reason":"%s","result":"%s","status":"%s","delivered":%s,"delivery":"%s"}\n' \
+    "${WHEN}" "${HOST}" "${UNIT}" "${REASON}" "${RESULT}" "${STATUS}" "${DELIVERED}" "${DELIVERY}" \
+    >>"${SPOOL}" 2>/dev/null || true
+  chmod 0640 "${SPOOL}" 2>/dev/null || true
+fi
+
+# Unconditional. See the header: a failing failure handler is a second outage
+# with no notification attached.
+exit 0

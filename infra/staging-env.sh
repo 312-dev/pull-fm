@@ -300,12 +300,38 @@ converge_node() {
     && rm -rf /tmp/pullfm-secrets"
 }
 
+# Reads one terraform output, or echoes the fallback when the root has no state
+# yet. The fallbacks are the module defaults, so a converge against a
+# not-yet-applied root configures the shape the next apply would create rather
+# than failing on a missing output.
+tf_output() {
+  local name="$1" fallback="$2" value
+  value="$(terraform -chdir="${ENV_DIR}" output -raw "${name}" 2>/dev/null || true)"
+  [[ -n "${value}" ]] && printf '%s' "${value}" || printf '%s' "${fallback}"
+}
+
 cmd_converge() {
-  local app_ip cache_ip secrets
+  local app_ip cache_ip secrets ingress_mode redis_host
+
+  # THE SHAPE COMES FROM TERRAFORM, NOT FROM THIS SCRIPT. Pre-launch the
+  # environment is one application node with Redis co-located on it and no load
+  # balancer; the two-node shape with a separate cache node and a load balancer
+  # is the documented scale step. Both are supported here, and which one is
+  # configured is read from the state rather than assumed, because the two sides
+  # of the PROXY-protocol decision disagreeing answers 400 to every connection.
+  ingress_mode="$(tf_output ingress_mode direct)"
+  redis_host="$(tf_output redis_host 127.0.0.1)"
+
   app_ip="${1:-$(tailnet_ip "${APP_NODE}")}"
-  cache_ip="${2:-$(tailnet_ip "${CACHE_NODE}")}"
-  [[ -n "${app_ip}" && -n "${cache_ip}" ]] ||
-    die "both staging nodes must be on the tailnet before converging (run 'up')"
+  [[ -n "${app_ip}" ]] ||
+    die "the staging application node must be on the tailnet before converging (run 'up')"
+
+  cache_ip="${2:-}"
+  if [[ "${redis_host}" != "127.0.0.1" ]]; then
+    cache_ip="${cache_ip:-$(tailnet_ip "${CACHE_NODE}")}"
+    [[ -n "${cache_ip}" ]] ||
+      die "enable_cache_node is set, so ${CACHE_NODE} must be on the tailnet before converging"
+  fi
 
   log "rendering secrets from 1Password"
   secrets="$(pullfm_secret_workdir)" || die "could not create a secret directory"
@@ -315,15 +341,28 @@ cmd_converge() {
   trap "rm -rf '${secrets}'" EXIT INT TERM
   pullfm_render_staging_secrets "${secrets}" || die "could not render secrets"
 
-  # The cache node first. Ordering matters less than it did when this node held
-  # Postgres and the app node ran migrations against it on first deploy, but the
-  # BFF still reads REDIS_URL at startup, so bringing Redis up first keeps a
-  # rebuild from logging a wave of connection errors it will only recover from
-  # on retry.
-  log "converging ${CACHE_NODE} (${cache_ip})"
-  converge_node "${cache_ip}" "${ROOT}/infra/staging/cache" "${secrets}" "cache.env" \
-    "${secrets}/cache.env"
-  ssh_node "${cache_ip}" "cd /tmp/pullfm-config && sudo bash bootstrap.sh"
+  # Redis first, wherever it lives. Ordering matters less than it did when this
+  # node held Postgres and the app node ran migrations against it on first
+  # deploy, but the BFF still reads REDIS_URL at startup, so bringing Redis up
+  # first keeps a rebuild from logging a wave of connection errors it will only
+  # recover from on retry.
+  #
+  # PRIVATE_IP is what the Redis instances bind to, and it is the whole
+  # difference between the two shapes: the cache node's private address when
+  # there is a cache node, the loopback when Redis rides on the application node.
+  # Binding to the loopback there is not a detail either: the application node
+  # HAS a public interface, and Redis must not answer on it.
+  if [[ "${redis_host}" == "127.0.0.1" ]]; then
+    log "converging Redis onto ${APP_NODE} (${app_ip}), co-located"
+    converge_node "${app_ip}" "${ROOT}/infra/staging/cache" "${secrets}" "cache.env" \
+      "${secrets}/cache.env"
+    ssh_node "${app_ip}" "cd /tmp/pullfm-config && sudo PRIVATE_IP=127.0.0.1 bash bootstrap.sh"
+  else
+    log "converging ${CACHE_NODE} (${cache_ip})"
+    converge_node "${cache_ip}" "${ROOT}/infra/staging/cache" "${secrets}" "cache.env" \
+      "${secrets}/cache.env"
+    ssh_node "${cache_ip}" "cd /tmp/pullfm-config && sudo PRIVATE_IP=${redis_host} bash bootstrap.sh"
+  fi
 
   log "converging ${APP_NODE} (${app_ip})"
   converge_node "${app_ip}" "${ROOT}/infra/staging/app" "${secrets}" "bff.env" \
@@ -342,7 +381,10 @@ cmd_converge() {
     && sudo install -m 0644 -o root -g www-data /tmp/origin-pull-ca.pem /etc/ssl/pullfm/origin-pull-ca.pem \
     && rm -f /tmp/origin.pem /tmp/origin.key /tmp/origin-pull-ca.pem"
 
-  ssh_node "${app_ip}" "cd /tmp/pullfm-config && sudo bash bootstrap.sh"
+  # PULLFM_INGRESS decides whether nginx parses a PROXY header, and it is read
+  # from the same terraform state that decided whether a load balancer exists.
+  # Passing it rather than defaulting it is what stops the two from drifting.
+  ssh_node "${app_ip}" "cd /tmp/pullfm-config && sudo PULLFM_INGRESS=$([[ ${ingress_mode} == load-balancer ]] && echo lb || echo direct) bash bootstrap.sh"
   # The deploy timer fires within 60 seconds anyway; forcing it here removes a
   # minute of avoidable waiting from every rebuild.
   ssh_node "${app_ip}" "sudo systemctl start pullfm-deploy.service" || true
@@ -407,8 +449,12 @@ cmd_up() {
 
   echo
   log "waiting for cloud-init"
-  local app_ip cache_ip
-  cache_ip="$(wait_for_node "${CACHE_NODE}")"
+  local app_ip cache_ip=""
+  # Only when one was provisioned. Waiting ten minutes for a node the
+  # configuration no longer creates is how a rebuild becomes a support call.
+  if [[ "$(tf_output redis_host 127.0.0.1)" != "127.0.0.1" ]]; then
+    cache_ip="$(wait_for_node "${CACHE_NODE}")"
+  fi
   app_ip="$(wait_for_node "${APP_NODE}")"
 
   echo

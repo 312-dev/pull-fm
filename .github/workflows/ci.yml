@@ -114,6 +114,16 @@ jobs:
       - name: "Gate 8: accepted-risk register"
         run: node security/scripts/check-accepted-risks.mjs
 
+      # The four background jobs enforce the retention windows the privacy
+      # policy publishes, and they spent a while existing as commands that
+      # nothing invoked. This asserts they are scheduled, enabled, bounded, and
+      # that exit 1 (could not run, changed nothing) is treated differently from
+      # exit 2 (ran, worth a look). On this runner it also cross-checks every
+      # calendar expression against systemd's own parser, which is the reason
+      # the step runs here rather than only on a developer's machine.
+      - name: "background job schedule"
+        run: node infra/scripts/check-job-schedule.mjs
+
       # Gate 8: a tag can be repointed at different code by whoever controls
       # the upstream namespace, and that code runs against our checked-out
       # source. A commit SHA cannot be moved.

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# Pull.fm scheduled-job runner.
+#
+#   pullfm-job <job>
+#
+# Runs one of the BFF's four background jobs as a one-shot container built from
+# THE EXACT IMAGE DIGEST THAT IS CURRENTLY SERVING TRAFFIC, read from the file
+# pullfm-deploy writes. That is the whole reason this script exists rather than
+# each timer carrying its own `docker run` line:
+#
+#   1. A job and the request path must never be different builds. The jobs read
+#      windows, pacing and lock namespaces off the same service bundle the API
+#      does (apps/bff/src/wiring.ts), so a job container one deploy behind would
+#      enforce a retention window the shipped policy no longer states.
+#   2. The digest is the deploy agent's output. Nothing here resolves a tag, so
+#      a job can never quietly become the first thing to run an untested image.
+#
+# EXIT CODES ARE THE POINT OF THIS FILE. `exec` is deliberate: the container's
+# status becomes this process's status becomes the systemd unit's result, with
+# no shell in between to swallow or rewrite it. The three codes every job in
+# apps/bff/src/scripts/ shares:
+#
+#   0  ran, or declined because another invocation held the advisory lock
+#   1  COULD NOT RUN AND CHANGED NOTHING. The alert-worthy one: whatever the job
+#      bounds is unbounded until it succeeds, and a silently dead sweeper is
+#      indistinguishable from a healthy one from the outside.
+#   2  ran, with something inside it worth a look, but nothing is unbounded
+#
+# The unit files turn that into "2 is success, everything else is failure" with
+# SuccessExitStatus=2, which is what makes 1 reach the alert path and 0 and 2
+# not. See infra/staging/app/systemd/ and docs/RUNBOOK-JOBS.md.
+#
+# The docker CLI reserves 125 (daemon or CLI error), 126 and 127 (command not
+# executable, not found) for its own failures, so it can never manufacture a 2
+# that looks like a job outcome. Those three land as failures, which is correct:
+# a job that could not be started did not run and changed nothing.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+DEPLOY_ENV=${PULLFM_DEPLOY_ENV:-/etc/pullfm/deploy.env}
+APP_ENV=${PULLFM_APP_ENV:-/etc/pullfm/bff.env}
+
+usage() {
+  echo "usage: pullfm-job {warm-cache|sweep-expired|purge-audit|reap-unverified}" >&2
+}
+
+JOB=${1:-}
+case "${JOB}" in
+  # Left column is the systemd unit's job name, right column is the compiled
+  # entrypoint inside the image. infra/scripts/check-job-schedule.mjs asserts
+  # every one of these resolves to a real script in apps/bff/src/scripts/ and to
+  # a real pnpm command in apps/bff/package.json, so renaming an entrypoint
+  # breaks CI rather than silently retiring a timer.
+  warm-cache) ENTRYPOINT=dist/scripts/warm-cache.js ;;
+  sweep-expired) ENTRYPOINT=dist/scripts/sweep-expired.js ;;
+  purge-audit) ENTRYPOINT=dist/scripts/purge-audit.js ;;
+  reap-unverified) ENTRYPOINT=dist/scripts/reap-unverified.js ;;
+  *)
+    echo "pullfm-job: unknown job '${JOB}'" >&2
+    usage
+    exit 1
+    ;;
+esac
+
+# Both of these are exit 1 rather than a distinct code on purpose: the job did
+# not run and nothing changed, which is exactly what 1 means everywhere else.
+# The units carry ConditionPathExists=/etc/pullfm/deploy.env so a node that has
+# never completed a deploy SKIPS the unit instead of failing it; reaching this
+# line therefore means the file existed and then stopped being usable.
+if [ ! -f "${DEPLOY_ENV}" ]; then
+  echo "pullfm-job: ${DEPLOY_ENV} is missing, so no image digest is pinned." >&2
+  echo "The node has not completed a deploy. ${JOB} did not run." >&2
+  exit 1
+fi
+
+# shellcheck disable=SC2312
+BFF_IMAGE=$(grep -E '^BFF_IMAGE=' "${DEPLOY_ENV}" | cut -d= -f2- || true)
+
+if [ -z "${BFF_IMAGE}" ]; then
+  echo "pullfm-job: ${DEPLOY_ENV} holds no BFF_IMAGE. ${JOB} did not run." >&2
+  exit 1
+fi
+
+if [ ! -f "${APP_ENV}" ]; then
+  echo "pullfm-job: ${APP_ENV} is missing. ${JOB} did not run." >&2
+  exit 1
+fi
+
+echo "[pullfm-job] ${JOB} on ${BFF_IMAGE}"
+
+# --network host matches how pullfm-deploy runs migrations from the same image:
+# the jobs reach Neon over the public internet and Redis over the private
+# interface, and the node's egress address is the one MusicBrainz measures its
+# per-IP budget against. Running the warmer from anywhere else would spend a
+# budget accounted to an address we do not control.
+#
+# The resource caps are on the CONTAINER, not on this process. A `Nice=` in the
+# unit would apply to the docker CLI, which does nothing at all: the container
+# is started by the daemon and does not inherit the client's scheduling
+# parameters. --memory and --cpus are the controls that reach the workload, and
+# they exist because this is a 2 GB node already running nginx and a 768 MB BFF.
+exec docker run --rm \
+  --network host \
+  --env-file "${APP_ENV}" \
+  --label "pullfm.job=${JOB}" \
+  --memory 384m \
+  --memory-swap 384m \
+  --cpus 0.5 \
+  --security-opt no-new-privileges:true \
+  --read-only \
+  --tmpfs /tmp:size=16m \
+  --cap-drop ALL \
+  "${BFF_IMAGE}" \
+  node "${ENTRYPOINT}"

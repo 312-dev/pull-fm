@@ -38,8 +38,8 @@ variable "image_name" {
 
 variable "app_server_type" {
   type        = string
-  description = "Server type for BFF nodes."
-  default     = "cax21"
+  description = "Server type for BFF nodes. Default cax11 (2 vCPU ARM / 4 GB), down from cax21 (8 GB), because the node was provisioned for traffic that does not exist. The 4 GB has to hold more than it used to, since Redis is co-located pre-launch: a 768 MB BFF, two Redis instances capped at 256 MB and 128 MB, nginx, and at most one 384 MB scheduled-job container at a time. That is about 1.6 GB, so half the machine is still free. Going back to cax21 is the right move the first time real load arrives, and it is a variable rather than an edit for exactly that reason."
+  default     = "cax11"
 
   validation {
     # CAX (ARM) remains preferred on price/perf, but as of 2026-07-28 it is out
@@ -72,18 +72,94 @@ variable "cache_server_type" {
 
 variable "app_node_count" {
   type        = number
-  description = "Number of BFF nodes. Two is the minimum that survives a single host failure and permits a rolling deploy with zero non-2xx (Gate 6)."
-  default     = 2
+  description = "Number of BFF nodes. ONE pre-launch. Two is the minimum that survives a single host failure and permits a rolling deploy with zero non-2xx (Gate 6), and going there is a deliberate scale step with two prerequisites, both enforced below."
+  default     = 1
 
   validation {
     condition     = var.app_node_count >= 1 && var.app_node_count <= 8
     error_message = "app_node_count must be between 1 and 8."
   }
+
+  # ---------------------------------------------------------------------------
+  # THE GUARD. This is the one validation in this repository that exists to stop
+  # a cost decision from silently becoming a terms violation.
+  #
+  # Redis holds the token bucket that keeps the whole service under MusicBrainz's
+  # limit. That limit is ONE REQUEST PER SECOND FOR THE ENTIRE SERVICE, per IP,
+  # and Gate 1 asserts it at the network layer. With one app node and Redis
+  # co-located on it there is exactly ONE bucket, so the invariant holds by
+  # construction. With two app nodes each running their own local Redis there are
+  # TWO buckets, each of which correctly honours 1 req/s, and the service emits
+  # 2 req/s while every node's own metrics show perfect compliance. MetaBrainz
+  # revokes API access for that, without appeal and without a second chance, and
+  # no part of the product works without MusicBrainz.
+  #
+  # The same argument applies to every published rate limit and quota, which are
+  # counted in the same Redis: per-node counters multiply every limit by the node
+  # count without changing a line of the code that enforces them.
+  #
+  # So scaling out is not "set the count to 2". It is "externalize Redis first,
+  # then set the count to 2", and this makes the wrong order a plan-time error
+  # rather than a discovery made by email from MetaBrainz.
+  # ---------------------------------------------------------------------------
+  validation {
+    condition     = var.app_node_count <= 1 || var.enable_cache_node
+    error_message = "app_node_count > 1 requires enable_cache_node = true. Redis holds the MusicBrainz token bucket, and MusicBrainz permits 1 request per second for the ENTIRE service per IP (Gate 1 asserts it). With Redis co-located on each app node, N nodes means N independent buckets and the service emits N req/s while each node reports compliance; MetaBrainz revokes API access for that. Externalize Redis onto the cache node first, then raise the node count."
+  }
+
+  # Ingress at one node is a proxied Cloudflare record pointed straight at that
+  # node's public address (see modules/compute/main.tf). That has exactly one
+  # target, so a second node added without a load balancer would be provisioned,
+  # billed, and never sent a request.
+  validation {
+    condition     = var.app_node_count <= 1 || var.enable_load_balancer
+    error_message = "app_node_count > 1 requires enable_load_balancer = true. At one node the DNS records point directly at that node's public IP, which can only name one target, so additional nodes would receive no traffic at all."
+  }
+}
+
+variable "enable_cache_node" {
+  type        = bool
+  description = <<-EOT
+    Provision a SEPARATE node for the shared Redis instances.
+
+    FALSE pre-launch, which is the change that removes a whole server and its
+    IPv4 from the bill. Redis then runs on the application node itself, which is
+    correct at ONE node and catastrophic at more than one: see the guard on
+    app_node_count. The two Redis instances are capped at 256 MB and 128 MB, so
+    they fit beside nginx and a 768 MB BFF on the app node with room left.
+
+    TRUE is the documented scale step and the only supported way to run more than
+    one application node. Nothing about the node was deleted to make this
+    optional: the server resource, the firewall attachment, the private address
+    and the bootstrap script in infra/staging/cache all still exist and still
+    work. What changed is which value is the default.
+  EOT
+  default     = false
+}
+
+variable "enable_load_balancer" {
+  type        = bool
+  description = <<-EOT
+    Provision the Hetzner load balancer and point ingress at it.
+
+    FALSE pre-launch. At one application node a load balancer is EUR 8.49/mo to
+    round-robin across a single target, and Cloudflare is already in front of the
+    origin doing the part that matters. With it false, the proxied Cloudflare DNS
+    records point straight at the application node's public addresses.
+
+    TRUE is required for more than one application node and is what Gate 6's
+    rolling deploy needs. Turning it on is not only a Terraform change: the
+    origin's nginx must switch to PROXY protocol in the same step, because the LB
+    runs TCP passthrough with proxyprotocol enabled and a listener that does not
+    expect a PROXY header answers 400 to every connection. See
+    infra/staging/README.md for the two-sided procedure.
+  EOT
+  default     = false
 }
 
 variable "load_balancer_type" {
   type        = string
-  description = "Hetzner load balancer type."
+  description = "Hetzner load balancer type. Only used when enable_load_balancer is true."
   default     = "lb11"
 }
 
@@ -162,7 +238,7 @@ variable "cache_public_ipv6_enabled" {
 
 variable "enable_proxy_protocol" {
   type        = bool
-  description = "Enable PROXY protocol on LB services. Required for the origin to see the true L3 peer, which is what lets the app reject any connection that did not come from a Cloudflare edge address, and what makes per-IP rate limiting (PLAN section 6) meaningful. The origin MUST be configured to parse it before this is enabled or every connection fails."
+  description = "Enable PROXY protocol on LB services. Only has any effect when enable_load_balancer is true, because it configures the LB listeners and nothing else. Required on that path for the origin to see the true L3 peer, which is what lets nginx reject any connection that did not come from a Cloudflare edge address. The origin MUST be configured to parse it before this is enabled or every connection fails with a 400; on the direct path nginx must NOT be configured to parse it, for the same reason in reverse. See PULLFM_INGRESS in infra/staging/app/bootstrap.sh."
   default     = true
 }
 

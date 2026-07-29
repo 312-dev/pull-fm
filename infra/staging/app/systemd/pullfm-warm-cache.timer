@@ -1,0 +1,27 @@
+[Unit]
+Description=Warm the upstream caches every 30 minutes
+
+[Timer]
+# :10 and :40. Every job timer fires on a distinct minute so that two containers
+# are never started at the same instant on a 2 GB node shared with nginx and the
+# BFF. The cadence itself is derived rather than chosen: a full run spends at
+# most 300 MusicBrainz calls at one every two seconds and 60 iTunes calls at one
+# every six, about sixteen minutes of pacing under a twenty minute deadline.
+# Thirty minutes leaves a gap larger than the longest possible run.
+OnCalendar=*-*-* *:10/30:00
+
+# 1 second, against a default of 1 minute. The default lets systemd coalesce
+# timers anywhere inside the accuracy window, which is exactly what makes two
+# jobs fire together, and it also makes the gap between consecutive warm runs a
+# range rather than a number. infra/scripts/check-job-schedule.mjs asserts that
+# gap against RuntimeMaxSec, and that assertion should be about reality.
+AccuracySec=1s
+
+# FALSE, unlike the other three. A missed warm is best effort: the working set
+# goes slightly colder and the next run is at most thirty minutes away. A
+# catch-up run at boot would instead fire the warmer while the node is still
+# deploying, and would spend a shared global provider budget on a boot storm.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

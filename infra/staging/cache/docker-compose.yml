@@ -1,4 +1,4 @@
-# Pull.fm staging - shared Redis on the cache node (10.20.1.21).
+# Pull.fm staging - the two shared Redis instances.
 #
 # THIS FILE USED TO RUN POSTGRES. It does not any more: the database is Neon
 # (infra/neon), and PgBouncer, which was going to land here in Phase 1, is not
@@ -6,15 +6,20 @@
 # transaction mode. PgBouncer stays in docker-compose.dev.yml, and the reason is
 # written there rather than assumed.
 #
-# What is left is the state that genuinely has to be shared between BFF nodes:
-# the cache, and the quota and rate-limit counters. See the header comment on
-# hcloud_server.cache in infra/terraform/modules/compute/main.tf for why that
-# cannot simply move onto the application nodes.
+# What is left is the state that has to be counted ONCE for the whole service:
+# the cache, and the quota and rate-limit counters. Where it runs depends on the
+# node count, and the reasoning is on hcloud_server.cache in
+# infra/terraform/modules/compute/main.tf. At one application node this rides on
+# that node; at more than one it must be a separate node, and Terraform fails
+# the plan otherwise, because the MusicBrainz token bucket lives here and that
+# limit is 1 req/s for the entire service.
 #
-# Nothing here is reachable from the internet. The node has no public IPv4 at
-# all, and every published port is bound explicitly to the private address, so a
-# future change that gives the node a public interface does not silently expose
-# Redis along with it.
+# Nothing here is reachable from the internet, and PRIVATE_IP is what guarantees
+# it. Every published port is bound explicitly to that address: 127.0.0.1 when
+# co-located on the application node, which HAS a public interface, and the
+# private address on a dedicated cache node, which has no public IPv4 at all.
+# A missing or wrong PRIVATE_IP is the one edit here that could expose Redis, so
+# the compose file refuses to interpolate an empty value.
 #
 # Deployed to /opt/pullfm-cache/docker-compose.yml. Secrets come from
 # /etc/pullfm/cache.env, which is root-owned 0600 and placed by bootstrap.sh

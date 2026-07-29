@@ -1,16 +1,26 @@
 # Pull.fm data retention and audit-log anonymization policy
 
-> **Status: IMPLEMENTED.** Section 5 shipped as migration
+> **Status: IMPLEMENTED IN CODE AND SCHEDULED IN CONFIGURATION. NOT YET
+> RUNNING.** Section 5 shipped as migration
 > [`0006_audit_log_retention.sql`](../../packages/db/migrations/0006_audit_log_retention.sql)
-> plus three scheduled jobs. Every number stated here is now a **binding**
-> number: it is enforced by code, asserted by a test, and quoted in
-> [`legal/privacy-policy.md`](../../legal/privacy-policy.md).
+> plus three scheduled jobs. Every number stated here is enforced by code and
+> asserted by a test, and it is applied **on each run of the job**.
 >
-> | Concern                                 | Code                                                                                           | Command                                      | Schedule        |
-> | --------------------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------- | --------------- |
-> | Audit anonymization, expiry, token IPs  | [`apps/bff/src/services/audit-retention.ts`](../../apps/bff/src/services/audit-retention.ts)   | `pnpm --filter @pull-fm/bff purge:audit`     | Daily, off-peak |
-> | `idempotency_keys` and `connect_states` | [`apps/bff/src/services/expiry-sweeper.ts`](../../apps/bff/src/services/expiry-sweeper.ts)     | `pnpm --filter @pull-fm/bff sweep:expired`   | Hourly          |
-> | Unverified WorkOS directory records     | [`apps/bff/src/services/directory-reaper.ts`](../../apps/bff/src/services/directory-reaper.ts) | `pnpm --filter @pull-fm/bff reap:unverified` | Hourly or daily |
+> **The Schedule column below describes configuration, not observed behaviour.**
+> The timers exist in git and are enabled by
+> [`infra/staging/app/bootstrap.sh`](../../infra/staging/app/bootstrap.sh), and
+> **no compute is deployed, so none of them has fired.** The distinction is the
+> difference between a retention commitment and a retention aspiration, and
+> [`legal/privacy-policy.md`](../../legal/privacy-policy.md) must keep its
+> scheduling caveat until a run is evidenced. The authoritative schedule, the
+> reasoning for each cadence, and what remains blocked on deployment are in
+> [`../RUNBOOK-JOBS.md`](../RUNBOOK-JOBS.md).
+>
+> | Concern                                 | Code                                                                                           | Command                                      | Scheduled as                                   | Has it run?              |
+> | --------------------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------- | ---------------------------------------------- | ------------------------ |
+> | Audit anonymization, expiry, token IPs  | [`apps/bff/src/services/audit-retention.ts`](../../apps/bff/src/services/audit-retention.ts)   | `pnpm --filter @pull-fm/bff purge:audit`     | `pullfm-purge-audit.timer`, daily at 06:17 UTC | **No. Nothing deployed** |
+> | `idempotency_keys` and `connect_states` | [`apps/bff/src/services/expiry-sweeper.ts`](../../apps/bff/src/services/expiry-sweeper.ts)     | `pnpm --filter @pull-fm/bff sweep:expired`   | `pullfm-sweep-expired.timer`, hourly at :05    | **No. Nothing deployed** |
+> | Unverified WorkOS directory records     | [`apps/bff/src/services/directory-reaper.ts`](../../apps/bff/src/services/directory-reaper.ts) | `pnpm --filter @pull-fm/bff reap:unverified` | `pullfm-reap-unverified.timer`, hourly at :35  | **No. Nothing deployed** |
 >
 > **Read [section 5.4a](#54a-corrections-to-this-specification-made-during-implementation)
 > before changing any of it.** Implementation found a real bug in the SQL
@@ -346,9 +356,21 @@ plan in use. Absent a confirmed in-database scheduler, the default is an externa
 scheduled invocation of a `pnpm --filter @pullfm/db retention` script using the
 same connection string and pool the migrations use.~~
 
-**Resolved.** It runs as scheduled BFF commands, and the `[CONFIRM]` on pg_cron
-is withdrawn rather than answered: an in-database scheduler was rejected on its
-merits, so its availability stopped mattering. Two reasons. The statements are
+**Resolved.** It runs as scheduled BFF commands.
+
+The `[CONFIRM]` on pg_cron is now **answered as well as moot**, because leaving
+it withdrawn meant nobody ever checked and the question kept being re-asked.
+Checked 2026-07-29: Neon does list pg_cron 1.6 as a supported extension, but
+enabling it needs an Update-compute-endpoint API call plus a restart, and Neon
+states that **pg_cron jobs only run while the compute is active**. This project
+is on the Free plan (`free_v3`, recorded in `infra/neon/imports.tf`), where
+**scale-to-zero cannot be disabled** and idles the compute after five minutes.
+A retention schedule there would run during busy periods and stop during quiet
+ones, which is the exact inverse of what a storage-limitation control needs. The
+full record is in [`../RUNBOOK-JOBS.md`](../RUNBOOK-JOBS.md) section 3.
+
+It would have been the wrong mechanism regardless, for two reasons that do not
+depend on the plan. The statements are
 no longer plain SQL with no application dependencies, because the batching,
 capping, freshness and invariant reporting that make the job operable are
 control flow rather than SQL, and the exit codes an alerting scheduler acts on
@@ -359,10 +381,16 @@ wrong place for the mechanism that enforces a published privacy commitment.
 The commands, their schedules, and the reasoning for each cadence are in the
 headers of the entrypoints themselves:
 
-| Command                                    | Entrypoint                                                                             | Schedule        |
-| ------------------------------------------ | -------------------------------------------------------------------------------------- | --------------- |
-| `pnpm --filter @pull-fm/bff purge:audit`   | [`apps/bff/src/scripts/purge-audit.ts`](../../apps/bff/src/scripts/purge-audit.ts)     | Daily, off-peak |
-| `pnpm --filter @pull-fm/bff sweep:expired` | [`apps/bff/src/scripts/sweep-expired.ts`](../../apps/bff/src/scripts/sweep-expired.ts) | Hourly          |
+| Command                                    | Entrypoint                                                                             | Scheduled as                                   |
+| ------------------------------------------ | -------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `pnpm --filter @pull-fm/bff purge:audit`   | [`apps/bff/src/scripts/purge-audit.ts`](../../apps/bff/src/scripts/purge-audit.ts)     | `pullfm-purge-audit.timer`, daily at 06:17 UTC |
+| `pnpm --filter @pull-fm/bff sweep:expired` | [`apps/bff/src/scripts/sweep-expired.ts`](../../apps/bff/src/scripts/sweep-expired.ts) | `pullfm-sweep-expired.timer`, hourly at :05    |
+
+The mechanism is systemd timers on the application node, running each job in a
+one-shot container built from the image digest currently serving traffic. The
+alternatives considered, including the two that would have been free, are in
+[`../RUNBOOK-JOBS.md`](../RUNBOOK-JOBS.md) section 2. **None of these timers has
+fired: there is no deployed compute.**
 
 Both read their job off the shared service bundle built by
 [`apps/bff/src/wiring.ts`](../../apps/bff/src/wiring.ts) rather than
@@ -379,7 +407,7 @@ difference between "page someone" and "look at it Monday":
 | Code | Meaning                                                                                                                                                                    |
 | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0    | The run completed, or declined because another run held the advisory lock.                                                                                                 |
-| 1    | The run could not start and **changed nothing**. Page: the store is unbounded until it succeeds.                                                                           |
+| 1    | The run could not start and **changed nothing**. Page: the store is unbounded until it succeeds. Implemented as a systemd unit failure that fires `pullfm-job-alert@`.     |
 | 2    | The run completed and something needs a look: a statement failed, a batch ceiling was hit with work remaining, or the standing invariant of section 8.5 is still violated. |
 
 **Failure behaviour.** The job must be safe to run twice, safe to interrupt, and

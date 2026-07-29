@@ -4,7 +4,10 @@
 > ntfy within 60 seconds when triggered synthetically, evidenced by a timestamped
 > log; every alert has a runbook URL returning 200.
 >
-> **Status: SPECIFICATION ONLY. No alert in section 6 is configured.** The list,
+> **Status: SPECIFICATION ONLY, with one partial exception.** No alert in
+> section 6 delivers a notification. The scheduled-job rows J1 to J4 have their
+> detection and classification committed and their delivery unconfigured, which
+> is called out where they appear. The list,
 > the synthetic trigger for each, and the runbook anchor each links to are
 > written here so the alerting work has a target and so Gate 5 has something to
 > be measured against. **Nothing below should be read as "we will be told".**
@@ -215,6 +218,32 @@ proven rather than assumed, and where it points.
 | U4  | Any upstream circuit breaker open for over 15 minutes               | Force the mock to 500                                 | [Section 7](#7-degraded-modes-what-each-one-looks-like) | SPEC   |
 | U5  | Any 403 or explicit revocation response from Last.fm or MusicBrainz | Mock returns 403                                      | **Treat as SEV-3 immediately**                          | SPEC   |
 
+### Scheduled jobs (the ones that make the retention windows true)
+
+These four are different from every other row here in one respect worth stating:
+the **detection** side is built and committed, and only the delivery side is
+missing. Each job unit carries `SuccessExitStatus=2` and
+`OnFailure=pullfm-job-alert@%n.service`, so an exit 1 (could not run, changed
+nothing) already becomes a failed unit, an error-priority journal record and a
+line in `/var/log/pullfm/job-alerts.jsonl`. What does not exist is a channel:
+`/etc/pullfm/alert.env` is not created by anything and `PULLFM_NTFY_URL` is
+unset, so **nobody is told**. Full detail in [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md)
+section 4.
+
+They also cannot fire at all yet, for the same reason as D1 and D2: nothing is
+deployed.
+
+| #   | Condition                                                                      | Synthetic trigger                                              | Links to                             | Status                                                      |
+| --- | ------------------------------------------------------------------------------ | -------------------------------------------------------------- | ------------------------------------ | ----------------------------------------------------------- |
+| J1  | `purge:audit` exits 1, so `audit_log` keeps identifiers past the 90-day window | Point `DATABASE_URL` at an unreachable host and start the unit | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | Handler committed, **no channel, and no compute** to run it |
+| J2  | `sweep:expired` exits 1, so `idempotency_keys` keeps copied API responses      | As above                                                       | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | Handler committed, **no channel, and no compute**           |
+| J3  | `reap:unverified` exits 1, so unconsented WorkOS records accumulate            | Revoke the WorkOS API key and start the unit                   | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | Handler committed, **no channel, and no compute**           |
+| J4  | `warm:cache` exits 1 on every run, so the cache decays and shelf items vanish  | Break the candidate query and start the unit                   | [`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) | Handler committed, **no channel, and no compute**           |
+
+**J1 to J3 are the ones that matter legally**, because until they run the
+windows in `legal/privacy-policy.md` are windows the system applies per run
+rather than per day. J4 is a product-quality alert, not a compliance one.
+
 ### Cost
 
 | #   | Condition                                    | Synthetic trigger                                                            | Links to                             | Status                                                   |
@@ -232,10 +261,15 @@ data it needs is already what `make cost` computes.
 
 For each row above, a timestamped log showing: the trigger, the ntfy delivery,
 and the elapsed time under 60 seconds. Plus a check that every runbook anchor in
-the "Links to" column resolves. **Twelve of these cannot be demonstrated until
-the systems they watch exist** (pgBackRest, a replica, a metrics registry), which
-is a real ordering constraint and not an excuse: Gate 5 cannot close before
-Gate 4 and Phase 4.
+the "Links to" column resolves. **Sixteen of these cannot be demonstrated until
+the systems they watch exist** (pgBackRest, a replica, a metrics registry, and
+for J1 to J4 any deployed compute at all), which is a real ordering constraint
+and not an excuse: Gate 5 cannot close before Gate 4 and Phase 4.
+
+**The cheapest remaining step is a channel, not a detector.** J1 to J4 already
+detect and classify; they write to a file. One root-owned `alert.env` with an
+ntfy URL in it turns four committed detectors into four delivered alerts, and
+the same file is what every other row will use.
 
 ---
 

@@ -1,0 +1,29 @@
+[Unit]
+Description=Purge and anonymize the audit trail daily
+
+[Timer]
+# Daily at 06:17 UTC. Three separate choices:
+#
+#   DAILY, because every window this job enforces is measured in tens of days,
+#   so a day is the finest granularity that means anything. Weekly is the one
+#   cadence that would be wrong: docs/compliance/data-retention-policy.md
+#   promises anonymization "on the first job run after the row reaches 30 days
+#   old, normally within 24 hours", and a weekly job makes that sentence false.
+#
+#   06:17 UTC, because that is 01:17 in the operator's timezone and 07:17 in the
+#   node's region, which is the quietest overlap available and, more usefully,
+#   puts a failure at the START of the operator's day rather than the end of it.
+#
+#   AN EXPLICIT TIMEZONE, because the node's local time is not a committed fact
+#   and "daily, off-peak" that silently moves with a locale change is not a
+#   schedule. The minute, :17, keeps it clear of the hourly jobs at :05 and :35
+#   and of the warmer at :10 and :40.
+OnCalendar=*-*-* 06:17:00 UTC
+AccuracySec=1s
+
+# TRUE. A missed day is a day in which rows past the 30-day and 90-day windows
+# kept their identifiers, which is the thing the policy says does not happen.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

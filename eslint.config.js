@@ -78,6 +78,7 @@ export default tseslint.config(
       "load/**/*.js",
       "security/**/*.{js,mjs}",
       "packages/db/scripts/**/*.mjs",
+      "infra/scripts/**/*.mjs",
     ],
     ...tseslint.configs.disableTypeChecked,
   },
@@ -90,6 +91,7 @@ export default tseslint.config(
       "load/**/*.js",
       "security/**/*.{js,mjs}",
       "packages/db/scripts/**/*.mjs",
+      "infra/scripts/**/*.mjs",
       "*.config.js",
     ],
     languageOptions: {

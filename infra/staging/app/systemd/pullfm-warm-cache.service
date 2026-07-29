@@ -1,0 +1,33 @@
+[Unit]
+Description=Warm the MusicBrainz and iTunes caches
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-JOBS.md
+After=docker.service network-online.target
+Requires=docker.service
+# A node that has never completed a deploy has no image digest to run, and a
+# job that cannot run is normally exit 1 and an alert. That is the wrong answer
+# for a node in the first sixty seconds of its life, so the condition SKIPS the
+# unit instead: a skipped unit is not a failed unit and does not reach
+# OnFailure. Once pullfm-deploy has written the file once, it stays written.
+ConditionPathExists=/etc/pullfm/deploy.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pullfm-job warm-cache
+
+# Exit 2 means the run completed and backed off: it yielded a provider budget,
+# hit its deadline, or hit a call ceiling with candidates still waiting. All of
+# those are the warmer working as designed and none of them leaves anything
+# unbounded, so they are logged and not alerted. Exit 1 is not in this list on
+# purpose: that is the run that could not start, and it becomes a unit failure.
+SuccessExitStatus=2
+OnFailure=pullfm-job-alert@%n.service
+
+# The warmer's own whole-run deadline is 20 minutes (CACHE_WARMER_DEFAULTS.
+# runDeadlineMs). This is that plus two minutes of shutdown margin, and it is
+# deliberately far below the 30-minute firing interval: the MusicBrainz budget
+# is per IP and GLOBAL, so two overlapping runs on one egress address would
+# double the observed rate against a limit that does not care that we thought of
+# them as two jobs. systemd will not start a second copy of a running oneshot,
+# and the advisory lock covers the case of a second node; this bound is what
+# stops a wedged run from being the thing that needs either of them.
+RuntimeMaxSec=1320

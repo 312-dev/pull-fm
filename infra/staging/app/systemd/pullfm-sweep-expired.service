@@ -1,0 +1,20 @@
+[Unit]
+Description=Delete expired idempotency records and connect states
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-JOBS.md
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=/etc/pullfm/deploy.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pullfm-job sweep-expired
+
+# Exit 2 means a table failed or hit its batch ceiling with rows still waiting.
+# Both are self-healing on the next run. Exit 1 means nothing was deleted, which
+# leaves idempotency_keys an unbounded store of verbatim copies of API responses
+# (email address, display name, wishlist note) against a published 24-hour
+# retention. That is the one that must reach a human.
+SuccessExitStatus=2
+OnFailure=pullfm-job-alert@%n.service
+
+RuntimeMaxSec=600

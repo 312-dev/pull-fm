@@ -1,25 +1,51 @@
 # ---------------------------------------------------------------------------
 # Pull.fm staging origin - TLS termination and Cloudflare enforcement.
 #
-# Traffic path: client -> Cloudflare edge -> Hetzner LB (TCP passthrough, PROXY
-# protocol) -> this nginx -> BFF on 127.0.0.1:3000.
+# THIS FILE IS A TEMPLATE, NOT A CONFIG. bootstrap.sh renders @PROXY@ and
+# installs the result as /etc/nginx/sites-available/pullfm. It is `.in` rather
+# than `.conf` so that nobody copies it into place by hand and gets an nginx
+# that will not start.
 #
-# Three things here are load-bearing and none of them are obvious:
+# There are two supported traffic paths and the rendered file must match the one
+# Terraform provisioned. This is the single most dangerous coupling in the
+# repository, because getting it wrong produces a 400 on EVERY connection, which
+# reads as an application bug rather than a listener misconfiguration:
 #
-#   1. `proxy_protocol` on the listen directives is MANDATORY. The load
-#      balancer is configured with proxyprotocol = true (see
-#      infra/terraform/modules/compute), so every connection begins with a
-#      PROXY header. Without this directive nginx reads that header as the
-#      start of an HTTP request and every single connection fails with a
-#      400 - which looks like an application bug, not a listener misconfig.
+#   direct         client -> Cloudflare edge -> this nginx :443 -> BFF :3000
+#   (PULLFM_INGRESS=direct, the default, and what enable_load_balancer = false
+#   provisions). @PROXY@ renders EMPTY. The Cloudflare edge is the L3 peer, so
+#   $remote_addr is already the address the allowlist needs to check.
 #
-#   2. The Hetzner firewall's "Cloudflare ranges only" rule does NOT protect
-#      this path. Load balancer traffic reaches the node on the private
-#      interface, and Hetzner Cloud Firewalls filter the public interface only.
-#      The allowlist check on $proxy_protocol_addr below is therefore the
-#      enforcement point, not a duplicate of the firewall rule.
+#   load-balancer  client -> Cloudflare edge -> Hetzner LB (TCP passthrough,
+#   PROXY protocol) -> this nginx :443 -> BFF :3000
+#   (PULLFM_INGRESS=lb, what enable_load_balancer = true provisions). @PROXY@
+#   renders as `proxy_protocol`, and bootstrap.sh additionally writes the realip
+#   directives into conf.d so $remote_addr is rewritten from the PROXY header
+#   to the Cloudflare edge address. The allowlist then reads the same variable
+#   in both modes, which is why there is only one template and not two configs
+#   drifting apart.
 #
-#   3. Authenticated Origin Pulls uses a CA shared by every Cloudflare
+# Four things here are load-bearing and none of them are obvious:
+#
+#   1. @PROXY@ must agree with the load balancer. On the LB path the listener
+#      MUST parse the PROXY header; on the direct path it MUST NOT. See above.
+#
+#   2. WHICH LAYER ENFORCES "ONLY CLOUDFLARE" DEPENDS ON THE PATH. On the LB
+#      path the Hetzner firewall does not protect it at all: LB traffic arrives
+#      on the PRIVATE interface and Hetzner Cloud Firewalls filter the public
+#      one, so the allowlist below is the only enforcement. On the direct path
+#      the traffic does arrive on the public interface, so the firewall rule
+#      finally covers the path it was written for and the allowlist becomes a
+#      second, independent layer rather than the only one.
+#
+#   3. THE CLIENT IP DOES NOT COME FROM THE PROXY HEADER, on either path. The
+#      PROXY header carries the CLOUDFLARE EDGE address, because Cloudflare is
+#      the only peer the load balancer ever sees. The real client address comes
+#      from CF-Connecting-IP and is forwarded below. That is why removing the
+#      load balancer does not change one value in audit_log.ip or one decision
+#      in the per-IP rate limiter.
+#
+#   4. Authenticated Origin Pulls uses a CA shared by every Cloudflare
 #      customer, so `ssl_verify_client on` alone proves only that the peer is
 #      *someone's* Cloudflare. The subject check closes that gap.
 # ---------------------------------------------------------------------------
@@ -29,16 +55,15 @@ upstream pullfm_bff {
     keepalive 32;
 }
 
-# The load balancer is the only L3 peer, so its address is what nginx sees.
-# realip rewrites $remote_addr to the address carried in the PROXY header,
-# which is the Cloudflare edge node.
-set_real_ip_from 10.20.1.0/24;
-real_ip_header proxy_protocol;
+# The realip directives that belong to the load-balancer path are NOT here. They
+# are written to /etc/nginx/conf.d/00-pullfm-ingress.conf by bootstrap.sh, in
+# the same step that chooses @PROXY@, so the two halves of the decision cannot
+# be edited apart. conf.d is included before sites-enabled, so they still apply.
 
 # --- Port 80: redirect only ------------------------------------------------
 server {
-    listen 80 proxy_protocol default_server;
-    listen [::]:80 proxy_protocol default_server;
+    listen 80 @PROXY@ default_server;
+    listen [::]:80 @PROXY@ default_server;
     server_name _;
 
     # Kept on plain HTTP so the load balancer's health check cannot be broken
@@ -54,13 +79,17 @@ server {
     }
 }
 
-# --- Health check listener, no PROXY protocol ------------------------------
+# --- Health check listener, never PROXY protocol ---------------------------
 # The load balancer health check is a separate connection from the service
 # traffic, and whether it carries a PROXY header is a vendor behaviour rather
 # than something we configure. This listener exists so the health check works
-# under either answer: point health_check_port at 8080 if it does not.
+# under either answer: point health_check_port at 8080 if it does not. It is
+# never rendered with @PROXY@ for that reason.
 #
-# Not publicly reachable: the origin firewall allows inbound 80 and 443 only.
+# Unused on the direct path, where there is no load balancer to health check.
+# Kept anyway: it is not publicly reachable (the origin firewall allows inbound
+# 80 and 443 only), and deleting it would make turning the load balancer back on
+# a two-file change instead of one variable.
 server {
     listen 8080 default_server;
     server_name _;
@@ -80,8 +109,8 @@ server {
     # `http2 on;` is nginx >= 1.25 syntax and Ubuntu 24.04 ships 1.24, where it
     # is an unknown directive and nginx refuses to start. The listen-parameter
     # form works on both.
-    listen 443 ssl http2 proxy_protocol default_server;
-    listen [::]:443 ssl http2 proxy_protocol default_server;
+    listen 443 ssl http2 @PROXY@ default_server;
+    listen [::]:443 ssl http2 @PROXY@ default_server;
     server_name api-staging.pull.fm app-staging.pull.fm;
 
     ssl_certificate     /etc/ssl/pullfm/origin.pem;
@@ -109,6 +138,9 @@ server {
 
     # $cloudflare_edge is defined in conf.d/cloudflare-allowlist.conf, which is
     # regenerated from Cloudflare's published ranges by pullfm-cf-ranges.timer.
+    # It keys on $remote_addr, which is the Cloudflare edge address on BOTH
+    # paths: directly on the direct path, and after the realip rewrite on the
+    # load-balancer path.
     if ($cloudflare_edge = 0) {
         return 403;
     }

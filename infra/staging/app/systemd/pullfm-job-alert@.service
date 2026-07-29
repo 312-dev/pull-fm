@@ -1,0 +1,15 @@
+[Unit]
+Description=Report a failed Pull.fm scheduled job (%i)
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-JOBS.md
+
+[Service]
+Type=oneshot
+# %i is the failed unit's full name, passed by OnFailure=pullfm-job-alert@%n
+# on each job unit. The handler classifies the failure, writes it to the
+# journal at error priority and to /var/log/pullfm/job-alerts.jsonl, and
+# delivers to ntfy only if /etc/pullfm/alert.env configures a channel. No
+# channel is configured; see the header of the script and docs/RUNBOOK-JOBS.md.
+ExecStart=/usr/local/bin/pullfm-job-alert %i
+
+# No OnFailure of its own, and the script exits 0 unconditionally. A failure
+# handler that can fail produces a second failed unit and still no notification.

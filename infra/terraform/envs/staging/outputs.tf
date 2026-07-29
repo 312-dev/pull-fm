@@ -6,18 +6,45 @@ output "environment" {
   value       = local.environment
 }
 
+# --- ingress -----------------------------------------------------------------
+#
+# Read by infra/staging-env.sh, which uses ingress_mode to decide what to
+# configure on the node. That is the whole reason these are published: the
+# Terraform side and the nginx side of the PROXY-protocol decision must come
+# from ONE value, because a disagreement answers 400 to every connection and
+# looks like an application bug.
+output "ingress_mode" {
+  description = "Which ingress path is provisioned: 'load-balancer' (nginx must expect PROXY protocol) or 'direct' (it must not). Passed to bootstrap.sh as PULLFM_INGRESS."
+  value       = module.compute.ingress_mode
+}
+
+output "ingress_ipv4" {
+  description = "Public IPv4 the proxied Cloudflare A records target: the load balancer if there is one, otherwise the single application node."
+  value       = module.compute.ingress_ipv4
+}
+
+output "ingress_ipv6" {
+  description = "Public IPv6 the proxied Cloudflare AAAA records target."
+  value       = module.compute.ingress_ipv6
+}
+
+output "redis_host" {
+  description = "Host the BFF and the scheduled jobs reach Redis on: the cache node's private address when one exists, otherwise the loopback on the application node. A wrong value here is a second MusicBrainz token bucket, not a connection error."
+  value       = module.compute.redis_host
+}
+
 output "load_balancer_ipv4" {
-  description = "Public IPv4 of the load balancer."
+  description = "Public IPv4 of the load balancer, or null when there is no load balancer. Use ingress_ipv4 for DNS."
   value       = module.compute.load_balancer_ipv4
 }
 
 output "load_balancer_ipv6" {
-  description = "Public IPv6 of the load balancer."
+  description = "Public IPv6 of the load balancer, or null when there is no load balancer. Use ingress_ipv6 for DNS."
   value       = module.compute.load_balancer_ipv6
 }
 
 output "load_balancer_id" {
-  description = "Hetzner load balancer ID."
+  description = "Hetzner load balancer ID, or null when enable_load_balancer is false."
   value       = module.compute.load_balancer_id
 }
 
@@ -42,12 +69,12 @@ output "app_private_ips" {
 }
 
 output "cache_server_id" {
-  description = "ID of the shared Redis node."
+  description = "ID of the shared Redis node, or null when Redis is co-located on the application node."
   value       = module.compute.cache_server_id
 }
 
 output "cache_private_ip" {
-  description = "Private IP of the Redis node. The BFF's REDIS_URL and REDIS_QUOTA_URL point here. There is no longer a Postgres address to publish: the database is Neon, and its connection strings are sensitive outputs of infra/neon."
+  description = "Private IP the Redis node takes when enable_cache_node is true. Reserved either way. Use redis_host for the address REDIS_URL and REDIS_QUOTA_URL should actually carry, because that one is correct in both shapes. There is no longer a Postgres address to publish: the database is Neon, and its connection strings are sensitive outputs of infra/neon."
   value       = module.compute.cache_private_ip
 }
 

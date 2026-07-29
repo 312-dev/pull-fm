@@ -1,0 +1,20 @@
+[Unit]
+Description=Delete unverified WorkOS directory records
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-JOBS.md
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=/etc/pullfm/deploy.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pullfm-job reap-unverified
+
+# Exit 2 means a deletion failed or the blast-radius cap was hit; both are
+# self-healing. Exit 1 means WorkOS would not answer, so nothing was deleted and
+# the directory keeps accumulating personal-data records for people who never
+# consented and are not users. There is no lawful basis for that under GDPR
+# Article 6, which is why this one alerts rather than waits for Monday.
+SuccessExitStatus=2
+OnFailure=pullfm-job-alert@%n.service
+
+RuntimeMaxSec=900

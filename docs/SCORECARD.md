@@ -437,14 +437,25 @@ GitHub Releases does not. Signing and reproducibility are the only things betwee
 a user and a substituted artifact, and the signing key is a credential whose
 disclosure lets an attacker publish an update that our own users' clients accept.
 
-### Gate 5: alerting - SPEC ONLY
+### Gate 5: alerting - SPEC ONLY, with the first detectors committed
 
 The alert list Gate 5 requires is specified in
 [`RUNBOOK-INCIDENT.md`](RUNBOOK-INCIDENT.md), with each condition, how to fire it
-synthetically, and the runbook section it links to. **Nothing in that list is
-configured.** It is a specification, and it is labelled as one in the document
-itself. Gate 5 stays open until each row can be demonstrated firing to ntfy
-inside 60 seconds with a timestamped log, and every runbook URL returns 200.
+synthetically, and the runbook section it links to. **Nothing in that list
+delivers a notification.** It is a specification, and it is labelled as one in
+the document itself. Gate 5 stays open until each row can be demonstrated firing
+to ntfy inside 60 seconds with a timestamped log, and every runbook URL returns 200.
+
+One thing did change on 2026-07-29 and it is worth recording precisely, because
+it is easy to overstate. Rows J1 to J4, the four scheduled background jobs, now
+have their **detection and classification committed**: each job unit sets
+`SuccessExitStatus=2` and `OnFailure=pullfm-job-alert@%n.service`, so an exit 1
+(the job could not run and changed nothing) becomes a failed unit, an
+error-priority journal entry, and a line in `/var/log/pullfm/job-alerts.jsonl`.
+**No channel is configured and no compute is deployed, so nothing is delivered
+and nothing has fired.** The remaining work for those four rows is one
+root-owned `alert.env` and a node, not more code. See
+[`RUNBOOK-JOBS.md`](RUNBOOK-JOBS.md) section 4.
 
 ---
 

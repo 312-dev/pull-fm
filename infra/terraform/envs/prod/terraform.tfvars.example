@@ -29,12 +29,26 @@ network_ip_range = "10.30.0.0/16"
 subnet_ip_range  = "10.30.1.0/24"
 
 # --- sizing ----------------------------------------------------------------
-# CAX is Ampere ARM64 and is the only permitted family; the module validates
-# it. Hetzner raised CPX/CCX by 150-210 percent on 2026-06-15 while CAX rose
-# about 30 percent (docs/PLAN.md section 2).
-app_node_count    = 2
-app_server_type   = "cax21" # 4 vCPU ARM / 8 GB
-cache_server_type = "cax11" # 2 vCPU ARM / 4 GB, shared Redis only
+# CAX is Ampere ARM64 and is preferred; the module also admits the legacy-priced
+# cpx_1_ types because CAX has been out of stock across the EU sites. Hetzner
+# raised CPX/CCX by 150-210 percent on 2026-06-15 while CAX rose about 30
+# percent (docs/PLAN.md section 2).
+#
+# ONE NODE, REDIS ON IT, NO LOAD BALANCER. That is EUR 7.59/mo against EUR 42.26
+# for the two-node shape this used to default to, and it is the right shape for
+# an environment with no traffic. See docs/RUNBOOK-COST.md for the arithmetic.
+#
+# The two flags below are not preferences. app_node_count > 1 with either of
+# them false is a PLAN-TIME ERROR: Redis holds the MusicBrainz token bucket and
+# that limit is 1 req/s for the whole service, so a second node with its own
+# local Redis emits 2 req/s and loses us the API. Scale out by setting all three
+# together, never the count on its own.
+app_node_count       = 1
+enable_cache_node    = false
+enable_load_balancer = false
+
+app_server_type   = "cax11" # 2 vCPU ARM / 4 GB, and it now also runs Redis
+cache_server_type = "cax11" # only created when enable_cache_node = true
 
 # --- durability ------------------------------------------------------------
 # There is nothing durable on a Hetzner node any more. Postgres moved to Neon

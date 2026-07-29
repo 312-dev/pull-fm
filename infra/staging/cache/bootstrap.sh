@@ -1,28 +1,47 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Bootstraps the Pull.fm staging cache node.
+# Bootstraps the two shared Redis instances.
 #
 # THIS USED TO BOOTSTRAP POSTGRES. The database is Neon now (infra/neon), so
-# this node runs the two Redis instances and nothing else. Nothing about the
-# Redis half changed; the Postgres half was deleted rather than rewritten.
+# what this places is Redis and nothing else. Nothing about the Redis half
+# changed; the Postgres half was deleted rather than rewritten.
+#
+# IT NO LONGER ASSUMES A DEDICATED NODE. Pre-launch there is one application
+# node and no cache node, and Redis runs on the application node bound to the
+# loopback. PRIVATE_IP is what makes the difference and it is not cosmetic: it
+# is the address the containers publish on, so on the application node it MUST
+# be 127.0.0.1. That node has a public interface, and Redis must not answer on
+# it.
+#
+#   PRIVATE_IP=127.0.0.1   co-located on the application node (default shape)
+#   PRIVATE_IP=10.20.1.21  the separate cache node, which is required before
+#                          app_node_count can go above one; see
+#                          infra/terraform/modules/compute/variables.tf
+#
+# infra/staging-env.sh passes it from the terraform output rather than letting
+# it default, so the two cannot disagree.
 #
 # Idempotent: safe to re-run. Run as root ON THE NODE, with the repository's
 # infra/staging/cache directory present in the working directory and
 # /etc/pullfm/cache.env already placed (it holds the secrets and is never in
 # git).
 #
-#   ssh -J pullfm@<app-public-ip> pullfm@10.20.1.21
-#   sudo bash bootstrap.sh
+#   sudo PRIVATE_IP=127.0.0.1 bash bootstrap.sh        # on the app node
+#   ssh -J pullfm@<app-public-ip> pullfm@10.20.1.21    # on a cache node
+#   sudo PRIVATE_IP=10.20.1.21 bash bootstrap.sh
 #
-# This node has no public IPv4 by design, so every package and image comes in
-# over IPv6. Docker Hub and the Ubuntu archive were both verified reachable over
-# IPv6 from here; if that ever stops being true the fallback is
+# A dedicated cache node has no public IPv4 by design, so every package and
+# image comes in over IPv6. Docker Hub and the Ubuntu archive were both verified
+# reachable over IPv6 from there; if that ever stops being true the fallback is
 # `docker save | ssh | docker load` from the application node across the private
 # network.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-PRIVATE_IP=${PRIVATE_IP:-10.20.1.21}
+# Defaults to the loopback, which is the pre-launch shape. A default of the
+# cache node's address would mean that forgetting to pass this on the
+# application node publishes Redis on an interface it must never answer on.
+PRIVATE_IP=${PRIVATE_IP:-127.0.0.1}
 ENV_FILE=/etc/pullfm/cache.env
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -101,7 +120,11 @@ chmod 0600 /etc/pullfm/redis/cache.conf /etc/pullfm/redis/quota.conf
 install -d -m 0755 /opt/pullfm-cache
 install -m 0644 docker-compose.yml /opt/pullfm-cache/docker-compose.yml
 
-grep -q '^PRIVATE_IP=' "${ENV_FILE}" || printf 'PRIVATE_IP=%s\n' "${PRIVATE_IP}" >>"${ENV_FILE}"
+# Rewritten rather than appended-if-absent. This value now varies between the
+# two supported shapes, so a stale line left over from a previous converge would
+# silently keep Redis bound where it used to be.
+sed -i '/^PRIVATE_IP=/d' "${ENV_FILE}"
+printf 'PRIVATE_IP=%s\n' "${PRIVATE_IP}" >>"${ENV_FILE}"
 chmod 0600 "${ENV_FILE}"
 
 cd /opt/pullfm-cache

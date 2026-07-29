@@ -1,0 +1,19 @@
+[Unit]
+Description=Sweep expired rows hourly
+
+[Timer]
+# Hourly at :05. idempotency_keys.expires_at is 24 hours and the privacy policy
+# says so, so a daily sweep would leave a row alive for up to 48 hours against a
+# 24-hour promise. Hourly makes the worst case 25 hours: the schema's number
+# plus the hour of clock-skew slack the sweeper deliberately allows before it
+# will delete anything.
+OnCalendar=*-*-* *:05:00
+AccuracySec=1s
+
+# TRUE. A missed hour is an hour of the published window not enforced, so a node
+# that was down runs the sweep once on the way back up rather than waiting for
+# the next round hour.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

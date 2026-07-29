@@ -31,7 +31,10 @@ credentials. The entire ingress posture exists to ensure neither. CI verifies
 from the **public URL** instead, which is a stronger claim: a deploy job that
 connects to a node and reports its own exit code proves the deployer ran, whereas
 a healthz poll that returns the SHA just built proves that commit is serving real
-traffic through Cloudflare, the load balancer, nginx, and the container.
+traffic through Cloudflare, nginx, and the container. (Through the load
+balancer too, on the two-node shape. Pre-launch there is one node and no load
+balancer; see `infra/staging/README.md` for what replaced it and why removing it
+changed nothing about the client IP the application sees.)
 
 **Migrations run with the new image, before it takes traffic.** Not from a
 separate migration image, so the schema and the code that expects it can never be
@@ -233,9 +236,10 @@ terraform apply
   which means losing the laptop orphans the zone TLS posture. Migrating both is
   an open task.
 - Staging is ephemeral. `./infra/staging-env.sh up` before a gate run, `down`
-  after. `down` destroys the servers, the load balancer, the private network,
-  **the four Terraform-managed DNS records**, and all staging Postgres data;
-  `up` recreates all of it. The R2 backup bucket survives.
+  after. `down` destroys the server, the private network, **the four
+  Terraform-managed DNS records**, and the load balancer if one was created;
+  `up` recreates all of it. The R2 backup bucket survives. There is no staging
+  Postgres data to destroy any more: the database is Neon.
 
 **`up` does not currently produce a working environment.** Terraform's job ends
 at a booted node; nginx, the origin certificate, the container, and the deploy

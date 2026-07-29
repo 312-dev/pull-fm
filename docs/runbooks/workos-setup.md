@@ -202,16 +202,19 @@ command, not something the API does on a request:
 pnpm --filter @pull-fm/bff reap:unverified
 ```
 
-**Nothing in this repository schedules it, and putting it on a schedule is a step
-of this runbook, not something that has already happened.** Until it is
-scheduled, `AUTH_UNVERIFIED_REAP_AFTER_S` bounds how long an unconsented record
-survives _a run_, not how long it exists. This is the same gap recorded as item 1
-of the appendix in `legal/privacy-policy.md`, which covers the other two
-retention jobs.
+**It is scheduled in configuration and has never run.** `pullfm-reap-unverified.timer`
+fires hourly at :35 and is enabled by `infra/staging/app/bootstrap.sh`; **no
+compute is deployed, so nothing has invoked it.** Until a node exists,
+`AUTH_UNVERIFIED_REAP_AFTER_S` bounds how long an unconsented record survives _a
+run_, not how long it exists. That is the same gap recorded as item 1 of the
+appendix in `legal/privacy-policy.md`, which covers the other two retention
+jobs, and it now closes on a deployment rather than on more code.
 
-Run it **hourly or daily**. The window is a duration, not a cadence, so running
-it more often reaps nothing extra; running it less often than daily means
-`AUTH_UNVERIFIED_REAP_AFTER_S` stops being an upper bound at all.
+**Hourly**, not daily. The window is a duration, not a cadence, so running it
+more often reaps nothing extra on any given run; running it daily against a
+24-hour window would make the true upper bound 48 hours, and the stated window
+would bound nothing. The full schedule and its reasoning are in
+[`../RUNBOOK-JOBS.md`](../RUNBOOK-JOBS.md).
 
 It deletes a record only when **all four** hold, and the first is the one that
 makes it safe: WorkOS reports `email_verified` **strictly false**; the record is
@@ -223,6 +226,10 @@ Exit codes are meant for the scheduler: **0** ran or declined because another
 run held the lock, **1** could not run and deleted nothing (the case worth
 alerting on, because the directory is unbounded until it succeeds), **2** ran
 but a deletion failed or the blast-radius cap was hit (self-healing next run).
+The unit sets `SuccessExitStatus=2` and `OnFailure=`, so 1 reaches the alert
+handler and 2 does not. There is still no notification channel configured
+anywhere in this project; what "alert" means today is spelled out in
+[`../RUNBOOK-JOBS.md`](../RUNBOOK-JOBS.md) section 4.
 
 **Consequence for counting users.** Directory size is not signup count. A record
 with `email_verified: false` is somebody who was sent a code, which includes
