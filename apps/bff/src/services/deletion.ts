@@ -48,11 +48,17 @@
  *   2. Retention is bounded and stated. Deleted data disappears from the backup
  *      set when the last backup containing it expires, within the documented
  *      PITR window.
- *   3. If a restore ever occurs, the deletion_log rows in this database are the
- *      authoritative replay list: any restored user id present in deletion_log
- *      is re-deleted before the restored system serves traffic. That makes the
- *      deletion durable across a restore, which is the property the regulation
- *      actually cares about.
+ *   3. If a restore ever occurs, the R2 ERASURE LEDGER is the authoritative
+ *      replay list: any restored user id present in it is re-deleted before the
+ *      restored system serves traffic. That makes the deletion durable across a
+ *      restore, which is the property the regulation actually cares about.
+ *
+ *      IT USED TO SAY `deletion_log` HERE, AND THAT WAS FALSE. `deletion_log`
+ *      is a table inside the database being restored, so rolling back past an
+ *      erasure rolls back the erasure and its own evidence simultaneously. The
+ *      2026-07-29 drill proved it: the account came back and `deletion_log`
+ *      held zero rows. The replay list has to live where a Postgres restore
+ *      cannot reach, which is what services/erasure-ledger.ts is.
  *   4. Backup encryption keys are escrowed but not user-specific, so there is
  *      no per-user crypto-shredding claim to make here. The claim that IS true:
  *      third-party credentials in a backup are envelope ciphertext, so a
@@ -66,8 +72,10 @@
 
 import type { Redis } from "ioredis";
 
-import type { Database } from "../lib/db.js";
+import type { Queryable } from "../lib/db.js";
+import { ApiError } from "../lib/errors.js";
 import { deleteByPrefix } from "../lib/redis.js";
+import type { ErasureDurability, ErasureLedger } from "./erasure-ledger.js";
 import type { WorkOsClient } from "./workos.js";
 
 export interface DeletionOutcome {
@@ -75,13 +83,62 @@ export interface DeletionOutcome {
   readonly rowsDeleted: Record<string, number>;
   readonly workosDeleted: boolean;
   readonly redisKeysDeleted: number;
+  /**
+   * How this erasure was made durable outside Postgres.
+   *
+   * Returned rather than merely logged because it is the difference between two
+   * different promises to the data subject: `inline` means the erasure survives
+   * a restore to any point after this instant, and `deferred-to-reconciler`
+   * means it survives a restore to any point after the exporter's next run.
+   */
+  readonly durability: ErasureDurability;
+}
+
+/**
+ * The narrow database surface the cascade needs.
+ *
+ * Declared structurally rather than as the concrete `Database` so the
+ * partial-failure paths - which are the ones that matter here, because this is
+ * the only irreversible operation in the API - can be driven deterministically
+ * by a fake. A cascade whose failure modes are only reachable by breaking a
+ * real Postgres is a cascade whose failure modes are untested.
+ */
+export interface DeletionDatabase extends Queryable {
+  transaction<T>(fn: (client: Queryable) => Promise<T>): Promise<T>;
 }
 
 export interface DeletionServiceDeps {
-  readonly db: Database;
+  readonly db: DeletionDatabase;
   readonly workos: WorkOsClient;
   readonly cacheRedis: Redis;
   readonly quotaRedis: Redis;
+  /**
+   * The out-of-band erasure ledger. NOT optional: a deployment without one
+   * passes `UnconfiguredErasureLedger`, so there is no code path here that can
+   * forget to consider durability.
+   */
+  readonly ledger: ErasureLedger;
+  /** Optional. Never receives anything but ids and a failure kind. */
+  readonly log?: { warn: (obj: unknown, msg?: string) => void } | undefined;
+}
+
+/**
+ * The refusal returned when the ledger is configured and its write failed.
+ *
+ * 503 rather than 500 because it is precisely a "try again" condition: nothing
+ * has been destroyed, the request row records that erasure was asked for, and a
+ * retry is expected to succeed. The WorkOS webhook path depends on this too - a
+ * non-2xx there means the provider redelivers `user.deleted`, which is the
+ * behaviour we want when the erasure is not yet durable.
+ */
+function ledgerUnavailable(): ApiError {
+  return new ApiError(
+    503,
+    "erasure-not-durable",
+    "Service Unavailable",
+    "The erasure record could not be written to durable storage, so the account has NOT been deleted. " +
+      "Nothing was changed. Please retry.",
+  );
 }
 
 /**
@@ -117,11 +174,65 @@ export class DeletionService {
    *      fails, there is a durable record that erasure was requested, and the
    *      sweep can retry. A log written last would be lost by the failure it
    *      exists to record.
-   *   2. Delete the Postgres rows in one transaction.
-   *   3. Delete upstream and in Redis, both best effort, both recorded.
+   *   2. Write the OUT-OF-BAND ERASURE LEDGER object, and refuse to continue if
+   *      it fails. See below.
+   *   3. Delete the Postgres rows in one transaction.
+   *   4. Delete upstream and in Redis, both best effort, both recorded.
    *
    * `workosUserId` is passed in rather than read after the delete, because
-   * after step 2 the row that held it no longer exists.
+   * after step 3 the row that held it no longer exists.
+   *
+   * -------------------------------------------------------------------------
+   * WHY THE LEDGER IS STEP 2 AND NOT STEP 5, AND WHICH FAILURE THAT PREFERS
+   *
+   * There are only two orderings and each one has a failure it cannot avoid:
+   *
+   *   LEDGER LAST   The rows are gone and the ledger write fails. The erasure
+   *                 happened and nothing outside Postgres records it, so a
+   *                 restore past this moment resurrects the account with
+   *                 nothing to say it should not exist. That is exactly the
+   *                 defect the 2026-07-29 drill found, reintroduced at a
+   *                 smaller scale. It is also unfixable in the moment: the
+   *                 delete cannot be undone, so the only honest response is an
+   *                 error on a request that irreversibly succeeded.
+   *
+   *   LEDGER FIRST  The ledger holds an entry for an account that was not, in
+   *                 the end, erased, because step 3 failed. The account is
+   *                 intact, the caller got an error, and a retry reconciles
+   *                 everything. The residue is that a restore-and-replay would
+   *                 delete an account that is technically still live.
+   *
+   * WE PREFER THE SECOND, for three reasons:
+   *
+   *   1. NOTHING IRREVERSIBLE HAS HAPPENED WHEN IT OCCURS. The whole ordering
+   *      property this method already had - a failure leaves a recoverable
+   *      state - is preserved, and the ledger write is placed before the one
+   *      step that cannot be taken back.
+   *   2. THE "ORPHAN" IS NOT A NEW FAILURE MODE. The `deletion_log` request row
+   *      is already written first, and the timer exporter already copies every
+   *      row it finds, completed or not, into the ledger. An erasure that
+   *      failed at step 3 therefore already produced a ledger entry within ten
+   *      minutes, before this change. Writing it inline makes the same entry
+   *      appear sooner; it does not create one that would not have existed.
+   *   3. THE ORPHANED SUBJECT ASKED TO BE ERASED. Both callers require it: the
+   *      route demands a fresh session plus the account's own email typed back,
+   *      and the webhook path requires a signature-verified `user.deleted`. A
+   *      replay that erases them is late compliance, not a wrongful deletion.
+   *      The reverse failure - a resurrected account with no record of its
+   *      erasure - is a breach of a published promise, and one we already know
+   *      how to discover only by drilling for it.
+   *
+   * The refusal in step 2 is what stops this from being a silent downgrade: an
+   * erasure that cannot be made durable does not happen at all, rather than
+   * happening and claiming a durability it does not have.
+   *
+   * A deployment with NO ledger configured is a different case and is handled
+   * differently: it is a known property of the deployment rather than a
+   * per-request failure, so the cascade proceeds, the weaker durability is
+   * recorded in `deletion_log.notes` and returned to the caller, and the
+   * ten-minute exporter remains the mechanism. Refusing to erase because an
+   * object-store credential is absent would be a worse Article 17 outcome than
+   * erasing with a ten-minute RPO.
    */
   async deleteAccount(
     userId: string,
@@ -135,6 +246,29 @@ export class DeletionService {
       [userId, requestedAt],
     );
     const logId = logRows[0]?.id ?? null;
+
+    let durability: ErasureDurability;
+    try {
+      durability = await this.#deps.ledger.record({
+        deletedUserId: userId,
+        requestedAt,
+      });
+    } catch (err) {
+      // The one place in this method that aborts. Everything after this point
+      // is irreversible, so this is the last moment at which refusing is free.
+      this.#deps.log?.warn(
+        {
+          userId,
+          err: err instanceof Error ? err.name : "unknown",
+        },
+        "erasure ledger write failed; the deletion was refused and nothing was deleted",
+      );
+      await this.#note(
+        logId,
+        "ABORTED: the out-of-band erasure ledger was unwritable, so no data was deleted. Retry required.",
+      );
+      throw ledgerUnavailable();
+    }
 
     const rowsDeleted = await this.#deps.db.transaction(async (client) => {
       const counts: Record<string, number> = {};
@@ -177,6 +311,20 @@ export class DeletionService {
     }
 
     if (logId !== null) {
+      // Both facts, in one column, because an Article 17 response has to be
+      // able to state what happened AND how durable it is, and a note that
+      // recorded only the WorkOS outcome would silently drop the second.
+      const notes = [
+        workosDeleted
+          ? null
+          : "WorkOS identity deletion failed or was skipped; retry required.",
+        durability === "deferred-to-reconciler"
+          ? "No out-of-band erasure ledger is configured on this deployment; durability across a restore is bounded by the ledger exporter's interval."
+          : `Erasure ledger written before deletion (${durability}).`,
+      ]
+        .filter((n): n is string => n !== null)
+        .join(" ");
+
       await this.#deps.db.query(
         `UPDATE deletion_log
             SET completed_at = now(), rows_deleted = $2, workos_deleted = $3, notes = $4
@@ -185,14 +333,31 @@ export class DeletionService {
           logId,
           JSON.stringify({ ...rowsDeleted, redisKeys: redisKeysDeleted }),
           workosDeleted,
-          workosDeleted
-            ? null
-            : "WorkOS identity deletion failed or was skipped; retry required.",
+          notes,
         ],
       );
     }
 
-    return { userId, rowsDeleted, workosDeleted, redisKeysDeleted };
+    return { userId, rowsDeleted, workosDeleted, redisKeysDeleted, durability };
+  }
+
+  /**
+   * Annotates the request row on an aborted erasure. Best effort by design.
+   *
+   * The abort is already being reported to the caller and to the log; failing
+   * the abort itself because the annotation could not be written would replace
+   * a clear 503 with an opaque 500 and tell the operator less, not more.
+   */
+  async #note(logId: string | null, note: string): Promise<void> {
+    if (logId === null) return;
+    try {
+      await this.#deps.db.query(
+        `UPDATE deletion_log SET notes = $2 WHERE id = $1`,
+        [logId, note],
+      );
+    } catch {
+      /* the 503 and the log line already carry this */
+    }
   }
 
   /**

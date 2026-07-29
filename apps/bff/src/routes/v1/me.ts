@@ -278,7 +278,14 @@ export function registerMeRoutes(
               "backupRetentionNotice",
             ],
           },
-          ...problemResponses(400, 401, 403, 422, 429),
+          // 503 is `erasure-not-durable`: the out-of-band erasure ledger could
+          // not be written, so NOTHING was deleted and the request is
+          // retryable. It is in the contract rather than an undeclared status
+          // because a client has to be able to tell "we did not delete you, try
+          // again" from "we deleted you and something else went wrong", and
+          // those are the only two things a 5xx on this route can mean. See
+          // services/deletion.ts for why the ledger write precedes the delete.
+          ...problemResponses(400, 401, 403, 422, 429, 503),
         },
         ...annotate({
           authz: "user-scoped",
@@ -324,6 +331,11 @@ export function registerMeRoutes(
         detail: {
           rowsDeleted: outcome.rowsDeleted,
           workosDeleted: outcome.workosDeleted,
+          // Which durability claim applies to THIS erasure. The audit trail is
+          // where an Article 17 response is assembled from, so the answer has
+          // to be here rather than inferable from a deployment's configuration
+          // months later.
+          durability: outcome.durability,
         },
         ip: request.ip,
       });
@@ -500,11 +512,22 @@ function normalizeName(value: string | null | undefined): string | null {
   return trimmed.length === 0 ? null : trimmed;
 }
 
+/**
+ * The retention position, told to the subject rather than only published.
+ *
+ * The last clause used to say "replays the deletion log", naming a table INSIDE
+ * the database being restored. A restore to a point before an erasure rolls
+ * back the erasure and that table's record of it at the same instant, so the
+ * sentence described something that could not work, and the 2026-07-29 drill
+ * showed it not working. It now names the property that is actually true: the
+ * replay list is held outside the database.
+ */
 const BACKUP_NOTICE =
   "Your account and all data derived from it have been deleted from the live database and from the " +
   "identity provider. Encrypted backups are retained for the documented point-in-time-recovery window " +
   "and are not selectively rewritten, because rewriting a backup destroys the integrity that makes it " +
-  "useful. Backups are encrypted, access-controlled, never queried for live traffic, and any restore " +
-  "replays the deletion log before serving traffic, so this deletion survives a restore.";
+  "useful. Backups are encrypted, access-controlled, never queried for live traffic, and a record of " +
+  "this erasure is held OUTSIDE the database, in append-only storage a restore cannot roll back, and " +
+  "is re-applied before a restored system serves traffic, so this deletion survives a restore.";
 
 export { BACKUP_NOTICE };

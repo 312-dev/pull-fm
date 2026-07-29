@@ -41,6 +41,10 @@ import {
   type ProviderRegistry,
 } from "./services/connections.js";
 import { DeletionService } from "./services/deletion.js";
+import {
+  createErasureLedger,
+  type ErasureLedger,
+} from "./services/erasure-ledger.js";
 import { DiscoveryService } from "./services/discovery.js";
 import { EventsService } from "./services/events.js";
 import { ExportService } from "./services/export.js";
@@ -84,6 +88,16 @@ export interface WiringOverrides {
    * exact class of bug putting the jobs on the bundle is meant to end.
    */
   readonly jobEnv?: NodeJS.ProcessEnv;
+  /**
+   * The out-of-band erasure ledger.
+   *
+   * A seam, and a necessary one: the deletion cascade now refuses to destroy
+   * anything until the ledger write has succeeded, and the ONLY way to test
+   * that refusal is to make the write fail. A suite cannot do that against a
+   * real object store, and a suite that cannot do it is a suite that certifies
+   * the happy path of the only irreversible operation in the API.
+   */
+  readonly erasureLedger?: ErasureLedger;
 }
 
 export function buildServices(
@@ -139,6 +153,27 @@ export function buildServices(
   });
 
   const users = new UserService(db);
+
+  /**
+   * The erasure ledger, and the one warning that has to be loud.
+   *
+   * A deployment with no ledger still deletes accounts - refusing an Article 17
+   * erasure because an object-store credential is absent would be a worse
+   * compliance outcome than performing it with a ten-minute recovery point -
+   * but it must not do so quietly. This is the only place that knows the answer
+   * at startup, and "the durability of every erasure on this node is bounded by
+   * a timer" is not a fact anybody should have to infer from a missing variable.
+   */
+  const erasureLedger =
+    overrides.erasureLedger ?? createErasureLedger(cfg.erasureLedger);
+  if (!erasureLedger.configured && cfg.isProduction) {
+    log.warn(
+      { deployEnv: cfg.DEPLOY_ENV },
+      "no erasure ledger is configured: account deletions will be made durable by the ledger exporter's timer, " +
+        "so an erasure followed immediately by a restore can be lost. Set ERASURE_LEDGER_ENDPOINT, " +
+        "ERASURE_LEDGER_BUCKET, ERASURE_LEDGER_ACCESS_KEY_ID and ERASURE_LEDGER_SECRET_ACCESS_KEY.",
+    );
+  }
 
   const tokens = new TokenService(db, {
     prefix: cfg.apiTokenPrefix,
@@ -284,7 +319,14 @@ export function buildServices(
     }),
     connections,
     wishlist: new WishlistService(db, keys),
-    deletion: new DeletionService({ db, workos, cacheRedis, quotaRedis }),
+    deletion: new DeletionService({
+      db,
+      workos,
+      cacheRedis,
+      quotaRedis,
+      ledger: erasureLedger,
+      log,
+    }),
     exports: new ExportService(db, keys, quotaRedis, {
       publicBaseUrl: cfg.PUBLIC_BASE_URL,
       linkTtlSeconds: cfg.EXPORT_LINK_TTL_S,
