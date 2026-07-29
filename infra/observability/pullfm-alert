@@ -11,27 +11,45 @@
 # ---------------------------------------------------------------------------
 # WHY THE CHANNEL IS NOT IN THIS FILE
 #
-# The transport is ntfy. The INSTANCE and the TOPIC are not, and must never be,
-# committed: this repository is public, and on ntfy the topic name is the
-# capability. Anyone who learns the topic can read every alert it carries and
-# publish forgeries into it. So the endpoint arrives at runtime, from
-# /etc/pullfm/alert.env, which is written by infra/observability/install-alert-env.sh
-# out of 1Password and never touches git.
+# The endpoint arrives at runtime from /etc/pullfm/alert.env, written by
+# infra/observability/install-alert-env.sh out of 1Password, and never touches
+# git. For most providers the URL IS the credential - a Discord or Slack webhook
+# URL is a bearer token with a hostname in front of it, and on an anonymous ntfy
+# the topic name is the whole access control - so it is handled as a secret
+# whatever is configured.
 #
-# See infra/observability/README.md for the reasoning about which ntfy instance
-# should be behind that URL, which is a security decision rather than a
-# preference.
+# The TRANSPORT is no longer hardcoded either. PULLFM_ALERT_SINK_KIND selects the
+# wire format, so moving Pull.fm's alerting to a different provider is one
+# 1Password value and no code change. See DECISIONS.md SD-003.
 #
 # ---------------------------------------------------------------------------
-# THE FOUR SURFACES, IN ORDER OF HOW MUCH CONFIGURATION THEY NEED
+# THE PRIMARY PATH IS NOT IN THIS FILE AT ALL, AND THAT IS THE POINT
+#
+# This file PUSHES. A push from the node cannot report the node being gone, and
+# for most of this project's life that was the only path, which meant silence and
+# health were indistinguishable. The primary path is now a PULL: pullfm-heartbeat
+# writes a content-free beat, nginx serves it, and a scheduled GitHub Actions
+# workflow outside every machine we own reads it and raises an issue when it
+# stops. Nothing on this node can suppress that.
+#
+# So this file is now the LOW-LATENCY path, not the reliable one, and the
+# division of labour is deliberate: it tells the operator quickly when it can,
+# and the external watcher tells them eventually whatever happens here.
+#
+# ---------------------------------------------------------------------------
+# THE FIVE SURFACES, IN ORDER OF HOW MUCH CONFIGURATION THEY NEED
 #
 #   1. The journal, at error priority, tagged `pullfm-alert`, always. Costs
 #      nothing and exists on any node.
 #   2. The spool, /var/log/pullfm/alerts.jsonl, always. One JSON object per
 #      alert including whether delivery worked, so "nobody was told" is itself
 #      a recorded fact rather than an absence of one.
-#   3. ntfy, when alert.env configures it.
-#   4. The caller's exit code, so a watchdog can tell a delivered alert from an
+#   3. The dedupe stamp in /var/lib/pullfm/alerts/, always - which is what
+#      pullfm-heartbeat counts, so EVERY alert reaches the external watcher even
+#      with no sink configured at all. This is why an unconfigured sink is no
+#      longer the same thing as an unreachable operator.
+#   4. The push sink, when alert.env configures one.
+#   5. The caller's exit code, so a watchdog can tell a delivered alert from an
 #      undelivered one and does not have to guess.
 #
 # ---------------------------------------------------------------------------
@@ -47,9 +65,12 @@
 # indistinguishable from the alerter dying.
 #
 # EXIT CODES
-#   0  delivered
-#   3  no channel configured (journal and spool were still written)
-#   4  a channel is configured and delivery FAILED
+#   0  delivered to the push sink
+#   3  no push sink configured. The journal, the spool and the dedupe stamp were
+#      still written, so the external watcher WILL see this within one of its
+#      intervals. 3 means "not pushed", not "nobody will ever know", and the
+#      difference matters now that a second path exists.
+#   4  a push sink is configured and delivery FAILED
 #   5  suppressed as a duplicate inside the repeat window
 #
 # Never non-zero for a bad argument once the message exists: an alerter that
@@ -164,15 +185,17 @@ fi
 DELIVERED=false
 DELIVERY=none-configured
 
-if [ -n "${PULLFM_NTFY_URL:-}" ]; then
-  DELIVERY=attempted
+# PULLFM_NTFY_URL is still honoured so a node whose alert.env predates the
+# provider-agnostic rename keeps pushing rather than silently stopping. A
+# compatibility fallback that is written down is maintenance; one that is not is
+# a trap.
+SINK_URL=${PULLFM_ALERT_SINK_URL:-${PULLFM_NTFY_URL:-}}
+SINK_TOKEN=${PULLFM_ALERT_SINK_TOKEN:-${PULLFM_NTFY_TOKEN:-}}
+SINK_KIND=${PULLFM_ALERT_SINK_KIND:-}
+[ -n "${SINK_KIND}" ] || SINK_KIND=ntfy
 
-  # An array, not `${VAR:+-H "..."}`. The inline form looks like it works and
-  # does not: an unquoted expansion word-splits on the spaces inside the header
-  # value, so curl receives four broken arguments instead of two.
-  auth=()
-  [ -n "${PULLFM_NTFY_TOKEN:-}" ] &&
-    auth=(-H "Authorization: Bearer ${PULLFM_NTFY_TOKEN}")
+if [ -n "${SINK_URL}" ]; then
+  DELIVERY=attempted
 
   BODY="${MESSAGE}"
   [ -n "${RUNBOOK}" ] && BODY="${BODY}
@@ -182,30 +205,65 @@ runbook: ${RUNBOOK}"
 
 env=${ENVLABEL} host=${HOST} key=${KEY} at=${WHEN}"
 
+  # An array, not `${VAR:+-H "..."}`. The inline form looks like it works and
+  # does not: an unquoted expansion word-splits on the spaces inside the header
+  # value, so curl receives four broken arguments instead of two.
+  args=()
+  case "${SINK_KIND}" in
+    ntfy)
+      args=(-H "Title: ${TITLE}" -H "Priority: ${PRIORITY}" -H "Tags: ${TAGS}")
+      [ -n "${RUNBOOK}" ] && args+=(-H "Actions: view, Runbook, ${RUNBOOK}")
+      [ -n "${SINK_TOKEN}" ] && args+=(-H "Authorization: Bearer ${SINK_TOKEN}")
+      PAYLOAD="${BODY}"
+      ;;
+    discord | slack | webhook)
+      # One JSON body that all three accept. Discord reads `content`, Slack reads
+      # `text`, and a generic receiver gets both plus the structured fields. Three
+      # nearly identical payload builders would be three places for the escaping
+      # to go wrong, and the escaping is the only hard part.
+      esc_title=$(esc "${TITLE}")
+      esc_body=$(esc "${BODY}")
+      PAYLOAD=$(printf '{"content":"**%s**\\n%s","text":"*%s*\\n%s","username":"pullfm-%s","pullfm":{"key":"%s","priority":"%s","env":"%s","host":"%s","resolved":%s}}' \
+        "${esc_title}" "${esc_body}" "${esc_title}" "${esc_body}" \
+        "$(esc "${ENVLABEL}")" "$(esc "${KEY}")" "${PRIORITY}" \
+        "$(esc "${ENVLABEL}")" "$(esc "${HOST}")" "${RESOLVE}")
+      args=(-H 'Content-Type: application/json')
+      # A bearer header is added only when a token exists. Discord and Slack
+      # authenticate by the secret INSIDE the URL and reject an extra
+      # Authorization header on some paths, which is why it is conditional rather
+      # than always present.
+      [ -n "${SINK_TOKEN}" ] && args+=(-H "Authorization: Bearer ${SINK_TOKEN}")
+      ;;
+    *)
+      DELIVERY=unknown-sink-kind
+      echo "PULLFM-ALERT sink kind '${SINK_KIND}' is not supported by this version." >&2
+      SINK_URL=""
+      ;;
+  esac
+
   # --max-time 10 twice over: an alerter that blocks is a watchdog that stops
   # watching. Two attempts, because a single dropped SYN should not be the
-  # difference between told and not told, and no more than two because the
-  # spool is already the durable record.
-  for attempt in 1 2; do
-    if printf '%s' "${BODY}" | curl -fsS --max-time 10 \
-      -H "Title: ${TITLE}" \
-      -H "Priority: ${PRIORITY}" \
-      -H "Tags: ${TAGS}" \
-      ${RUNBOOK:+-H "Actions: view, Runbook, ${RUNBOOK}"} \
-      "${auth[@]+"${auth[@]}"}" \
-      --data-binary @- \
-      "${PULLFM_NTFY_URL}" >/dev/null 2>&1; then
-      DELIVERED=true
-      DELIVERY=ntfy
-      break
-    fi
-    [ "${attempt}" = 1 ] && sleep 2
-  done
+  # difference between told and not told, and no more than two because the spool
+  # and the heartbeat are already the durable record.
+  if [ -n "${SINK_URL}" ]; then
+    for attempt in 1 2; do
+      if printf '%s' "${PAYLOAD}" | curl -fsS --max-time 10 \
+        "${args[@]+"${args[@]}"}" \
+        --data-binary @- \
+        "${SINK_URL}" >/dev/null 2>&1; then
+        DELIVERED=true
+        DELIVERY="${SINK_KIND}"
+        break
+      fi
+      [ "${attempt}" = 1 ] && sleep 2
+    done
 
-  [ "${DELIVERED}" = true ] || {
-    DELIVERY=ntfy-failed
-    echo "PULLFM-ALERT delivery FAILED. The journal and ${SPOOL} are the only record." >&2
-  }
+    [ "${DELIVERED}" = true ] || {
+      DELIVERY="${SINK_KIND}-failed"
+      echo "PULLFM-ALERT push to the ${SINK_KIND} sink FAILED. The journal, ${SPOOL} and the" >&2
+      echo "heartbeat are the record, and the external watcher will still see this alert." >&2
+    }
+  fi
 fi
 
 # --- 2. the spool ----------------------------------------------------------
@@ -218,6 +276,21 @@ spool "${DELIVERED}" "${DELIVERY}"
 # hour.
 if [ "${RESOLVE}" != true ]; then
   printf '%s' "${NOW}" >"${STATE_FILE}" 2>/dev/null || true
+fi
+
+# --- refresh the heartbeat so the external watcher sees this within its next
+#     interval rather than within the heartbeat timer's -----------------------
+#
+# The stamp above is what pullfm-heartbeat counts, so the alert would reach the
+# watcher anyway at the next five-minute beat. Refreshing here removes up to five
+# minutes of avoidable latency on the path that always works, and it is the
+# cheapest thing in this file.
+#
+# Guarded and ignored on failure ON PURPOSE. An alerter that fails because its
+# heartbeat emitter is missing is an alerter that stops alerting over a
+# non-essential optimisation, and the timer will emit the beat regardless.
+if command -v pullfm-heartbeat >/dev/null 2>&1; then
+  pullfm-heartbeat >/dev/null 2>&1 || true
 fi
 
 [ "${DELIVERED}" = true ] && exit 0

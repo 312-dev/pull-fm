@@ -1,0 +1,38 @@
+[Unit]
+Description=Emit the Pull.fm liveness heartbeat that the external dead man's switch watches
+Documentation=https://github.com/312-dev/pullfm-heartbeat
+After=network-online.target
+
+# No Requires=, no BindsTo=, and no OnFailure=. This unit's whole purpose is to
+# be MISSED: an external watcher fires when the beat stops. Wiring its failure
+# into the alert path would mean the thing that reports silence tries to report
+# its own silence, which is the coupling this unit was built to remove.
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/pullfm/alert.env
+ExecStart=/usr/local/bin/pullfm-heartbeat
+
+# TimeoutStartSec=, NOT RuntimeMaxSec=. RuntimeMaxSec= has no effect on
+# Type=oneshot - systemd prints "Ignoring" on every daemon-reload, where nobody
+# reads it - because a oneshot never reaches the running state that directive
+# bounds. That mistake was found and fixed twice in this repository already
+# (infra/staging/app/systemd and pullfm-watchdog.service); it is not being made a
+# third time.
+#
+# 20s is generous for two directory reads and one systemctl call. It matters
+# because the timer is OnUnitActiveSec=5min and systemd will not start a second
+# copy of a oneshot that is still activating: a wedged run would suppress every
+# later beat, which trips the switch. That is the correct direction to fail in,
+# but it should fail because the node is broken and not because this script hung.
+TimeoutStartSec=20
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pullfm
+# It reads two local directories, asks systemd for failed units, and writes one
+# small file. It makes no network connection of any kind - publishing is nginx's
+# job - so no address families are permitted at all.
+RestrictAddressFamilies=AF_UNIX

@@ -73,13 +73,99 @@ if [ "${MODE}" = live ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# THE HEARTBEAT, which is the path that works when the push does not.
+#
+# Everything above tests the PUSH. Since 2026-07-29 the push is the secondary
+# path and the primary one is a pull: pullfm-heartbeat writes a content-free
+# beat, nginx serves it, and a scheduled GitHub Actions workflow outside all of
+# our infrastructure reads it. Testing only the push would leave the path this
+# project actually depends on unproven, which is the shape of defect this file
+# exists to catch.
+#
+# The assertions are about BEHAVIOUR, not configuration: the count has to move
+# when a condition fires and move back when it clears. A test that the file
+# exists would pass on an emitter that always writes zero.
+# ---------------------------------------------------------------------------
+echo
+echo "heartbeat:"
+WORK=${WORK:-$(mktemp -d)}
+BEATDIR="${WORK}/beat"
+BEATFILE="${BEATDIR}/selftest.json"
+mkdir -p "${BEATDIR}"
+HB="${HERE}/pullfm-heartbeat"
+
+hb() {
+  PULLFM_ALERT_ENV=/nonexistent \
+    PULLFM_ALERT_STATE_DIR="${WORK}/state" \
+    PULLFM_HEARTBEAT_FILE="${BEATFILE}" \
+    PULLFM_ALERT_ENV_LABEL=selftest \
+    PULLFM_HEARTBEAT_UNIT_GLOB='pullfm-selftest-nothing-matches-this-*' \
+    "${HB}" >/dev/null 2>&1
+}
+
+beatfield() { sed -n "s/.*\"$1\":\([0-9]*\).*/\1/p" "${BEATFILE}" 2>/dev/null; }
+
+mkdir -p "${WORK}/state"
+if hb && [ -f "${BEATFILE}" ]; then
+  pass "the emitter writes a beat"
+else
+  fail "the emitter wrote no beat"
+fi
+
+if python3 -c "import json,sys; d=json.load(open('${BEATFILE}')); sys.exit(0 if d.get('epoch',0)>0 else 1)" 2>/dev/null; then
+  pass "the beat parses as JSON and carries a non-zero epoch"
+else
+  fail "the beat is not parseable JSON with an epoch (the watcher would call this malformed)"
+fi
+
+[ "$(beatfield pending)" = 0 ] &&
+  pass "a quiet node reports pending=0" ||
+  fail "a quiet node reported pending=$(beatfield pending)"
+
+# A firing condition is exactly a dedupe stamp, so this creates one the way
+# pullfm-alert does rather than by calling a helper that only this test uses.
+touch "${WORK}/state/selftest-condition"
+hb
+if [ "$(beatfield pending)" = 1 ] && grep -q 'selftest-condition' "${BEATFILE}"; then
+  pass "a firing condition raises pending and names its key"
+else
+  fail "a firing condition did not reach the beat: $(cat "${BEATFILE}")"
+fi
+
+# And the other direction, which is the half that is easy to get wrong: a
+# counter that only ever goes up leaves the switch permanently tripped, and a
+# permanently tripped switch is muted within a day.
+rm -f "${WORK}/state/selftest-condition"
+hb
+[ "$(beatfield pending)" = 0 ] &&
+  pass "a resolved condition lowers pending again" ||
+  fail "pending stayed at $(beatfield pending) after the condition cleared"
+
+# The beat must never carry a body. It is served to the public internet, and a
+# hostname or a journal tail in it is reconnaissance about a node that holds
+# third parties' Last.fm session keys.
+if grep -qiE '"(host|hostname|message|body|detail|tail)"' "${BEATFILE}"; then
+  fail "the beat carries a body or a hostname; it is PUBLIC and must not"
+else
+  pass "the beat carries no body and no hostname"
+fi
+
+# ---------------------------------------------------------------------------
 # Local mode: a real ntfy, a real publish, a real read-back.
 command -v docker >/dev/null 2>&1 || {
   echo "  SKIP  docker is not available; cannot start a local ntfy."
-  exit 77
+  # NOT a bare `exit 77`. The heartbeat checks above already ran and need no
+  # docker, so swallowing their result into a SKIP would turn a real failure into
+  # "we did not look" - which is the same class of lie as the --check that
+  # reported ARMED by reading a file.
+  [ "${FAILED}" -eq 0 ] && exit 77
+  echo "FAIL: ${FAILED} heartbeat check(s) failed before docker was needed."
+  exit "${FAILED}"
 }
 
-WORK=$(mktemp -d)
+# NOT a second mktemp. Reusing the directory the heartbeat leg created keeps the
+# cleanup trap below responsible for all of it; a fresh one here leaked the beat
+# directory on every run.
 CONTAINER="pullfm-ntfy-selftest-$$"
 PORT=${PULLFM_SELFTEST_PORT:-18080}
 TOPIC="pullfm-selftest-$$"
@@ -110,8 +196,9 @@ curl -fsS --max-time 2 "http://127.0.0.1:${PORT}/v1/health" >/dev/null 2>&1 || {
 pass "local ntfy is serving"
 
 cat >"${WORK}/alert.env" <<EOF
-PULLFM_NTFY_URL=http://127.0.0.1:${PORT}/${TOPIC}
-PULLFM_NTFY_TOKEN=
+PULLFM_ALERT_SINK_KIND=ntfy
+PULLFM_ALERT_SINK_URL=http://127.0.0.1:${PORT}/${TOPIC}
+PULLFM_ALERT_SINK_TOKEN=
 PULLFM_ALERT_REPEAT_S=3600
 PULLFM_ALERT_ENV_LABEL=selftest
 EOF
@@ -223,7 +310,7 @@ fi
 
 echo "-------------------------------------------------------------"
 if [ "${FAILED}" -eq 0 ]; then
-  echo "PASS: the alert path delivers end to end."
+  echo "PASS: the alert path delivers end to end, and the heartbeat tracks state."
 else
   echo "FAIL: ${FAILED} check(s) failed."
 fi

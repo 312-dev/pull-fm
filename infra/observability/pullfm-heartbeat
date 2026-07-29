@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# Pull.fm heartbeat emitter. The node's half of the dead man's switch.
+#
+#   pullfm-heartbeat            # write the beat
+#   pullfm-heartbeat --show     # write it and print it (it carries no secret)
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+#
+# Before this file, SILENCE WAS INDISTINGUISHABLE FROM HEALTH. Every detector in
+# this directory ran on the node it was reporting on, so a dead node produced no
+# alert, and no alert is exactly what a quiet week looks like. The fix is not a
+# better detector. It is to make the node say "I am still here" on a schedule to
+# something that is NOT the node, so that STOPPING is the signal.
+#
+# The watcher is `.github/workflows/deadman.yml` in 312-dev/pullfm-heartbeat. It
+# runs on GitHub's scheduler, which is neither this node nor the operator's
+# personal box, and it cannot be disabled from here. See DECISIONS.md SD-003.
+#
+# ---------------------------------------------------------------------------
+# THE BEAT CARRIES A COUNT, NOT AN ALERT
+#
+# It publishes: a timestamp, how many conditions are unacknowledged, and their
+# dedupe keys. It does NOT publish hostnames, systemd unit names or journal
+# tails, because the file is served publicly and those are reconnaissance
+# material about a node that holds third parties' Last.fm session keys.
+#
+# The bodies stay where the runbook already sends you: `journalctl -t
+# pullfm-alert -p err` and /var/log/pullfm/alerts.jsonl. This is the same shape
+# as a payload-free push notification: the wake-up travels on the open channel
+# and the detail is fetched over an authenticated one.
+#
+# ---------------------------------------------------------------------------
+# WHAT "UNACKNOWLEDGED" MEANS, AND WHY IT REUSES STATE THAT ALREADY EXISTED
+#
+# Two sources, both of which already had exactly the right lifecycle, so nothing
+# new has to be kept in sync:
+#
+#   1. /var/lib/pullfm/alerts/<key>  - pullfm-alert writes one per firing key and
+#      `--resolve` deletes it. A condition that fixed itself removes its own
+#      entry; one that did not, does not.
+#   2. `systemctl --failed`          - a scheduled job that failed stays failed
+#      until somebody runs `reset-failed`. That is already the acknowledgement
+#      gesture an operator makes, and pullfm-job-alert's own header calls it "a
+#      fourth surface that costs nothing".
+#
+# Source 2 is the reason pullfm-job-alert needs no change to reach the switch. It
+# writes a journal line, a spool line, and leaves its unit failed; the third of
+# those is what the heartbeat reads. Counting spool LINES instead would have
+# meant a job failure stayed "pending" forever, or being cleared by a window
+# whose length is a guess, and neither is an acknowledgement.
+# ---------------------------------------------------------------------------
+set -uo pipefail
+
+ALERT_ENV=${PULLFM_ALERT_ENV:-/etc/pullfm/alert.env}
+if [ -f "${ALERT_ENV}" ]; then
+  # shellcheck disable=SC1090
+  . "${ALERT_ENV}" 2>/dev/null || true
+fi
+
+STATE_DIR=${PULLFM_ALERT_STATE_DIR:-/var/lib/pullfm/alerts}
+BEAT=${PULLFM_HEARTBEAT_FILE:-/var/lib/pullfm/heartbeat/staging.json}
+ENVLABEL=${PULLFM_ALERT_ENV_LABEL:-unknown}
+UNIT_GLOB=${PULLFM_HEARTBEAT_UNIT_GLOB:-pullfm-*}
+
+NOW=$(date -u +%s)
+WHEN=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+keys=""
+add_key() {
+  case " ${keys} " in
+    *" $1 "*) ;;
+    *) keys="${keys}${keys:+ }$1" ;;
+  esac
+}
+
+# --- source 1: live dedupe stamps ------------------------------------------
+if [ -d "${STATE_DIR}" ]; then
+  for f in "${STATE_DIR}"/*; do
+    [ -e "${f}" ] || continue
+    add_key "$(basename "${f}")"
+  done
+fi
+
+# --- source 2: units systemd still considers failed -------------------------
+# --plain --no-legend so the output is parseable, and `|| true` because a node
+# without systemd (a container used by the self-test) must still emit a beat
+# rather than emit nothing, since emitting nothing trips the switch.
+while read -r unit _rest; do
+  [ -n "${unit}" ] || continue
+  add_key "unit:${unit%.service}"
+done <<EOF
+$(systemctl list-units "${UNIT_GLOB}" --state=failed --plain --no-legend --no-pager 2>/dev/null || true)
+EOF
+
+PENDING=0
+for _k in ${keys}; do PENDING=$((PENDING + 1)); done
+
+# JSON assembled by hand rather than with a library, for the same reason
+# metrics.ts has no client library: the shape is four scalars and a list of
+# already-sanitised names, and a dependency here would be a dependency in the
+# one path that has to work when other things do not.
+#
+# The keys are sanitised at their source (pullfm-alert restricts a key to
+# [A-Za-z0-9._-] before it ever reaches the filesystem, and a systemd unit name
+# cannot contain a quote), so no escaping is required. That is an invariant
+# rather than an assumption: alert-selftest.sh asserts the beat parses.
+klist=""
+for _k in ${keys}; do klist="${klist}${klist:+,}\"${_k}\""; done
+
+mkdir -p "$(dirname "${BEAT}")" 2>/dev/null || true
+# 0755/0644, deliberately world readable: nginx serves this file to the public
+# internet so that a watcher outside our infrastructure can read it WITHOUT a
+# credential. A credential the watcher had to hold would be a credential in a
+# public repository's Actions secrets, and a watcher that needs a secret is a
+# watcher that stops working the day the secret rotates.
+chmod 0755 "$(dirname "${BEAT}")" 2>/dev/null || true
+
+TMP="${BEAT}.tmp.$$"
+printf '{"v":1,"env":"%s","ts":"%s","epoch":%s,"pending":%s,"keys":[%s]}\n' \
+  "${ENVLABEL}" "${WHEN}" "${NOW}" "${PENDING}" "${klist}" >"${TMP}" 2>/dev/null || {
+  echo "pullfm-heartbeat: could not write ${TMP}" >&2
+  exit 1
+}
+chmod 0644 "${TMP}" 2>/dev/null || true
+# Rename, not write-in-place. A watcher that reads a half-written beat sees
+# malformed JSON and trips, and a switch that trips on its own writer is a switch
+# that gets muted. mv on the same filesystem is atomic.
+mv -f "${TMP}" "${BEAT}" 2>/dev/null || {
+  rm -f "${TMP}" 2>/dev/null || true
+  echo "pullfm-heartbeat: could not install ${BEAT}" >&2
+  exit 1
+}
+
+[ "${1:-}" = "--show" ] && cat "${BEAT}"
+exit 0

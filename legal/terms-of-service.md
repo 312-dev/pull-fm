@@ -70,6 +70,31 @@ These Terms are a binding agreement between you and 312.dev LLC. They cover:
 By creating an account, installing a Pull.fm client, or using the API, you agree
 to these Terms. If you do not agree, do not use Pull.fm.
 
+`[OPEN]` **That sentence is currently a claim rather than a mechanism, and it is
+the most consequential gap in this document.** Nothing in the product yet
+presents these Terms and records assent. Distribution is a sideloaded app file
+from GitHub Releases, so there is no store flow and no installer dialogue in
+which a user is shown terms and acts on them.
+
+Under Illinois law that matters more than the wording of any individual clause.
+In `Sgouros v. TransUnion Corp.`, 817 F.3d 1029 (7th Cir. 2016), no contract was
+formed even where the user completed a **paid** purchase on a page that displayed
+the terms, because the interface did not communicate that proceeding was assent.
+A sideloaded application with no consent step has a weaker record than that, not
+a stronger one.
+
+**If no contract forms, nothing here binds.** Not the limitation of liability in
+section 13, not the Illinois governing-law and venue selection in section 16, not
+the third-party beneficiary grant in section 9, and not the US-only offering in
+section 2. The careful drafting of each is contingent on assent that the product
+does not currently obtain.
+
+The remedy is a first-launch consent gate in the client: present these Terms and
+the privacy policy, require an affirmative action, and record what was accepted
+and when. It costs one screen and it is worth more than any clause in this
+document. **This is a requirement on the client application, which does not exist
+yet, so it is recorded here rather than left to be discovered after launch.**
+
 **Pull.fm is free and non-commercial.** We charge nothing, we sell nothing, we
 run no advertising, we take no affiliate or referral revenue, and we do not sell
 or share your personal information. This is a locked product constraint recorded
@@ -137,22 +162,52 @@ scopes until it expires or you revoke it.
 
 ---
 
-## 3. Licence to use Pull.fm clients
+## 3. The software, and the service, are licensed differently
 
-Subject to these Terms, we grant you a **personal, non-exclusive,
-non-transferable, non-sublicensable, revocable licence** to install and use the
-Pull.fm client applications on devices you own or control, for your own
-non-commercial use.
+**The software is Apache-2.0. We do not license it to you here, and we cannot
+take it back.**
 
-The Pull.fm source code in this repository is separately licensed under the
-**Apache License 2.0**, and nothing in this section restricts rights granted to
-you by that licence in respect of the source code. This section governs the
-**hosted service and the compiled client binaries**, which the Apache licence
-does not.
+The Pull.fm source code and the compiled client applications we publish are both
+licensed under the **Apache License 2.0**. That licence is perpetual,
+irrevocable, worldwide, royalty-free, and transferable, and it permits
+commercial use. Nothing in these Terms limits it, and nothing in these Terms
+should be read as an attempt to. You may keep, copy, modify, redistribute and
+sell the application under Apache-2.0, including a version pointed at a server
+that is not ours.
 
-You may not:
+An earlier draft of this section granted a "non-transferable, revocable licence"
+covering "the hosted service and the compiled client binaries, which the Apache
+licence does not". That was wrong on the facts: the binaries **are** distributed
+under Apache-2.0. A revocable licence to something already granted irrevocably
+is not a restriction, it is a contradiction, and publishing it would have told
+you that you had fewer rights than you do.
 
-- use Pull.fm, or data obtained from it, for any commercial purpose;
+**What these Terms actually govern is access to the hosted service:** the Pull.fm
+API, the accounts it holds, and the data it returns. That access is personal,
+non-transferable and revocable, and it is offered to residents of the United
+States (see section 2).
+
+The distinction is not academic, so here is the practical shape of it:
+
+- We can suspend or terminate your **account and API access**, and this section
+  is the basis on which we do.
+- We cannot, and do not claim to, stop you **running the app**. If we terminate
+  your access, your copy of the application remains yours under Apache-2.0; it
+  simply has no Pull.fm server to talk to.
+
+The conditions below are therefore conditions of using **the hosted service**,
+not conditions of your licence to the software. The consequence of breaching one
+is losing service access. Several of them exist because our upstream data
+providers impose them on us, and we cannot pass on rights we do not hold
+(see section 8 and [`attribution.md`](attribution.md)).
+
+When using the hosted service, you may not:
+
+- use the hosted service, or data obtained from it, for any commercial purpose.
+  Note the boundary: Apache-2.0 permits commercial use of the **software** and
+  this does not restrict that. What is restricted is commercial use of **our
+  service and the data it returns**, because our upstream providers licence that
+  data to us for non-commercial use and we cannot sublicense more than we hold;
 - resell, sublicense, or provide Pull.fm's output as a service to others;
 - remove, obscure, alter, or fail to render any attribution, credit, logo, or
   link that Pull.fm supplies with data (see section 8 and
@@ -165,7 +220,9 @@ You may not:
   our [security policy](../SECURITY.md), which includes a safe harbour for good
   faith research.
 
-`[CONFIRM: whether the compiled client binaries are themselves distributed under Apache-2.0, in which case the "non-transferable, revocable" framing above is inconsistent with the licence actually granted and this section must be rewritten to cover only the hosted service.]`
+Resolved 2026-07-29: the owner confirmed the compiled client binaries **are**
+distributed under Apache-2.0, so this section was rewritten to govern the hosted
+service alone.
 
 ---
 
@@ -319,10 +376,40 @@ beneficiaries of these Terms.**
 The SeatGeek Entities are entitled to **enforce these Terms directly against
 you**, in their own name, with respect to any provision that concerns SeatGeek
 Materials, including without limitation section 7, section 8, section 11
-(disclaimer), and section 12 (limitation of liability). No consent from the
-SeatGeek Entities is required for any amendment of these Terms, but no amendment
-may reduce the protections these Terms afford the SeatGeek Entities below those
-in SeatGeek's own API Terms of Use.
+(disclaimer of warranties), section 13 (limitation of liability), and section 14
+(indemnity). No consent from the SeatGeek Entities is required for any amendment
+of these Terms, but no amendment may reduce the protections these Terms afford
+the SeatGeek Entities below those in SeatGeek's own API Terms of Use.
+
+<!--
+CORRECTED 2026-07-29, and the correction is not cosmetic.
+
+This enumeration read "section 12 (limitation of liability)". Section 12 is
+"Availability, and the honest service level"; limitation of liability is section
+13. So the clause that EXTENDS protection to the SeatGeek Entities pointed at the
+wrong section, and pointed away from the cap.
+
+Two reasons it mattered more than a typo.
+
+First, it contradicted this document's own theory of compliance. The CONFIRM note
+below asks counsel to confirm that the combination of sections 7, 8, 9, 11, 13
+and 14 satisfies SeatGeek's "at least as protective" requirement, while section 9
+itself enumerated 12 rather than 13.
+
+Second, it is the species of defect that decided Sosa v. Onfido, 8 F.4th 631 (7th
+Cir. 2021), where a vendor could not enforce an app operator's terms because the
+limitation-of-liability clause protected "OfferUp providers", defined as
+"affiliates [and] licensors", and the court held Onfido was neither. Illinois
+demands that third-party benefit be practically an express declaration, so a
+mislabelled cross-reference in the clause doing the extending is exactly the wrong
+place to be imprecise.
+
+The protection probably survived anyway, because section 13 independently extends
+the same limitations to the SeatGeek Entities by name. That is a reason to fix the
+reference, not a reason to have relied on it. Section 14 is added because it
+already names the SeatGeek Entities and was missing from this list.
+-->
+
 
 Except as stated in this section, these Terms create no rights in any person who
 is not a party to them.

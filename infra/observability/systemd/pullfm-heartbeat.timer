@@ -1,0 +1,27 @@
+[Unit]
+Description=Emit the Pull.fm heartbeat every five minutes
+
+[Timer]
+# FIVE MINUTES, against a 30-minute staleness ceiling in the watcher. The ratio
+# is the design, not a coincidence: the ceiling has to absorb both this timer's
+# jitter and GitHub's scheduled-workflow jitter, which is best-effort and
+# routinely runs late. Six beats of headroom means a single missed beat plus a
+# single delayed cron cannot raise a false alarm, and a dead man's switch that
+# cries wolf gets muted - which is the silence it exists to end.
+#
+# Shorter would not detect anything sooner, because detection latency is set by
+# the watcher's cron interval and not by this one.
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+# TRUE, unlike pullfm-watchdog.timer, and the asymmetry is the point. A missed
+# watchdog minute is a minute of not-watching that has already passed and cannot
+# be recovered. A missed heartbeat is a stale FACT that is still worth
+# correcting, because the file on disk is what the watcher reads: after a reboot
+# the beat should be refreshed immediately rather than at the next five-minute
+# boundary, or a reboot inside the staleness window looks like a death.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
