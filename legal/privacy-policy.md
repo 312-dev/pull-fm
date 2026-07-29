@@ -20,7 +20,7 @@
 > **Items marked `[CONFIRM]` need an operator or counsel decision.**
 
 **Version:** DRAFT-0 (unpublished)
-**Last updated:** 2026-07-28
+**Last updated:** 2026-07-29
 **Effective:** not yet effective
 
 ---
@@ -40,11 +40,17 @@
 - Your **connected-service credentials are encrypted at rest** with per-record
   keys and are never exported, logged, or shown to anyone, including us in the
   ordinary course of operating the service.
-- Data is stored in the **European Union** (Hetzner, Helsinki, Finland).
+- **Your Pull.fm data is stored in the European Union.** The database is a Neon
+  project in **Frankfurt, Germany**, and the application servers are in the EU.
+- **Your identity data is not.** Your email address, your name, and your sign-in
+  events are handled for us by **WorkOS, in the United States**, under Standard
+  Contractual Clauses. We do not have the option of keeping that data in the EU,
+  and section 9 says exactly what it covers and how the transfer is legitimized
+  rather than implying the whole system is EU-only.
 - You can **export** everything (`GET /v1/me/export`) and **delete** everything
   (`DELETE /v1/me`) yourself, from the API or the app, at any time.
 
-The rest of this document is the detail behind those five points.
+The rest of this document is the detail behind those points.
 
 ---
 
@@ -73,8 +79,20 @@ This is a table of actual database columns and log fields, not categories.
 
 ### 3.1 Account identity (from your sign-in provider)
 
-Authentication is handled by **WorkOS AuthKit**. You sign in with Google, with
-Apple, or with an emailed magic link.
+Authentication is handled by **WorkOS AuthKit**, and **WorkOS processes this
+data in the United States**. See section 9 for the transfer mechanism and what
+WorkOS is and is not permitted to do with it.
+
+You sign in with an **emailed one-time code** (WorkOS Magic Auth). Social
+sign-in with Google or Apple, passkeys, and passwords are **not enabled**; the
+reasoning is in
+[`../docs/runbooks/workos-setup.md`](../docs/runbooks/workos-setup.md).
+
+`[CONFIRM]` This sentence must match the launch configuration on the day of
+publication. `docs/PLAN.md` section 4 still records the earlier
+"social plus magic link" plan, and if social sign-in is turned on, this section
+must change, because the provider then also tells us which third-party account
+you used.
 
 | What                                                                       | Where it is stored   | Source |
 | -------------------------------------------------------------------------- | -------------------- | ------ |
@@ -87,9 +105,26 @@ Apple, or with an emailed magic link.
 no password hash, and no password reset flow, deliberately: Pull.fm issues no
 passwords at all.
 
-WorkOS is a **processor** acting on our instructions. Their own handling of your
-sign-in is governed by their terms and by our data processing agreement with
-them `[OPEN: the WorkOS DPA is not yet on file. Gate L requires it.]`.
+WorkOS is a **processor** acting on our instructions, under the WorkOS Data
+Processing Addendum published at
+[workos.com/legal/dpa](https://workos.com/legal/dpa). That addendum is
+incorporated into the WorkOS agreement automatically and needs no separate
+signature: "Each party's execution of the Agreement shall be considered a
+signature to the Standard Contractual Clauses to the extent that the Standard
+Contractual Clauses apply hereunder."
+
+Two things in that addendum are worth stating plainly rather than leaving in a
+document nobody reads:
+
+- WorkOS may process your data "for its internal uses to build or improve the
+  quality of its services", to detect security incidents, and to protect against
+  fraud. That is a **broader permission than "only on our instructions"**, and it
+  is theirs, not ours. **The addendum does not say anything either way about
+  training AI or machine-learning models on it.** We have not obtained a separate
+  commitment on that point, so we do not claim one.
+- Under the CCPA, WorkOS commits **not to "sell" or "share"** your personal data,
+  not to retain or use it for any purpose other than providing the service, and
+  not to combine it with data it gets from anyone else.
 
 ### 3.2 Connected music services
 
@@ -291,20 +326,27 @@ cascade here, so an account deleted upstream does not leave orphaned data.
 
 ### What survives deletion, honestly
 
-| Survives                             | Contains                                                                                               | Why                                                                                                |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| **Deletion record** (`deletion_log`) | the internal id of the deleted account, timestamps, row counts                                         | To demonstrate erasure, and to re-apply it if a backup is restored                                 |
-| **Audit records** (`audit_log`)      | the internal id of the deleted account, the action, the outcome, and **the IP address** of the request | Security evidence must survive the deletion it records, or a hostile deletion erases its own trail |
-| **Encrypted backups**                | your rows, as they were at backup time                                                                 | See below                                                                                          |
-| **Logs**                             | request id, internal id, IP, user agent - no email, no credential                                      | See section 8                                                                                      |
+| Survives                             | Contains                                                                                                                                                                                                      | Why                                                                                                                                                                     |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Deletion record** (`deletion_log`) | the internal id of the deleted account, timestamps, row counts                                                                                                                                                | To demonstrate erasure, and to re-apply it if a backup is restored                                                                                                      |
+| **Audit records** (`audit_log`)      | today: the internal id of the deleted account, the action, the outcome, and **the IP address** of the request. Intended: the same rows with the id replaced by an irreversible pseudonym and the IP truncated | Security evidence must survive the deletion it records, or a hostile deletion erases its own trail. Deleting an account is a plausible last step of an account takeover |
+| **Encrypted backups**                | your rows, as they were at backup time                                                                                                                                                                        | See below                                                                                                                                                               |
+| **Logs**                             | request id, internal id, IP, user agent - no email, no credential                                                                                                                                             | See section 8                                                                                                                                                           |
 
 `[OPEN]` **`audit_log` currently has no retention limit and is never purged.**
 That means an IP address linked to an internal account identifier persists
-indefinitely after the account is deleted. This is not defensible as written:
-either a retention period must be implemented and stated here, or the IP must be
-truncated or hashed at write time after a bounded window. **Do not publish this
-policy until this is resolved**, because the sentence "we keep it forever" is
-what the code currently does.
+indefinitely after the account is deleted. This is not defensible as written.
+
+The fix is designed and specified in
+[`../docs/compliance/data-retention-policy.md`](../docs/compliance/data-retention-policy.md):
+audit rows are kept, but the identifiers in them are removed after a bounded
+window. The internal account id is replaced by a random pseudonym that exists
+nowhere else and cannot be reversed by anyone including us, and the IP address is
+truncated to its network prefix. Full-fidelity rows last 90 days, or 30 days
+after an account is deleted, whichever comes first; anonymized rows are hard
+deleted at 400 days. **That specification is not implemented yet.** Until it is,
+the true statement is the one above, and **this policy must not be published**
+with a retention promise the code does not keep.
 
 ### Backups
 
@@ -325,12 +367,11 @@ accept, and it comes with three commitments that make it meaningful:
 4. A restored backup yields your connected-service credentials **only as
    ciphertext**, under a key that was never in the database.
 
-`[OPEN]` **The backup system is not deployed yet and the retention window has no
-number.** Backup storage exists in infrastructure code; pgBackRest is a Phase 1
-task and the retention settings are unset (see
-[`../infra/staging/README.md`](../infra/staging/README.md)). This policy must
-state a specific window (for example "up to 30 days") before publication, and
-that number must be the one actually configured.
+`[OPEN]` **The retention window has no number.** The database is now hosted by
+Neon, so the point-in-time-recovery window is a Neon project setting rather than
+something this repository configures, and it has not been recorded anywhere. This
+policy must state a specific window (for example "up to 30 days") before
+publication, and that number must be the one actually set on the project.
 
 ---
 
@@ -339,44 +380,117 @@ that number must be the one actually configured.
 | Data                                                        | Retention                                                                                                                                                                                                                                                                                                                                    |
 | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Account, connections, wishlist, API tokens                  | Until you delete them or delete your account                                                                                                                                                                                                                                                                                                 |
-| Idempotency records                                         | 24 hours, enforced by the schema                                                                                                                                                                                                                                                                                                             |
-| In-flight connect state                                     | Minutes, enforced by the schema                                                                                                                                                                                                                                                                                                              |
+| Idempotency records                                         | `[OPEN]` They stop being **valid** after 24 hours, which the schema does enforce, but nothing **deletes** them, so the row (including the cached response body) survives until you delete your account. A sweeper is specified in the retention policy and is not built.                                                                     |
+| In-flight connect state                                     | `[OPEN]` Same shape: expiry is checked on read, minutes after issue, but the row is never deleted.                                                                                                                                                                                                                                           |
 | Redis rate-limit counters, export cooldowns, export tickets | 60 seconds to about 11 minutes                                                                                                                                                                                                                                                                                                               |
 | Session revocations in Redis                                | Until the revoked session would have expired anyway                                                                                                                                                                                                                                                                                          |
 | Application and web server logs                             | `[OPEN]` **No retention period is configured anywhere in the system today.** Logs are intended to ship to a hosted log service, and no numeric retention exists in infrastructure code. A number must be set and stated here before publication; a policy that says "we keep logs for N days" while nothing enforces N is a false statement. |
-| Audit records                                               | `[OPEN]` **Indefinite today.** See section 7.                                                                                                                                                                                                                                                                                                |
+| Audit records                                               | `[OPEN]` **Indefinite today.** The intended position is 90 days at full fidelity, or 30 days after account deletion, then anonymized, then hard deleted at 400 days. See section 7.                                                                                                                                                          |
+| Personal API token last-used IP                             | `[OPEN]` Kept for the life of the token today. Intended: cleared 90 days after the token was last used.                                                                                                                                                                                                                                      |
 | Deletion records                                            | Indefinite. They hold an internal identifier and timestamps, and nothing else.                                                                                                                                                                                                                                                               |
 | Encrypted backups                                           | `[OPEN]` The point-in-time-recovery window, once configured. See section 7.                                                                                                                                                                                                                                                                  |
+| Identity data held by WorkOS                                | Deleted when you delete your account. On termination of our agreement with them, their addendum commits them to delete it other than backup and archival copies, which go on their own schedule. `[OPEN]` That schedule is not published.                                                                                                    |
+
+The full schedule, the reasoning behind each number, and the legitimate-interest
+assessment for the security audit trail are in
+[`../docs/compliance/data-retention-policy.md`](../docs/compliance/data-retention-policy.md).
 
 ---
 
 ## 9. Where your data is, and who else touches it
 
-**Storage location: the European Union.** Pull.fm's database, cache, and
-application run on Hetzner Cloud in **Helsinki, Finland**. The infrastructure
-code **refuses to build** in a non-EU Hetzner site: the location variable is
-validated against an EU-only list, so a US or APAC region is a hard error rather
-than a configuration slip.
+**The honest version has two halves, and a policy that gives only the first half
+is misleading.** Everything you create in Pull.fm stays in the European Union.
+Your identity, meaning your email address, your name, and the record of your
+sign-ins, is processed in the **United States** by WorkOS. There is no EU
+residency option for that, so this policy states it rather than implying
+otherwise.
 
-**312.dev LLC is a United States company**, so the controller is outside the EU
-even though the data is inside it. That means personal data may be accessed from
-the United States by the operator in the course of running the service.
-`[CONFIRM with counsel: the appropriate transfer mechanism for controller-side
-access from the US - Standard Contractual Clauses are the usual answer, and there
-is a question of whether an intra-controller transfer needs one at all.]`
+### Where each thing actually sits
+
+| Data                                                                                         | Where                                                          | Leaves the EU?                               |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------- |
+| Account row, connected-service credentials, wishlist, API tokens, audit and deletion records | **Neon** Postgres, **Frankfurt, Germany** (`aws-eu-central-1`) | No                                           |
+| Cache and rate-limit counters                                                                | Application servers in the EU                                  | No                                           |
+| Application servers                                                                          | **Hetzner Cloud**, EU sites only                               | No                                           |
+| Encrypted database backups                                                                   | Neon's own backups, and object storage in an EU jurisdiction   | No                                           |
+| **Email address, name, sign-in events, session records**                                     | **WorkOS, United States**                                      | **Yes.** See "International transfers" below |
+| Operator access                                                                              | From the United States, by one person                          | Access, not storage. See below               |
+
+Two structural guarantees behind the EU rows, rather than a promise:
+
+- The Neon project's region is chosen at creation and **Neon does not permit
+  changing the region of an existing project**, so residency is a property of the
+  project rather than a setting somebody could flip.
+- The infrastructure code for the application servers **refuses to build** in a
+  non-EU Hetzner site: the location variable is validated against an EU-only
+  list, so a US or APAC region is a hard error rather than a configuration slip.
+
+`[OPEN]` The Terraform in this repository still contains the earlier
+self-hosted-Postgres layout from before the move to Neon, and the staging stack
+is currently down. That is an inconsistency in the infrastructure code, not in
+this description, but the two must agree before publication.
+
+### International transfers
+
+**To WorkOS (United States).** Under the WorkOS Data Processing Addendum,
+"Subscriber authorizes WorkOS and its Subprocessors to transfer Subscriber
+Personal Data across international borders, including from the European Economic
+Area, Switzerland, and/or the United Kingdom to the United States." The addendum
+names the United States as the destination and offers no EU-residency
+alternative.
+
+The transfer is legitimized by:
+
+| Instrument                                                                 | Role                                                                                                            |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **EU Standard Contractual Clauses, Module Two** (controller to processor)  | Covers us, as controller, transferring your identity data to WorkOS as our processor. This is the operative one |
+| **EU Standard Contractual Clauses, Module Three** (processor to processor) | Covers WorkOS passing data to its own subprocessors                                                             |
+| **UK International Data Transfer Addendum**                                | Extends the same protection to transfers out of the United Kingdom                                              |
+| The SCCs applied "mutatis mutandis"                                        | Extends them to Swiss law                                                                                       |
+
+They take effect without a separate signing ceremony: executing the WorkOS
+agreement is treated as signing the SCCs. **The United States has no adequacy
+decision covering this transfer**, so the SCCs are the mechanism, not a
+supplement to one.
+
+WorkOS's own subprocessors are listed at
+[workos.com/legal/subprocessors](https://workos.com/legal/subprocessors), and the
+addendum gives **fourteen calendar days** to object before a new subprocessor is
+engaged. We check that list; you can too.
+
+Under the same addendum WorkOS commits to security measures consistent with a
+SOC 2 Type II programme, to notify us of a security incident "without undue
+delay", to delete personal data at the end of the agreement other than backup and
+archival copies, and to answer an audit once a year by completing a data
+protection questionnaire.
+
+`[OPEN]` We have not enumerated the WorkOS subprocessor list here, because it is
+served from a trust centre that cannot be read as plain text. Before publication,
+read it and name any subprocessor that would surprise a reader.
+
+**Operator access from the United States.** 312.dev LLC is a US company, so the
+controller sits outside the EU even for the data that never leaves it: the
+operator can read the EU database from the United States in the course of running
+the service. `[CONFIRM with counsel: the appropriate mechanism for
+controller-side remote access from the US, and whether an intra-controller
+transfer of this kind needs one at all.]`
 
 ### Service providers (processors and sub-processors)
 
-| Provider                     | What they handle                                                                    | Where                                             |
-| ---------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------- |
-| **Hetzner Online GmbH**      | Servers, database, cache                                                            | Finland (EU)                                      |
-| **Cloudflare, Inc.**         | DNS, TLS termination, edge protection, and object storage holding encrypted backups | Global edge; backups in an EU jurisdiction bucket |
-| **WorkOS, Inc.**             | Authentication and identity                                                         | United States                                     |
-| **GitHub, Inc. (Microsoft)** | Source hosting and release distribution. Handles no user data.                      | United States                                     |
+| Provider                     | What they handle                                                                    | Where                                             | Written processor contract                                                                                                                        |
+| ---------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Neon** (database)          | Every application table, and the backups of it                                      | Frankfurt, Germany (EU)                           | `[OPEN]` Not on file                                                                                                                              |
+| **Hetzner Online GmbH**      | Application servers, cache                                                          | EU sites only                                     | `[OPEN]` Not on file                                                                                                                              |
+| **Cloudflare, Inc.**         | DNS, TLS termination, edge protection, and object storage holding encrypted backups | Global edge; backups in an EU jurisdiction bucket | `[OPEN]` Not on file                                                                                                                              |
+| **WorkOS, Inc.**             | Authentication and identity                                                         | United States                                     | The published DPA, incorporated automatically. `[CONFIRM]` that the WorkOS agreement itself is executed, and keep a dated copy of the DPA on file |
+| **GitHub, Inc. (Microsoft)** | Source hosting and release distribution. Handles no user data.                      | United States                                     | Not required                                                                                                                                      |
 
-`[OPEN]` **Data processing agreements are not yet on file** with Hetzner,
-Cloudflare, or WorkOS. Gate L requires them, and Article 28 requires a written
-processor contract. This must be closed before launch.
+`[OPEN]` Article 28 requires a written processor contract with each of them.
+**Neon, Hetzner, and Cloudflare are still outstanding.** WorkOS is covered by an
+addendum that applies by its own terms, which is the exception rather than the
+pattern, and it should still be downloaded, dated, and filed so that what we
+agreed to is provable later.
 
 ### Upstream data sources (not processors)
 
@@ -515,13 +629,18 @@ Security: see [`../SECURITY.md`](../SECURITY.md)
 
 A checklist, so that nothing above is quietly published while still untrue.
 
-| #   | Item                                                                                                                    | Section |
-| --- | ----------------------------------------------------------------------------------------------------------------------- | ------- |
-| 1   | `audit_log` retains an IP address linked to a deleted account, indefinitely. Needs a retention period or IP truncation. | 7, 8    |
-| 2   | No log retention period is configured anywhere. A number must exist in the system before it is stated here.             | 8       |
-| 3   | The backup system is not deployed and the point-in-time-recovery window has no value.                                   | 7, 8    |
-| 4   | No data processing agreements are on file with Hetzner, Cloudflare, or WorkOS.                                          | 9       |
-| 5   | No EU Article 27 representative is appointed.                                                                           | 2       |
-| 6   | Controller's state of organisation, postal address, and governing supervisory authority are unfilled.                   | 2, 10   |
-| 7   | The US-access transfer mechanism is undecided.                                                                          | 9       |
-| 8   | This document has not been reviewed by a lawyer.                                                                        | all     |
+| #   | Item                                                                                                                                                                  | Section |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| 1   | `audit_log` retains an IP address linked to a deleted account, indefinitely. Designed in `docs/compliance/data-retention-policy.md`, **not implemented**.             | 7, 8    |
+| 2   | No log retention period is configured anywhere. A number must exist in the system before it is stated here.                                                           | 8       |
+| 3   | The Neon point-in-time-recovery window has no recorded value.                                                                                                         | 7, 8    |
+| 4   | No data processing agreements are on file with **Neon, Hetzner, or Cloudflare**. WorkOS is covered by an addendum that incorporates automatically; file a dated copy. | 9       |
+| 5   | No EU Article 27 representative is appointed.                                                                                                                         | 2       |
+| 6   | Controller's state of organisation, postal address, and governing supervisory authority are unfilled.                                                                 | 2, 10   |
+| 7   | The US-access transfer mechanism for controller-side access is undecided. The WorkOS transfer itself is settled: SCCs Modules Two and Three plus the UK Addendum.     | 9       |
+| 8   | Expired `idempotency_keys` and `connect_states` rows are never deleted, so section 8's retention line was wrong and is now marked open.                               | 8       |
+| 9   | The sign-in methods sentence must be checked against the launch configuration, and `docs/PLAN.md` section 4 disagrees with it today.                                  | 3.1     |
+| 10  | The WorkOS subprocessor list has not been read and summarized.                                                                                                        | 9       |
+| 11  | WorkOS may use personal data "to build or improve the quality of its services", and their addendum is silent on AI/ML training. Decide whether to seek a commitment.  | 3.1, 9  |
+| 12  | Terraform still describes the pre-Neon self-hosted database. Infrastructure and this document must agree.                                                             | 9       |
+| 13  | This document has not been reviewed by a lawyer.                                                                                                                      | all     |
