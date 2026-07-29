@@ -231,15 +231,97 @@ So the role is created with SQL, which Neon documents as the way to get a role
 with only "the basic public schema privileges granted to newly created roles in
 a standalone Postgres installation":
 
-| Script                    | Does                                                           |
-| ------------------------- | -------------------------------------------------------------- |
-| `sql/create-app-role.sql` | creates (or rotates the password of) `pullfm_app`              |
-| `sql/grant-app-role.sql`  | grants exactly the runtime privileges, including future tables |
-| `sql/verify-app-role.sql` | asserts what it can do **and what it must not be able to do**  |
+| Script                      | Does                                                                     |
+| --------------------------- | ------------------------------------------------------------------------ |
+| `sql/create-app-role.sql`   | creates (or rotates the password of) `pullfm_app`                        |
+| `sql/grant-app-role.sql`    | grants exactly the runtime privileges, including future tables           |
+| `sql/set-role-timeouts.sql` | sets the query ceilings as **role defaults**, the only form Neon honours |
+| `sql/verify-app-role.sql`   | asserts what it can do **and what it must not be able to do**            |
 
-All three are idempotent and are run **per branch**, against the direct endpoint,
-as the owner. A Neon branch inherits the roles and grants that existed when it
-was cut, so neither propagates to a branch that already exists.
+All four are idempotent and are run **per branch**, against the direct endpoint,
+as the owner. A Neon branch inherits the roles, grants and role settings that
+existed when it was cut, so none of them propagates to a branch that already
+exists.
+
+### Query ceilings, and why they are here rather than in the application
+
+`apps/bff/src/lib/db.ts` sets `statement_timeout` and
+`idle_in_transaction_session_timeout` on the `pg.Pool`, and node-postgres sends
+both in the libpq StartupMessage. **Neon's proxy discards them**, on the pooled
+endpoint _and_ on the direct one. Measured on 2026-07-29 against the live
+staging branch, with the pool asking for 3000 ms:
+
+| Endpoint | Backend reported                      | `SELECT pg_sleep(6)` |
+| -------- | ------------------------------------- | -------------------- |
+| pooled   | `30s` (the `pullfm_app` role default) | completed in 6168 ms |
+| direct   | `15min` (the owner's role default)    | completed in 6150 ms |
+
+Sending it the other legal way is refused outright on both endpoints:
+
+```
+$ PGOPTIONS='-c statement_timeout=3s' psql "$DIRECT_URL"
+ERROR:  unsupported startup parameter in options: statement_timeout.
+        Please use unpooled connection or remove this parameter ...
+```
+
+Note that following that advice does not work; the unpooled endpoint produces
+the identical error. So there is **no connection-time way** for the application
+to bound a query on Neon, `DATABASE_STATEMENT_TIMEOUT_MS` has no effect in any
+deployed environment, and `sql/set-role-timeouts.sql` is the entire mitigation
+for THREAT-MODEL T10.
+
+Proving it is a separate step from applying it, because a role default that is
+recorded and does not fire passes every catalog check:
+
+```bash
+# Applies. Once per branch, as the owner, on the DIRECT endpoint.
+psql -v ON_ERROR_STOP=1 -f sql/set-role-timeouts.sql "$OWNER_DIRECT_URL"
+
+# Proves. Over the POOLED endpoint as pullfm_app: reads the catalog, fans out
+# to defeat parked backends, then exceeds the ceiling and checks it is killed.
+PGURL_ITEM=pull-fm/<env>/DATABASE_URL \
+  node ../../packages/db/scripts/verify-query-ceilings.mjs
+```
+
+Measured with the second command on 2026-07-29, both branches: 20 of 20 sessions
+reported 30000 ms / 60000 ms, `pg_sleep(35)` was cancelled after 31045 ms
+(staging) and 31099 ms (main), and a session left idle in a transaction for 70 s
+was terminated on both.
+
+#### On a brand new, empty Neon project
+
+Nothing in `sql/set-role-timeouts.sql` names a project, region, endpoint, branch
+or connection string, so it runs verbatim. Neon regions are immutable at
+creation, so replacing a region means a new project, and a bootstrap step that
+needs hand-editing on the way is a bootstrap step that gets skipped.
+
+Run this **per branch**, in this order, as `neondb_owner` on the **direct**
+endpoint of the branch being provisioned:
+
+```bash
+OWNER="<owner connection string, DIRECT endpoint, this branch>"
+
+psql -v ON_ERROR_STOP=1 -f sql/create-app-role.sql   "$OWNER"   # roles first
+psql -v ON_ERROR_STOP=1 -f sql/grant-app-role.sql    "$OWNER"   # after migrations
+psql -v ON_ERROR_STOP=1 -f sql/set-role-timeouts.sql "$OWNER"   # the ceilings
+psql -v ON_ERROR_STOP=1 -f sql/verify-app-role.sql   "$OWNER"   # 40 assertions
+
+# Then, over the POOLED endpoint as pullfm_app, prove the ceilings FIRE.
+# ~110 seconds: it waits out both timeouts on purpose.
+PGURL_ITEM=pull-fm/<env>/DATABASE_URL \
+  node ../../packages/db/scripts/verify-query-ceilings.mjs
+```
+
+`set-role-timeouts.sql` requires `neondb_owner` and `pullfm_app` to exist and
+refuses to run with a message naming `create-app-role.sql` if they do not, so
+running it too early fails loudly rather than half-applying. The database name
+defaults to Neon's `neondb` and is overridable with `-v expect_database=<name>`.
+
+Both verifiers fail closed. A ceiling that is absent, or recorded as `0`, is a
+FAIL and not a skipped row: an unconfigured database must never pass. Gate 1
+(`packages/db/scripts/verify-migrations.mjs`) additionally refuses a `0` written
+into either SQL file, which is the one way a consistent-looking edit could
+neutralise the control everywhere at once.
 
 `create_app_role` was **removed** rather than defaulted to `false`. A boolean
 that can only choose between "no app role" and "an app role that is secretly an
@@ -311,6 +393,7 @@ Three further risks come from where the state lives rather than from Neon:
 | The schema                      | `packages/db/migrations`, applied by the deploy path through the direct endpoint                                                                                                 |
 | The `pullfm_app` role           | A role created through the Neon API is an irrevocable member of `neon_superuser`. `sql/create-app-role.sql`, run per branch                                                      |
 | `GRANT`s of any kind            | The provider has eleven resources and no grant primitive (checked in `provider/provider.go`). `sql/grant-app-role.sql`, run per branch                                           |
+| The query ceilings              | `ALTER ROLE ... SET` is a catalog write with no provider resource, and it is the only form of the ceiling Neon honours. `sql/set-role-timeouts.sql`, run per branch              |
 | The app role's password         | Terraform must not learn it: a value assigned to a variable is rendered into the plan file even when the variable is `sensitive`, and plans get attached to public pull requests |
 | Connection strings in 1Password | Copied from `terraform output` by the runbook; Terraform never writes to a vault                                                                                                 |
 | Branch resets                   | A control-plane call, not a resource. See the runbook                                                                                                                            |

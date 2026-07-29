@@ -312,6 +312,69 @@ LEFT JOIN LATERAL (
     AND split_part(cfg, '=', 1) = e.setting
 ) AS got ON true;
 
+-- The one live reading available from here, and it is worth taking.
+--
+-- Everything above reads the catalog, which answers "is the ceiling RECORDED"
+-- and not "is it APPLIED". This session is a real backend that started as
+-- neondb_owner and read that catalog at session start, so comparing what it
+-- actually got against what is recorded closes the gap for one of the two
+-- roles at zero cost.
+--
+-- Compared in MILLISECONDS via pg_settings rather than as text. '15min' is
+-- recorded in pg_db_role_setting and displayed by current_setting() as '15min',
+-- but '900s' and '900000ms' are the same ceiling and different strings, so a
+-- text comparison would fail on a perfectly correct database the first time
+-- somebody wrote the value differently.
+--
+-- pullfm_app cannot be checked this way from here - this session is not it -
+-- and that is precisely the check that matters, because pullfm_app reaches the
+-- database through the pooler and this role does not.
+-- `packages/db/scripts/verify-query-ceilings.mjs` is that check: it connects
+-- over the POOLED endpoint as pullfm_app, fans out to defeat parked backends,
+-- and then proves the ceiling by exceeding it. Run it after this file. A
+-- recorded setting that never fires passes every assertion above.
+--
+-- FAILS CLOSED, and the WHERE clause it does not have is the reason to read
+-- this twice. An earlier draft ended `WHERE e.recorded_ms IS NOT NULL`, which
+-- meant that a branch with NO recorded ceiling produced no row at all: the
+-- check disappeared instead of failing, on exactly the database where it had
+-- the most to say. A ceiling of 0 is treated the same way, because 0 is not a
+-- small ceiling, it is the absence of one.
+INSERT INTO _pullfm_privcheck (category, check_, expected, actual, ok)
+SELECT
+  'query ceilings',
+  'live: this neondb_owner session applies its own recorded ' || e.setting,
+  'a non-zero ceiling, applied to this session',
+  CASE
+    WHEN e.recorded_ms IS NULL
+      THEN 'NOT RECORDED: this role is UNBOUNDED. Run set-role-timeouts.sql.'
+    WHEN e.recorded_ms = 0
+      THEN '0: recorded as UNBOUNDED, which is not a ceiling'
+    WHEN e.recorded_ms <> e.live_ms
+      THEN format('recorded %sms but this session applies %sms',
+                  e.recorded_ms, e.live_ms)
+    ELSE e.live_ms || 'ms'
+  END,
+  e.recorded_ms IS NOT NULL
+    AND e.recorded_ms <> 0
+    AND e.recorded_ms = e.live_ms
+FROM (
+  SELECT
+    s.name AS setting,
+    (SELECT setting::bigint FROM pg_settings WHERE name = s.name) AS live_ms,
+    -- ::bigint, because extract() returns numeric and '900000.000000ms' in a
+    -- PASS/FAIL table is noise that makes the reader look twice at a row that
+    -- is fine.
+    (SELECT (extract(epoch FROM split_part(cfg, '=', 2)::interval) * 1000)::bigint
+       FROM pg_roles r
+       JOIN pg_db_role_setting d ON d.setrole = r.oid AND d.setdatabase = 0,
+            unnest(d.setconfig) AS cfg
+      WHERE r.rolname = 'neondb_owner'
+        AND split_part(cfg, '=', 1) = s.name) AS recorded_ms
+  FROM (VALUES ('statement_timeout'),
+               ('idle_in_transaction_session_timeout')) AS s(name)
+) AS e;
+
 -- ---------------------------------------------------------------------------
 -- Group 5: FUTURE tables. The check that stops the next migration breaking
 -- production silently.

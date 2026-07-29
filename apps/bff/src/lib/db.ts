@@ -57,8 +57,34 @@ export class Database implements Queryable {
       connectionString: opts.connectionString,
       max: opts.max,
       // A query with no ceiling is a connection-pool exhaustion vector that
-      // takes the whole API down (T10). Set on the server side so it applies
-      // even to a query issued outside this class.
+      // takes the whole API down (T10).
+      //
+      // THESE TWO LINES DO NOTHING IN ANY DEPLOYED ENVIRONMENT, AND THAT IS NOT
+      // A REASON TO DELETE THEM. node-postgres puts both into the libpq
+      // StartupMessage (`getStartupConf` in pg/lib/client.js), and Neon's proxy
+      // discards startup parameters it does not recognise. Measured on
+      // 2026-07-29 against the live staging branch with exactly this
+      // configuration at 3000 ms:
+      //
+      //   pooled endpoint  backend reported statement_timeout = 30s (the ROLE
+      //                    DEFAULT), pg_sleep(6) ran to completion in 6168 ms
+      //   direct endpoint  backend reported 15min (the owner's role default),
+      //                    pg_sleep(6) ran to completion in 6150 ms
+      //
+      // The direct endpoint is not an escape hatch: the same value sent the
+      // other legal way, `options=-c statement_timeout=3s`, is REFUSED on both
+      // ("unsupported startup parameter in options"). There is no connection-
+      // time way for this client to set either GUC on Neon.
+      //
+      // So the real ceiling is a ROLE DEFAULT, applied out of band by
+      // infra/neon/sql/set-role-timeouts.sql and asserted by
+      // packages/db/scripts/verify-query-ceilings.mjs. DATABASE_STATEMENT_
+      // TIMEOUT_MS cannot tighten the request path; editing that file can.
+      //
+      // They stay because they are still the control on a deployment with no
+      // Neon proxy in front - a bare Postgres, or a future host - and because a
+      // pool that asks for a bound it may not get is strictly better than one
+      // that never asks. The role default is the guarantee; this is the belt.
       statement_timeout: opts.statementTimeoutMs,
       idle_in_transaction_session_timeout: opts.statementTimeoutMs,
       // PgBouncer in transaction mode cannot hold a session-level prepared

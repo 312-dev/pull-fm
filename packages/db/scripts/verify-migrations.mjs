@@ -443,6 +443,249 @@ try {
   } else {
     fail("cache_size_by_provider view is missing");
   }
+
+  // --- 6. Server-side query ceilings (THREAT-MODEL T10) --------------------
+  //
+  // WHY THIS IS IN GATE 1 AND NOT ONLY IN THE NEON RUNBOOK
+  //
+  // `statement_timeout` is set in three places and exactly one of them takes
+  // effect in a deployed environment:
+  //
+  //   apps/bff/src/lib/db.ts               pg.Pool option -> libpq StartupMessage
+  //   infra/neon/sql/set-role-timeouts.sql ALTER ROLE      -> the role default
+  //   infra/local/postgres-init/01-...     ALTER ROLE      -> the local mirror
+  //
+  // The first one DOES NOTHING on Neon. Measured on 2026-07-29 with the exact
+  // pg.Pool configuration the application uses, `statement_timeout: 3000`,
+  // against BOTH Neon endpoints: the backend reported the ROLE DEFAULT rather
+  // than 3000, and `SELECT pg_sleep(6)` ran to completion. Sending it inside
+  // `options` instead is not a way round it either, that is refused outright
+  // ("unsupported startup parameter in options"). So the role default is the
+  // whole ceiling, and it is a thing set by hand on a database rather than
+  // something a deploy carries with it.
+  //
+  // That combination - load-bearing, applied out of band, invisible from the
+  // application - is what this section exists for. Two checks, because they
+  // fail for different reasons:
+  //
+  //   6a  the NUMBERS agree across the files that assert them. Free, and it is
+  //       the regression a code change can actually cause.
+  //   6b  the MECHANISM still works on this Postgres. Not free, and it is the
+  //       one that would catch a server-side behaviour change nobody expected.
+  //
+  // What Gate 1 CANNOT prove is that the numbers are applied to the Neon
+  // branches, because CI holds no database credential. That is
+  // `packages/db/scripts/verify-query-ceilings.mjs`, run by an operator against
+  // the pooled endpoint, and it is deliberately not faked here: a green Gate 1
+  // means the configuration is coherent, NOT that production is bounded.
+  console.log("\nServer-side query ceilings (T10)");
+
+  const NEON_TIMEOUTS = join(HERE, "..", "..", "..", "infra", "neon", "sql", "set-role-timeouts.sql"); // prettier-ignore
+  const LOCAL_TIMEOUTS = join(HERE, "..", "..", "..", "infra", "local", "postgres-init", "01-role-timeouts.sql"); // prettier-ignore
+  const VERIFY_ROLE_SQL = join(HERE, "..", "..", "..", "infra", "neon", "sql", "verify-app-role.sql"); // prettier-ignore
+
+  const TIMEOUT_GUCS = "statement_timeout|idle_in_transaction_session_timeout";
+
+  /** `{ "<role>.<setting>": "<literal>" }` from every ALTER ROLE in a file. */
+  const alterRoleValues = (path) => {
+    const out = {};
+    const re = new RegExp(
+      String.raw`ALTER\s+ROLE\s+(\w+)\s+SET\s+(${TIMEOUT_GUCS})\s*=\s*'?([^';]+?)'?\s*;`,
+      "gi",
+    );
+    for (const m of readFileSync(path, "utf8").matchAll(re)) {
+      out[`${m[1]}.${m[2]}`] = m[3].trim();
+    }
+    return out;
+  };
+
+  const applied = alterRoleValues(NEON_TIMEOUTS);
+
+  /**
+   * The expectation table in verify-app-role.sql group 4b, which is written as
+   * `('<role>', '<setting>', '<want>')` rows in a VALUES list.
+   */
+  const asserted = {};
+  {
+    const re = new RegExp(
+      String.raw`\(\s*'(\w+)'\s*,\s*'(${TIMEOUT_GUCS})'\s*,\s*'([^']+)'\s*\)`,
+      "gi",
+    );
+    for (const m of readFileSync(VERIFY_ROLE_SQL, "utf8").matchAll(re)) {
+      asserted[`${m[1]}.${m[2]}`] = m[3].trim();
+    }
+  }
+
+  if (Object.keys(applied).length === 0) {
+    fail(
+      "no ALTER ROLE ... SET statement_timeout found in infra/neon/sql/set-role-timeouts.sql",
+    );
+  }
+  if (Object.keys(asserted).length === 0) {
+    fail(
+      "no query-ceiling expectations found in infra/neon/sql/verify-app-role.sql",
+    );
+  }
+
+  // Compared as TEXT, not as durations, and that is not laziness.
+  // verify-app-role.sql compares `split_part(cfg, '=', 2)` from
+  // pg_db_role_setting to its literal with `IS NOT DISTINCT FROM`, so '30s' and
+  // '30000ms' are the same ceiling and a DIFFERENT check result. Text equality
+  // here is the condition that check actually needs.
+  for (const key of new Set([
+    ...Object.keys(applied),
+    ...Object.keys(asserted),
+  ])) {
+    const set = applied[key];
+    const want = asserted[key];
+    if (set === undefined) {
+      fail(
+        `verify-app-role.sql asserts ${key} = '${want}' but set-role-timeouts.sql never sets it`,
+      );
+    } else if (want === undefined) {
+      fail(
+        `set-role-timeouts.sql sets ${key} = '${set}' but verify-app-role.sql never asserts it`,
+      );
+    } else if (set !== want) {
+      fail(
+        `${key}: set-role-timeouts.sql applies '${set}', verify-app-role.sql expects '${want}'`,
+      );
+    } else {
+      pass(`${key} = '${set}' is applied and asserted consistently`);
+    }
+  }
+
+  // NO CEILING MAY BE ZERO, in either file, for any role.
+  //
+  // Every check above is a comparison, and a comparison passes when both sides
+  // are wrong in the same way. `statement_timeout = 0` is valid SQL, applies
+  // cleanly, reads back correctly, and means UNBOUNDED; a change that set it to
+  // 0 in set-role-timeouts.sql and 0 in verify-app-role.sql would satisfy every
+  // consistency check here and every assertion there while removing the control
+  // completely. This is the one assertion that is about the VALUE rather than
+  // about agreement, and it is the reason the others cannot be quietly
+  // neutralised.
+  //
+  // Postgres spells "no limit" three ways for these GUCs and all three are
+  // rejected: 0, a bare 0 with a unit, and the empty string.
+  const isUnbounded = (v) => /^0\s*(us|ms|s|min|h|d)?$/i.test(v.trim());
+  for (const [where, table] of [
+    ["set-role-timeouts.sql", applied],
+    ["verify-app-role.sql", asserted],
+  ]) {
+    const zeroed = Object.entries(table).filter(([, v]) => isUnbounded(v));
+    if (zeroed.length > 0) {
+      fail(
+        `${where} gives ${zeroed.map(([k]) => k).join(", ")} a ceiling of 0, which is UNBOUNDED`,
+        "0 is not a large timeout, it is the absence of one. T10 has no other mitigation on Neon.",
+      );
+    } else {
+      pass(`${where} sets no ceiling to 0 (unbounded)`);
+    }
+  }
+
+  // The local mirror is a different role with a deliberately tighter number, so
+  // only its PRESENCE is checked. A dev stack with no ceiling is how "it works
+  // on my machine" becomes an unbounded query in production.
+  const localApplied = alterRoleValues(LOCAL_TIMEOUTS);
+  for (const guc of TIMEOUT_GUCS.split("|")) {
+    const entries = Object.entries(localApplied).filter(([k]) =>
+      k.endsWith(`.${guc}`),
+    );
+    if (entries.length === 0) {
+      fail(
+        `infra/local/postgres-init/01-role-timeouts.sql no longer sets ${guc}`,
+      );
+    } else if (entries.some(([, v]) => isUnbounded(v))) {
+      fail(
+        `infra/local/postgres-init/01-role-timeouts.sql sets ${guc} to 0 (unbounded)`,
+      );
+    } else {
+      pass(`the local stack sets ${guc} as a non-zero role default too`);
+    }
+  }
+
+  // 6b: the mechanism, exercised rather than assumed.
+  //
+  // `ALTER ROLE ... IN DATABASE <scratch>` and not a plain `ALTER ROLE`. The
+  // scoped form touches only this harness's throwaway database, so it cannot
+  // change the ceiling of the role running it - which, if someone points
+  // ADMIN_URL at Neon, is neondb_owner on a real branch. DROP DATABASE removes
+  // the pg_db_role_setting row with it (verified: no orphan rows survive), so
+  // the existing `finally` is already the cleanup.
+  //
+  // Each psql() below is a fresh connection, which is the point: a role default
+  // is read at session start and is invisible to the session that set it.
+  const CEIL_MS = 1000;
+  const IDLE_MS = 2000;
+  psql(
+    "postgres",
+    `ALTER ROLE CURRENT_USER IN DATABASE ${SCRATCH_DB}
+       SET statement_timeout = '${String(CEIL_MS)}ms'`,
+  );
+  psql(
+    "postgres",
+    `ALTER ROLE CURRENT_USER IN DATABASE ${SCRATCH_DB}
+       SET idle_in_transaction_session_timeout = '${String(IDLE_MS)}ms'`,
+  );
+
+  const reported = psql(
+    SCRATCH_DB,
+    "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
+  );
+  if (reported === String(CEIL_MS)) {
+    pass("a role default is applied to a NEW session by the backend itself");
+  } else {
+    fail(
+      `a role default of ${String(CEIL_MS)}ms was recorded but a new session reports ${reported}ms`,
+    );
+  }
+
+  // The assertion that matters. A setting that reads back correctly and does
+  // not fire is the failure mode this whole control is guarding against, and it
+  // is indistinguishable from success by every other means.
+  const slept = Date.now();
+  const sleepErr = psql(SCRATCH_DB, "SELECT pg_sleep(4)", {
+    expectFailure: true,
+  });
+  const sleptFor = Date.now() - slept;
+  if (!/canceling statement due to statement timeout/i.test(sleepErr)) {
+    fail(
+      `pg_sleep(4) was not killed by a ${String(CEIL_MS)}ms statement_timeout`,
+      sleepErr,
+    );
+  } else if (sleptFor > 3000) {
+    fail(
+      `the statement was cancelled but only after ${String(sleptFor)}ms, so the ${String(CEIL_MS)}ms ceiling is not what stopped it`,
+    );
+  } else {
+    pass(
+      `a statement exceeding the role default is CANCELLED (after ${String(sleptFor)}ms)`,
+    );
+  }
+
+  // `\! sleep` and not pg_sleep: idle_in_transaction_session_timeout only fires
+  // while the session is idle AND inside a transaction, so the wait has to
+  // happen on the client side. pg_sleep inside a transaction is a running
+  // statement and would be caught by the check above instead.
+  let idleOut;
+  try {
+    psqlFile(
+      SCRATCH_DB,
+      `BEGIN;\nSELECT 1;\n\\! sleep ${String(IDLE_MS / 1000 + 2)}\nSELECT 'STILL ALIVE';\n`,
+    );
+    idleOut = "STILL ALIVE";
+  } catch (err) {
+    idleOut = err.message;
+  }
+  if (/idle[- ]in[- ]transaction timeout/i.test(idleOut)) {
+    pass("a session left idle inside a transaction is TERMINATED");
+  } else {
+    fail(
+      "a session sat idle inside a transaction past the ceiling and survived",
+      idleOut,
+    );
+  }
 } finally {
   dropScratch();
 }
