@@ -188,6 +188,8 @@ export interface TestApp {
   readonly services: Services;
   readonly cfg: Config;
   readonly idp: LocalIdp;
+  /** The WorkOS stand-in. Register addresses and read the codes it "sent". */
+  readonly workos: WorkOsStub;
   readonly webhookSecret: string;
   close(): Promise<void>;
 }
@@ -234,21 +236,31 @@ export async function buildTestApp(
     // eventually throttle itself, which would look like an authorization
     // failure. The limiter has its own dedicated test.
     RATE_LIMIT_MAX: "100000",
+    // The anti-enumeration timing floor is a real control with its own test,
+    // which builds an application that sets it. Leaving it on by default would
+    // add a quarter of a second to every sign-in in every other suite for no
+    // assertion, which is how a suite becomes slow enough that people stop
+    // running it.
+    AUTH_START_FLOOR_MS: "0",
     MAINTENANCE_MODE: opts.maintenanceMode === true ? "true" : "false",
     ...opts.env,
   });
 
   const upstreams = fakeUpstreams();
+  const workos = workOsStub({
+    mintAccessToken: (workosUserId, sessionId) =>
+      idp.mint(workosUserId, { sessionId }),
+  });
 
   const services = buildServices(
     cfg,
     { error: () => undefined, warn: () => undefined },
     {
       providers: mockProviderRegistry(),
-      // WorkOS REST calls (session revocation, user deletion) are answered
-      // locally. The signature-verified webhook path and the JWT path are the
+      // Every WorkOS REST call is answered locally by the stand-in above. The
+      // signature-verified webhook path and the JWT path are the
       // security-relevant parts and both run for real.
-      fetchImpl: stubWorkOsFetch,
+      fetchImpl: workos.fetch,
       // The music providers are answered locally too, and this one is not a
       // convenience: MusicBrainz blocks IPs and Apple has no appeals process,
       // so a suite that reached them could cost the project its API access.
@@ -275,6 +287,7 @@ export async function buildTestApp(
     upstreams,
     cfg,
     idp,
+    workos,
     webhookSecret: TEST_WEBHOOK_SECRET,
     async close() {
       await app.close();
@@ -284,21 +297,234 @@ export async function buildTestApp(
   };
 }
 
-/** Answers the four WorkOS REST calls this application makes. */
-const stubWorkOsFetch: typeof fetch = (input) => {
-  const url =
-    typeof input === "string"
-      ? input
-      : input instanceof URL
-        ? input.href
-        : input.url;
-  if (url.includes("/revoke") || url.includes("/user_management/users/")) {
-    return Promise.resolve(
-      new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-  }
-  return Promise.resolve(new Response("{}", { status: 404 }));
-};
+/**
+ * A WorkOS stand-in, in-process.
+ *
+ * There are no WorkOS credentials in this repository and there never will be,
+ * so every suite runs against this. It is deliberately a MOCK OF THE PROVIDER
+ * rather than a mock of our client: our client's request construction, status
+ * handling, response narrowing, and uniform-failure behaviour all run for real
+ * against it, which is where the bugs would be.
+ *
+ * The properties it reproduces are the ones the tests are actually about:
+ *
+ *   - A Magic Auth code is single-use. A second exchange of the same code
+ *     fails, which is what makes the replay test meaningful rather than a
+ *     tautology.
+ *   - A code is bound to the address it was minted for.
+ *   - An unknown address is REFUSED on send, with a 404, so the anti-enumeration
+ *     assertions have something real to be indistinguishable from. If the stub
+ *     accepted every address, the "unregistered addresses look identical" test
+ *     would pass with the control removed.
+ *   - Refresh tokens rotate, so a replayed refresh token fails.
+ */
+export interface WorkOsStub {
+  readonly fetch: typeof fetch;
+  /** Registers an address so `sendMagicAuthCode` accepts it. */
+  register(email: string, workosUserId: string): void;
+  /** The code most recently emailed to an address, as WorkOS would have sent it. */
+  codeFor(email: string): string | null;
+  /** Expires a live code without consuming it. */
+  expire(email: string): void;
+  /** Fails the next call to a path containing this fragment, with this status. */
+  failNext(fragment: string, status: number): void;
+}
+
+interface MagicCode {
+  code: string;
+  email: string;
+  expired: boolean;
+}
+
+export interface WorkOsStubOptions {
+  /**
+   * Mints the access token the stub hands back.
+   *
+   * Wired to the local IdP so a sign-in through this stub produces a token that
+   * the real JWKS verification in plugins/auth.ts accepts. That is what makes
+   * the magic-auth suite end to end: the code is requested, exchanged, sealed
+   * into a cookie, sent back, opened, and verified, with only the party that
+   * signs the token substituted.
+   */
+  readonly mintAccessToken: (
+    workosUserId: string,
+    sessionId: string,
+  ) => Promise<string>;
+}
+
+export function workOsStub(opts: WorkOsStubOptions): WorkOsStub {
+  const users = new Map<
+    string,
+    { id: string; first: string | null; last: string | null }
+  >();
+  const codes = new Map<string, MagicCode>();
+  const refreshTokens = new Map<string, string>();
+  const failures: { fragment: string; status: number }[] = [];
+  let counter = 0;
+
+  const json = (body: unknown, status: number): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+
+  const issue = async (
+    workosUserId: string,
+  ): Promise<Record<string, unknown>> => {
+    counter += 1;
+    const refresh = `refresh_${workosUserId}_${String(counter)}`;
+    refreshTokens.set(refresh, workosUserId);
+    const entry = [...users.entries()].find(([, u]) => u.id === workosUserId);
+    return {
+      user: {
+        id: workosUserId,
+        email: entry?.[0] ?? null,
+        first_name: entry?.[1].first ?? null,
+        last_name: entry?.[1].last ?? null,
+      },
+      access_token: await opts.mintAccessToken(
+        workosUserId,
+        `session_${workosUserId}_${String(counter)}`,
+      ),
+      refresh_token: refresh,
+    };
+  };
+
+  const stub: typeof fetch = async (input, init) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+
+    const injected = failures.findIndex((f) => url.includes(f.fragment));
+    if (injected !== -1) {
+      const [failure] = failures.splice(injected, 1);
+      return json({ error: "injected" }, failure?.status ?? 500);
+    }
+
+    const bodyText = typeof init?.body === "string" ? init.body : undefined;
+    const body = (bodyText === undefined ? {} : JSON.parse(bodyText)) as Record<
+      string,
+      unknown
+    >;
+    /** Reads a field the real API would have sent as a string. */
+    const field = (name: string): string => {
+      const value = body[name];
+      return typeof value === "string" ? value : "";
+    };
+
+    if (url.endsWith("/user_management/magic_auth")) {
+      const email = field("email").toLowerCase();
+      if (!users.has(email)) {
+        // WorkOS refuses an address it does not know. The route above must turn
+        // this into the same 202 a known address gets.
+        return json({ code: "entity_not_found" }, 404);
+      }
+      counter += 1;
+      codes.set(email, {
+        code: `code_${String(counter).padStart(6, "0")}`,
+        email,
+        expired: false,
+      });
+      return json({ id: `magic_auth_${String(counter)}` }, 201);
+    }
+
+    if (url.endsWith("/user_management/authenticate")) {
+      const grant = field("grant_type");
+
+      if (grant === "urn:workos:oauth:grant-type:magic-auth:code") {
+        const email = field("email").toLowerCase();
+        const supplied = field("code");
+        const live = codes.get(email);
+        const user = users.get(email);
+        if (
+          live === undefined ||
+          user === undefined ||
+          live.expired ||
+          live.code !== supplied
+        ) {
+          return json({ code: "invalid_grant" }, 400);
+        }
+        // Single use. This is what the replay assertion actually exercises.
+        codes.delete(email);
+        return json(await issue(user.id), 200);
+      }
+
+      if (grant === "refresh_token") {
+        const supplied = field("refresh_token");
+        const owner = refreshTokens.get(supplied);
+        if (owner === undefined) return json({ code: "invalid_grant" }, 400);
+        // Rotation: the presented token dies with the exchange.
+        refreshTokens.delete(supplied);
+        return json(await issue(owner), 200);
+      }
+
+      if (grant === "authorization_code") {
+        const code = field("code");
+        const email = code.startsWith("valid_") ? code.slice(6) : null;
+        const user = email === null ? undefined : users.get(email);
+        if (user === undefined) return json({ code: "invalid_grant" }, 400);
+        return json(await issue(user.id), 200);
+      }
+
+      return json({ code: "unsupported_grant_type" }, 400);
+    }
+
+    if (url.includes("/revoke")) return json({ ok: true }, 200);
+
+    const userMatch = /\/user_management\/users\/([^/?]+)$/.exec(url);
+    if (userMatch !== null) {
+      const id = decodeURIComponent(userMatch[1] ?? "");
+      const entry = [...users.entries()].find(([, u]) => u.id === id);
+      const method = (init?.method ?? "GET").toUpperCase();
+
+      if (method === "DELETE") {
+        if (entry !== undefined) users.delete(entry[0]);
+        return json({ ok: true }, 200);
+      }
+      if (entry === undefined) return json({ code: "entity_not_found" }, 404);
+      if (method === "PUT") {
+        if (Object.hasOwn(body, "first_name")) {
+          entry[1].first = (body["first_name"] as string | null) ?? null;
+        }
+        if (Object.hasOwn(body, "last_name")) {
+          entry[1].last = (body["last_name"] as string | null) ?? null;
+        }
+      }
+      return json(
+        {
+          id: entry[1].id,
+          email: entry[0],
+          first_name: entry[1].first,
+          last_name: entry[1].last,
+        },
+        200,
+      );
+    }
+
+    return json({ code: "not_found" }, 404);
+  };
+
+  return {
+    fetch: stub,
+    register(email, workosUserId) {
+      users.set(email.toLowerCase(), {
+        id: workosUserId,
+        first: null,
+        last: null,
+      });
+    },
+    codeFor(email) {
+      return codes.get(email.toLowerCase())?.code ?? null;
+    },
+    expire(email) {
+      const live = codes.get(email.toLowerCase());
+      if (live !== undefined) live.expired = true;
+    },
+    failNext(fragment, status) {
+      failures.push({ fragment, status });
+    },
+  };
+}

@@ -49,6 +49,11 @@ export async function provisionSubject(
   const workosUserId = `user_${role}_${suffix}`;
   const email = `${role}.${suffix}@example.test`;
 
+  // The identity has to exist at the provider as well as locally, or any route
+  // that reads or writes the profile upstream (PATCH /v1/me) would fail for a
+  // reason unrelated to what the test is asserting.
+  ctx.workos.register(email, workosUserId);
+
   const user = await ctx.services.users.upsert({
     workosUserId,
     email,

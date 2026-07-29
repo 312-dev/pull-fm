@@ -173,7 +173,13 @@ describe("annotations", () => {
       .filter((o) => o.operation["x-pullfm-dast"] === "exclude")
       .map((o) => o.key);
     for (const route of [
+      // Sign-in. ZAP driving these with hostile input would spend the mail
+      // budget of whatever address it invented, against a real identity
+      // provider, and would trip its abuse controls on our account.
+      "POST /v1/auth/start",
+      "POST /v1/auth/verify",
       "DELETE /v1/me",
+      "PATCH /v1/me",
       "GET /v1/me/export",
       "GET /v1/me/export/download",
       "POST /v1/tokens",
@@ -218,20 +224,27 @@ describe("response schemas (M12)", () => {
       for (const value of Object.values(record)) walk(value, where);
     };
 
+    // The sign-in responses are the one place a session legitimately crosses
+    // the wire: there is no way to hand a client a session without handing it a
+    // session. They are `public` rather than `user-scoped` and are exempted
+    // here by an explicit list rather than by an accident of naming, so the
+    // exemption is reviewable and cannot grow without a diff.
+    //
+    // A cookie-transport sign-in returns none of these properties, but the
+    // schema is shared with the bearer response and declares them, so the
+    // exemption covers the schema rather than the behaviour.
+    const sessionBearingOperations = new Set([
+      "POST /v1/auth/verify",
+      "GET /v1/auth/callback",
+      "POST /v1/auth/refresh",
+    ]);
+
     for (const { key, operation } of operations()) {
       const responses = operation["responses"] as
         Record<string, unknown> | undefined;
       if (responses === undefined) continue;
       for (const [status, response] of Object.entries(responses)) {
-        // The sign-in response is the one place a session legitimately crosses
-        // the wire; it is `public` rather than `user-scoped` and is exempted
-        // here explicitly rather than by an accident of naming.
-        if (
-          key === "GET /v1/auth/callback" ||
-          key === "POST /v1/auth/refresh"
-        ) {
-          continue;
-        }
+        if (sessionBearingOperations.has(key)) continue;
         if (Number(status) >= 300) continue;
         walk(response, `${key} ${status}`);
       }
