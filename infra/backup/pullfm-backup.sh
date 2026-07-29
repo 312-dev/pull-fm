@@ -561,12 +561,22 @@ this file and in legal/privacy-policy.md section 7. Run: retention-apply"
 #     legal/privacy-policy.md section 7 already discloses, so this adds a
 #     location, not a category.
 #
-# RESIDUAL GAP, STATED PLAINLY: this exporter runs on a timer, so a deletion in
-# the window between the last export and the restore is still lost. The interval
-# IS the erasure-durability RPO. The real fix is for the deletion cascade in
-# apps/bff to write the ledger object inline, in the same handler that writes
-# the deletion_log row, so the ledger is durable at the moment of the request.
-# That change is in the application, not here.
+# WHAT THIS EXPORTER IS NOW FOR, WHICH IS NOT WHAT IT WAS FOR.
+#
+# It used to be the only writer, on a timer, and that interval WAS the
+# erasure-durability RPO. The deletion cascade in apps/bff now writes the ledger
+# object inline and refuses to delete anything if that write fails, so an erasure
+# is durable at the moment of the request and the RPO is zero.
+#
+# This remains as a RECONCILER, and it earns its place twice: it backfills
+# deletion_log rows that predate the inline write, and it is the only thing that
+# would notice a divergence between the two records. It is idempotent by
+# construction - HEAD before PUT, one object per id - so running it against a
+# ledger the application already wrote is a no-op that costs one HEAD per row.
+#
+# The HEAD-before-PUT is now belt and braces rather than the guarantee: the
+# bucket lock rule refuses an overwriting PutObject outright. Keep it anyway,
+# because it turns "the lock rejected 400 writes" into "400 already present".
 
 _ledger_key() { printf '%s/%s.json' "${PULLFM_BACKUP_PREFIX_LEDGER}" "$1"; }
 
@@ -579,7 +589,7 @@ cmd_ledger_export() {
     esac
   done
   pullfm_need psql python3
-  pullfm_backup_load_r2
+  pullfm_backup_load_ledger_r2
   [[ -n "${dsn}" ]] || dsn="$(pullfm_backup_load_dsn)"
 
   local tmp; tmp="$(mktemp -d)"
@@ -597,7 +607,7 @@ cmd_ledger_export() {
 
     # HEAD before PUT. The ledger is append-only, and "append-only" that a
     # second run silently overwrites is just a filename convention.
-    if pullfm_s3 head-object --bucket "${PULLFM_BACKUP_BUCKET}" --key "${key}" >/dev/null 2>&1; then
+    if pullfm_s3 head-object --bucket "${PULLFM_LEDGER_BUCKET}" --key "${key}" >/dev/null 2>&1; then
       skipped=$((skipped + 1))
       continue
     fi
@@ -616,7 +626,7 @@ json.dump({
 }, open(out, "w"), indent=2, sort_keys=True)
 PY
 
-    pullfm_s3 put-object --bucket "${PULLFM_BACKUP_BUCKET}" --key "${key}" \
+    pullfm_s3 put-object --bucket "${PULLFM_LEDGER_BUCKET}" --key "${key}" \
       --body "${tmp}/entry.json" --content-type application/json >/dev/null ||
       pullfm_die "could not write ledger entry for ${uid}"
     wrote=$((wrote + 1))
@@ -627,8 +637,8 @@ PY
 }
 
 cmd_ledger_list() {
-  pullfm_backup_load_r2
-  pullfm_s3 list-objects-v2 --bucket "${PULLFM_BACKUP_BUCKET}" \
+  pullfm_backup_load_ledger_r2
+  pullfm_s3 list-objects-v2 --bucket "${PULLFM_LEDGER_BUCKET}" \
     --prefix "${PULLFM_BACKUP_PREFIX_LEDGER}/" \
     --query 'sort_by(Contents,&Key)[].[LastModified,Key]' --output text 2>/dev/null ||
     pullfm_info "  (none)"
@@ -647,7 +657,7 @@ cmd_replay_deletions() {
     esac
   done
   pullfm_need psql python3
-  pullfm_backup_load_r2
+  pullfm_backup_load_ledger_r2
   [[ -n "${dsn}" ]] || dsn="$(pullfm_backup_load_dsn)"
 
   local tmp; tmp="$(mktemp -d)"
@@ -655,7 +665,7 @@ cmd_replay_deletions() {
   trap "rm -rf '${tmp}'" EXIT
 
   local keys
-  keys="$(pullfm_s3 list-objects-v2 --bucket "${PULLFM_BACKUP_BUCKET}" \
+  keys="$(pullfm_s3 list-objects-v2 --bucket "${PULLFM_LEDGER_BUCKET}" \
     --prefix "${PULLFM_BACKUP_PREFIX_LEDGER}/" \
     --query 'Contents[].Key' --output text 2>/dev/null || true)"
   if [[ -z "${keys}" || "${keys}" == "None" ]]; then
@@ -667,7 +677,7 @@ cmd_replay_deletions() {
   : >"${tmp}/ids.txt"
   local k
   for k in ${keys}; do
-    pullfm_s3 get-object --bucket "${PULLFM_BACKUP_BUCKET}" --key "${k}" \
+    pullfm_s3 get-object --bucket "${PULLFM_LEDGER_BUCKET}" --key "${k}" \
       "${tmp}/e.json" >/dev/null || pullfm_die "cannot read ledger object ${k}"
     python3 -c '
 import json, sys

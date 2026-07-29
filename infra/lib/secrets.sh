@@ -195,6 +195,21 @@ pullfm_render_staging_secrets() {
   # endpoint as unreachable and every condition it derives goes unevaluated.
   metrics_token="$(_pullfm_field 'pull-fm/staging/METRICS_TOKEN' 'password')" || return 1
 
+  # The erasure ledger, which is what makes an Article 17 erasure survive a
+  # database restore. Rendered here rather than edited onto the node, because a
+  # hand-edited bff.env is overwritten by the next deploy and the failure is
+  # silent: the BFF starts, logs one warning, and every erasure afterwards is
+  # durable only as far as the next reconciler run.
+  #
+  # ITS OWN BUCKET AND ITS OWN CREDENTIAL. R2 tokens scope to a bucket and never
+  # to a prefix, so a credential that could write ledger/deletions/ inside the
+  # backups bucket would also let a compromised BFF delete every backup. This
+  # key pair reaches pull-fm-ledger-staging and nothing else.
+  ledger_key="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 'access key id')" || return 1
+  ledger_secret="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 'secret access key')" || return 1
+  ledger_endpoint="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 's3 endpoint')" || return 1
+  ledger_bucket="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 'bucket')" || return 1
+
   # The SeatGeek client id lives in the item's NOTES ("client id = <35 chars>")
   # and the secret is the password. Optional: without the id the events route
   # answers 501, which is the correct behaviour for a deployment that has no
@@ -245,6 +260,11 @@ MUSICBRAINZ_USER_AGENT=${PULLFM_MB_USER_AGENT}
 CORS_ORIGINS=https://app-staging.pull.fm
 
 METRICS_TOKEN=${metrics_token}
+
+ERASURE_LEDGER_ENDPOINT=${ledger_endpoint}
+ERASURE_LEDGER_BUCKET=${ledger_bucket}
+ERASURE_LEDGER_ACCESS_KEY_ID=${ledger_key}
+ERASURE_LEDGER_SECRET_ACCESS_KEY=${ledger_secret}
 
 # The file lever, and the path is the CONTAINER'S. The node's copy is
 # /etc/pullfm/flags/maintenance, bind-mounted read-only at the same path by

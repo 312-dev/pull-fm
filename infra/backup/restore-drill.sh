@@ -46,6 +46,24 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# THE DRILL GETS ITS OWN LEDGER BUCKET, AND IT IS NOT OPTIONAL.
+#
+# The drill erases a synthetic user, exports the ledger entry, and deletes that
+# entry again at cleanup, because a drill uuid left in the ledger makes every
+# future `replay-deletions` report a phantom erasure. The real ledger bucket
+# carries the bucket lock rule `erasure-ledger-immutable`, which refuses
+# DeleteObject outright, so a drill pointed at it CANNOT clean up after itself:
+# the delete fails and the drill permanently pollutes a compliance record. This
+# bucket is deliberately unlocked so the cleanup can succeed.
+#
+# SET BEFORE THE SOURCE, WHICH IS THE WHOLE REASON IT IS HERE AND NOT BELOW THE
+# ARGUMENT PARSING. backup-common.sh declares the variable `readonly` with a
+# `${VAR:-default}` fallback, so an assignment afterwards is not "an override
+# that loses to the default", it is a fatal "readonly variable" under `set -e`.
+: "${PULLFM_LEDGER_BUCKET:=pull-fm-ledger-drill}"
+export PULLFM_LEDGER_BUCKET
+
 # shellcheck source=../lib/backup-common.sh
 source "${ROOT}/infra/lib/backup-common.sh"
 
@@ -65,6 +83,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "${TARGET_BRANCH}" != "main" ]] || pullfm_die "the drill will not run against main"
+
+# The drill ledger bucket's credential. The bucket itself is chosen above the
+# source; this half needs `pullfm_op_field`, so it has to be after it.
+if [[ -z "${PULLFM_LEDGER_ACCESS_KEY_ID:-}" ]]; then
+  PULLFM_LEDGER_ACCESS_KEY_ID="$(pullfm_op_field 'v54n6f5eimazwibfp6tgd7ck5u' 'access key id')"
+  PULLFM_LEDGER_SECRET_ACCESS_KEY="$(pullfm_op_field 'v54n6f5eimazwibfp6tgd7ck5u' 'secret access key')"
+  export PULLFM_LEDGER_ACCESS_KEY_ID PULLFM_LEDGER_SECRET_ACCESS_KEY
+fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 WORK="$(mktemp -d)"; chmod 700 "${WORK}"
@@ -526,8 +552,16 @@ sql "delete from deletion_log where deleted_user_id = '33333333-3333-4333-8333-3
 # Ledger entries for drill users are removed too. The ledger is append-only for
 # real erasures; a drill uuid left in it would make every future replay report a
 # phantom erasure, and a signal nobody believes is worse than no signal.
+#
+# VERIFIED RATHER THAN SWALLOWED. The previous version ended in `|| true`, which
+# is the reason this is worth commenting on: the drill bucket is unlocked
+# precisely so these deletes succeed, so a failure here means the drill is
+# pointed at a LOCKED bucket, which is the one case where the pollution is
+# permanent. Reporting it as a finding is the difference between noticing and
+# not; it stays non-fatal because the drill's other results are still valid.
 for k in "${LEDGER_KEYS[@]}"; do
-  pullfm_s3 delete-object --bucket "${PULLFM_BACKUP_BUCKET}" --key "${k}" >/dev/null 2>&1 || true
+  pullfm_s3 delete-object --bucket "${PULLFM_LEDGER_BUCKET}" --key "${k}" >/dev/null 2>&1 ||
+    finding "could not delete drill ledger entry ${k} from ${PULLFM_LEDGER_BUCKET}; if that bucket is lock-protected the entry is now permanent and replay-deletions will report a phantom erasure"
 done
 
 LEFT_USERS="$(sql1 "select count(*) from users where email::text like 'drill-%'")"

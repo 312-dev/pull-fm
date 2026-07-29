@@ -54,11 +54,28 @@ readonly PULLFM_BACKUP_OP_VAULT="${PULLFM_BACKUP_OP_VAULT:-MCP}"
 # renames in a way titles are not. infra/lib/credentials.sh commits the Neon one
 # already for the same reason.
 readonly PULLFM_BACKUP_OP_R2="${PULLFM_BACKUP_OP_R2:-2ujy54s7j45zzme66ebu3sxfgi}"      # pull-fm/staging/R2_CREDENTIALS
+readonly PULLFM_LEDGER_OP_R2="${PULLFM_LEDGER_OP_R2:-pddkglqusnb2vhcz3f562kuhuq}"      # pull-fm/staging/R2_LEDGER_CREDENTIALS
 readonly PULLFM_BACKUP_OP_NEON="${PULLFM_BACKUP_OP_NEON:-5ccxlg635x37rybelz53yeaqf4}"   # Neon API key
 readonly PULLFM_BACKUP_OP_DSN="${PULLFM_BACKUP_OP_DSN:-63fl4tdvyw3euzs4a2b2b7bvvu}"     # DATABASE_URL_DIRECT (staging owner)
 readonly PULLFM_BACKUP_OP_CIPHER="${PULLFM_BACKUP_OP_CIPHER:-4batahf3ih4fmyd7jhksgg6czu}"      # pull-fm/infra/BACKUP_DUMP_KEY
 
 readonly PULLFM_BACKUP_BUCKET="${PULLFM_BACKUP_BUCKET:-pull-fm-backups-staging}"
+
+# THE LEDGER IS A SEPARATE BUCKET, AND THAT IS A SECURITY BOUNDARY RATHER THAN
+# TIDINESS.
+#
+# R2 API tokens scope to a BUCKET and never to a prefix. The erasure ledger is
+# written by the BFF, which is internet-facing, so a token that let it write
+# `ledger/deletions/` inside `pull-fm-backups-staging` would also have let a
+# compromised BFF delete every database backup. Splitting the bucket is the only
+# way to give the application a credential that cannot reach the backups.
+#
+# Note also that there is no write-only R2 permission group: "Workers R2 Storage
+# Bucket Item Write" grants read and delete as well, proved on 2026-07-29 by
+# succeeding at both under a token holding only that group. What actually makes
+# the ledger append-only is the bucket lock rule `erasure-ledger-immutable`, and
+# lock rules are per-bucket too. See PULLFM-RISK-009 and PULLFM-RISK-011.
+readonly PULLFM_LEDGER_BUCKET="${PULLFM_LEDGER_BUCKET:-pull-fm-ledger-staging}"
 readonly PULLFM_NEON_PROJECT_ID="${PULLFM_NEON_PROJECT_ID:-steep-frost-83698289}"
 readonly PULLFM_NEON_API="${PULLFM_NEON_API:-https://console.neon.tech/api/v2}"
 
@@ -157,12 +174,62 @@ pullfm_backup_load_r2() {
   # not use them and a stale one produces an unhelpful signature error.
   unset AWS_SESSION_TOKEN AWS_PROFILE || true
 
-  PULLFM_R2_ENDPOINT="$(pullfm_backup_r2_endpoint)"
+  PULLFM_R2_ENDPOINT="$(pullfm_backup_r2_endpoint "${PULLFM_BACKUP_BUCKET}" "${PULLFM_BACKUP_OP_R2}")"
+  export PULLFM_R2_ENDPOINT
+}
+
+# The ledger bucket's own credential.
+#
+# A SEPARATE LOADER RATHER THAN A FLAG, because the two credentials are not
+# interchangeable and the failure when they are confused is quiet: the backup
+# token cannot see `pull-fm-ledger-staging` at all, so a ledger command run with
+# it does not fail with "forbidden", it reports an EMPTY LEDGER. `replay-deletions`
+# treats an empty ledger as "nothing to replay" and exits 0, which is precisely
+# the shape of a check that reports success while checking nothing. Every ledger
+# subcommand therefore loads this and never `pullfm_backup_load_r2`.
+#
+# Both buckets are EU-jurisdiction, so the endpoint is shared and only the key
+# pair differs. PULLFM_LEDGER_ACCESS_KEY_ID is read first for the node case,
+# where a rendered env file is the source and `op` is absent.
+pullfm_backup_load_ledger_r2() {
+  pullfm_need aws
+  if [[ -n "${PULLFM_LEDGER_ACCESS_KEY_ID:-}" && -n "${PULLFM_LEDGER_SECRET_ACCESS_KEY:-}" ]]; then
+    pullfm_info "ledger R2 credentials: from the environment"
+    AWS_ACCESS_KEY_ID="${PULLFM_LEDGER_ACCESS_KEY_ID}"
+    AWS_SECRET_ACCESS_KEY="${PULLFM_LEDGER_SECRET_ACCESS_KEY}"
+  else
+    pullfm_need op
+    AWS_ACCESS_KEY_ID="$(pullfm_op_field "${PULLFM_LEDGER_OP_R2}" 'access key id')"
+    AWS_SECRET_ACCESS_KEY="$(pullfm_op_field "${PULLFM_LEDGER_OP_R2}" 'secret access key')"
+  fi
+  AWS_DEFAULT_REGION="auto"
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
+  unset AWS_SESSION_TOKEN AWS_PROFILE || true
+
+  # Probe the LEDGER bucket, not the backup one. The credential just loaded
+  # cannot see the backup bucket, so probing it would fail on every host and
+  # blame the ledger credential for a bucket the caller never asked about.
+  PULLFM_R2_ENDPOINT="$(pullfm_backup_r2_endpoint "${PULLFM_LEDGER_BUCKET}" "${PULLFM_LEDGER_OP_R2}")"
   export PULLFM_R2_ENDPOINT
 }
 
 # Probe rather than trust. See the header.
+#
+# PARAMETERISED BY BUCKET AND ITEM, because the probe is a HEAD against a real
+# bucket with the credential currently loaded. It used to hard-code the backup
+# bucket, which was correct while there was only one; with a separate ledger
+# bucket and a separate bucket-scoped credential it became actively wrong. The
+# ledger credential cannot see the backup bucket at all, so probing the backup
+# bucket with it fails on every candidate host and reports "cannot reach bucket"
+# for a bucket the caller never asked about. The bucket being probed must be the
+# bucket about to be used.
+#
+#   $1  bucket to probe   (default: the backup bucket)
+#   $2  1Password item id holding the recorded 's3 endpoint' (default: backups)
 pullfm_backup_r2_endpoint() {
+  local bucket="${1:-${PULLFM_BACKUP_BUCKET}}"
+  local op_item="${2:-${PULLFM_BACKUP_OP_R2}}"
+
   if [[ -n "${PULLFM_BACKUP_ENDPOINT:-}" ]]; then
     printf '%s' "${PULLFM_BACKUP_ENDPOINT}"
     return 0
@@ -170,7 +237,7 @@ pullfm_backup_r2_endpoint() {
 
   local recorded host candidates ep
   if command -v op >/dev/null; then
-    recorded="$(pullfm_op_field "${PULLFM_BACKUP_OP_R2}" 's3 endpoint')"
+    recorded="$(pullfm_op_field "${op_item}" 's3 endpoint')"
   else
     pullfm_die "PULLFM_BACKUP_ENDPOINT is not set and 1Password is not available.
 
@@ -188,13 +255,13 @@ https://${host}.r2.cloudflarestorage.com"
 
   while read -r ep; do
     [[ -n "${ep}" ]] || continue
-    if aws s3api head-bucket --bucket "${PULLFM_BACKUP_BUCKET}" \
+    if aws s3api head-bucket --bucket "${bucket}" \
       --endpoint-url "${ep}" >/dev/null 2>&1; then
       if [[ "${ep}" != "${recorded}" ]]; then
         pullfm_warn "R2 endpoint correction: the 's3 endpoint' field on the 1Password
-item ${PULLFM_BACKUP_OP_R2} records
+item ${op_item} records
   ${recorded}
-which answers NoSuchBucket for '${PULLFM_BACKUP_BUCKET}'. The bucket is
+which answers NoSuchBucket for '${bucket}'. The bucket is
 jurisdiction-scoped and actually lives on
   ${ep}
 Using the working host. FIX THE 1PASSWORD FIELD: a restore that begins by
@@ -205,10 +272,10 @@ being told the backup bucket does not exist is the worst possible false alarm."
     fi
   done <<<"${candidates}"
 
-  pullfm_die "cannot reach bucket '${PULLFM_BACKUP_BUCKET}' on any known R2 host.
+  pullfm_die "cannot reach bucket '${bucket}' on any known R2 host.
 Tried:
 ${candidates}
-Check the credential on 1Password item ${PULLFM_BACKUP_OP_R2}."
+Check the credential on 1Password item ${op_item}."
 }
 
 pullfm_s3() { aws s3api "$@" --endpoint-url "${PULLFM_R2_ENDPOINT}"; }

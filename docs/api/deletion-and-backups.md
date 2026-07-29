@@ -45,7 +45,9 @@ Ordering matters and is chosen so that a failure at any point leaves a recoverab
 > **Status, 2026-07-29: this now describes a system that exists and has been drilled.** The earlier
 > version of this block described pgBackRest against a self-managed Postgres node. That node no
 > longer exists: the database moved to a managed provider, and pgBackRest was never deployed. The retention
-> numbers below are configured and were verified against live storage, not planned.
+> numbers below are configured and were verified against live storage, not planned. What was **not**
+> verified at the time is whether anything invokes the dump on a schedule; it does not. See the
+> correction under the table.
 
 Backups are three layers, because no single one covers what the others do not:
 
@@ -54,6 +56,15 @@ Backups are three layers, because no single one covers what the others do not:
 | Provider point-in-time recovery          | a wrong delete or bad migration, noticed quickly                           | **6 hours**                         |
 | A pinned restore branch                  | planned destructive operations, any age                                    | kept until deliberately released    |
 | Encrypted logical dump in object storage | loss of the database project itself, or a fault older than the PITR window | **35 days** scheduled, 90 preflight |
+
+**One correction to the table, because a retention window is not a backup.** The 35 day figure is the
+retention policy applied to scheduled dumps, and on the staging deployment there is **no scheduler
+running it yet**: the dump tooling exists and is exercised by the restore drill, but nothing on the
+node invokes it on a timer, so the objects that exist were produced by hand. Found on 2026-07-29 by
+enumerating the node's timers rather than by reading this repository, which is the point - every
+artifact needed to schedule it is committed, so reading the code would have concluded the control
+was present. The first two layers are unaffected and are provider-managed. This is tracked with a
+deliberately short expiry in the internal register.
 
 A deleted user's rows therefore continue to exist inside encrypted artifacts until the last one
 containing them ages out, and that is now a stated number rather than an open question.
@@ -76,6 +87,23 @@ The position we take instead, which is the one regulators accept:
    Any restored user id present in the ledger is re-deleted before the restored system serves
    traffic, which is what makes erasure durable across a restore.
 
+   The ledger object is written **inline with the deletion cascade, before anything is destroyed**.
+   If that write fails the request returns 503 and deletes nothing, so a caller can tell "we did not
+   delete you, retry" from "we deleted you and something else went wrong". The erasure is therefore
+   durable at the moment of the request rather than at the next run of a job.
+
+   **The ledger has its own bucket, and that is a boundary rather than tidiness.** Object-storage
+   credentials here scope to a bucket and never to a key prefix, so a credential that let the API
+   write ledger entries inside the backup bucket would also let a compromised API destroy every
+   backup. The API holds a credential that reaches the ledger bucket and nothing else.
+
+   Append-only is enforced by a **retention lock on that bucket**, not by the credential: the
+   platform has no write-only permission, so the write credential can also read and delete, and the
+   lock is what refuses both. Verified by attempting them: a delete and an overwriting write are
+   both rejected. The honest limit of that guarantee is recorded in the internal risk register -
+   the lock is administered by the same account that administers everything else, so it defends the
+   ledger against a compromised application and not against a compromised account.
+
    **`deletion_log` is NOT the replay list, and cannot be.** This document previously said it was.
    A restore drill on 2026-07-29 disproved it directly: erasing an account after a restore point and
    then restoring to before it left the account present and `deletion_log` holding zero rows. The
@@ -86,8 +114,10 @@ The position we take instead, which is the one regulators accept:
    deliberately has no foreign key to `users` so its rows outlive the deletion they record, it holds
    no personal data beyond the id that was erased, and the replay rebuilds it from the ledger.
 
-   Residual gap: the ledger object is written by a job on a ten-minute timer, so that interval is the
-   erasure durability gap. Writing the object inline with the deletion cascade closes it. **[OPEN]**
+   The ten-minute exporter that used to be the only writer still runs, now as a reconciler: it
+   backfills records that predate the inline write and is the only thing that would notice the two
+   records diverging. It is idempotent, so running it against a ledger the API already wrote costs
+   one existence check per row and changes nothing.
 
 4. **Third-party credentials in a backup are ciphertext.** Backup encryption keys are not
    per-user, so there is no per-user crypto-shredding claim to make here. The claim that IS true:
