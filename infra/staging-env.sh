@@ -13,6 +13,13 @@
 #   ./infra/staging-env.sh status   what is running and what it costs
 #   ./infra/staging-env.sh cost     current monthly run rate
 #
+# CREDENTIALS: per-environment scoped tokens only, loaded from 1Password by
+# infra/lib/credentials.sh. The Cloudflare global API key is bootstrap-only and
+# this script refuses to start when CLOUDFLARE_API_KEY or CLOUDFLARE_EMAIL are
+# present in the environment. Both tokens are then checked against what they can
+# actually see: Hetzner must not enumerate the personal fleet, and Cloudflare
+# must not enumerate a zone other than pull.fm.
+#
 # WHAT SURVIVES A TEARDOWN, and why:
 #   - The R2 backup bucket. It holds the only copy of anything worth keeping,
 #     and it is free at this size. Destroying it would make the Gate 4 restore
@@ -30,6 +37,12 @@ set -euo pipefail
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly ENV_DIR="${ROOT}/infra/terraform/envs/staging"
 
+# Per-environment scoped credentials. The Cloudflare global API key is a
+# bootstrap credential for minting tokens and is refused here; see the header
+# of infra/lib/credentials.sh.
+# shellcheck source=lib/credentials.sh
+source "${ROOT}/infra/lib/credentials.sh"
+
 # Resources deliberately excluded from teardown. See the header.
 readonly KEEP=(
   "module.backup_storage"
@@ -41,22 +54,15 @@ warn() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
 load_credentials() {
-  command -v op >/dev/null || die "1Password CLI not found"
-  export HCLOUD_TOKEN="$(op read 'op://MCP/Hetzner pull.fm API Token/password')"
-  export CLOUDFLARE_EMAIL="$(op read 'op://MCP/Cloudflare/username')"
-  export CLOUDFLARE_API_KEY="$(op read 'op://MCP/Cloudflare/global api')"
-  [[ -n "${HCLOUD_TOKEN}" ]] || die "could not read the Hetzner token"
+  pullfm_load_credentials staging || die "could not load staging credentials"
 }
 
-# Guard against pointing this at the wrong project. The staging token must only
-# ever see pull-fm resources; if it enumerates the personal fleet, stop.
+# Both tokens are checked against what they can actually see rather than
+# against how they were named: Hetzner must not enumerate the personal fleet,
+# and Cloudflare must not enumerate a second zone.
 assert_correct_project() {
-  local names
-  names="$(curl -sS -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-    https://api.hetzner.cloud/v1/servers | grep -o '"name":"[^"]*"' || true)"
-  if grep -qE 'anythingllm|ente-jellyfin|hetzner-box' <<<"${names}"; then
-    die "REFUSING TO RUN: this token sees the personal fleet, not the pull-fm project."
-  fi
+  pullfm_assert_hetzner_project || exit 1
+  pullfm_assert_cloudflare_scope || exit 1
 }
 
 cmd_up() {
@@ -102,16 +108,23 @@ cmd_down() {
 
 cmd_status() {
   load_credentials
-  curl -sS -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-    https://api.hetzner.cloud/v1/servers | python3 -c '
-import json,sys
-s=json.load(sys.stdin).get("servers",[])
-if not s:
+  # The escaping here is deliberate: an f-string cannot contain a backslash
+  # before Python 3.12, so the JSON keys are lifted into locals first and the
+  # program is fed on stdin rather than through -c.
+  local servers
+  servers="$(curl -sS -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    https://api.hetzner.cloud/v1/servers)"
+  python3 - "${servers}" <<'PY'
+import json, sys
+
+srv = json.loads(sys.argv[1]).get("servers", [])
+if not srv:
     print("  no servers running (staging is torn down)")
-for x in s:
-    ip=(x.get("public_net",{}).get("ipv4") or {}).get("ip","-")
-    print(f"  {x[\"name\"]:26s} {x[\"server_type\"][\"name\"]:7s} {x[\"status\"]:9s} {ip}")
-'
+for x in srv:
+    ip = (x.get("public_net", {}).get("ipv4") or {}).get("ip", "-")
+    name, kind, state = x["name"], x["server_type"]["name"], x["status"]
+    print(f"  {name:26s} {kind:7s} {state:9s} {ip}")
+PY
 }
 
 cmd_cost() {

@@ -6,15 +6,18 @@
 > with zero drift. `envs/prod` has never been applied and stays that way until
 > Phase 6.
 >
-> State is still **local**, not in R2. Migrating it is the first task of the
-> next infrastructure change; until then a lost laptop means an orphaned
-> environment, and that is the single largest operational risk in this
-> directory.
+> State lives in **R2** (`pull-fm-tfstate`), not on the laptop, since
+> 2026-07-29. Backend wiring is per-root `backend.hcl` (gitignored); the
+> credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
 >
-> **Gate $ is still open.** Billing alerts are not configured on any vendor,
-> which means staging was applied ahead of its own precondition. Recorded here
-> rather than quietly skipped: a solo operator with an attached card and no
-> spend cap is a documented failure mode, and it currently applies.
+> **Applies run on a per-environment scoped Cloudflare token.** The account-wide
+> global API key is bootstrap-only and `infra/lib/credentials.sh` refuses to run
+> when it is present. See [Environment variables](#environment-variables).
+>
+> **Gate $ is partially closed.** Cloudflare billing alerts are armed and
+> machine-verified by `make cost`; the Hetzner cost limit has no API and remains
+> a manual console step. Full detail and the click path:
+> [`docs/RUNBOOK-COST.md`](../../docs/RUNBOOK-COST.md).
 
 Terraform for the Pull.fm backend: Hetzner Cloud compute and networking,
 Cloudflare DNS and TLS posture, and the Cloudflare R2 bucket that holds the
@@ -64,20 +67,44 @@ records stay in the environment roots.
 | Cloudflare zone `pull.fm`       | Already on the account. See the open decision in `docs/PLAN.md` section 10 about the shared Cloudflare account.     |
 | An R2 state bucket              | Created once by hand; see [Remote state](#remote-state).                                                            |
 | Tailscale tailnet               | The only path to SSH. See [Ingress posture](#ingress-posture).                                                      |
-| Billing alerts                  | Gate $. Blocking.                                                                                                   |
+| Billing alerts                  | Gate $. Cloudflare armed, Hetzner manual. [`docs/RUNBOOK-COST.md`](../../docs/RUNBOOK-COST.md).                     |
 
 ### Environment variables
 
 Credentials are **never** Terraform variables. They are read from the
-environment by the providers themselves:
+environment by the providers themselves, and loaded from 1Password by one
+helper rather than by hand:
 
 ```bash
-export HCLOUD_TOKEN="$(op read 'op://MCP/hetzner/pull-fm/API_TOKEN')"
-export CLOUDFLARE_API_TOKEN="$(op read 'op://MCP/cloudflare/pull-fm/API_TOKEN')"
+source infra/lib/credentials.sh
+pullfm_load_credentials staging     # or prod, or shared
+```
 
-# Only needed once the R2 remote state backend is enabled:
-export AWS_ACCESS_KEY_ID="$(op read 'op://MCP/r2/pull-fm-tfstate/ACCESS_KEY_ID')"
-export AWS_SECRET_ACCESS_KEY="$(op read 'op://MCP/r2/pull-fm-tfstate/SECRET_ACCESS_KEY')"
+That exports exactly four values:
+
+| Variable                | Source (1Password vault `MCP`)       | Consumed by           |
+| ----------------------- | ------------------------------------ | --------------------- |
+| `HCLOUD_TOKEN`          | `Hetzner pull.fm API Token`          | `hcloud` provider     |
+| `CLOUDFLARE_API_TOKEN`  | `pull-fm/<env>/CLOUDFLARE_API_TOKEN` | `cloudflare` provider |
+| `AWS_ACCESS_KEY_ID`     | `pull-fm/infra/R2_TFSTATE`           | S3 state backend      |
+| `AWS_SECRET_ACCESS_KEY` | `pull-fm/infra/R2_TFSTATE`           | S3 state backend      |
+
+Note the item titles contain `/`, which is also the `op://` secret-reference
+separator, so `op read` cannot address them. The helper uses
+`op item get <title> --fields label=<field> --reveal` instead.
+
+**`CLOUDFLARE_API_TOKEN` is the documented and only supported auth path.**
+
+**The global API key is bootstrap-only.** `CLOUDFLARE_API_KEY` +
+`CLOUDFLARE_EMAIL` are the legacy account-wide credential. The Cloudflare
+provider accepts them and **prefers them when both are set**, which means a
+stray export in a shell profile silently returns every apply to an unscoped
+credential while the code still looks correct. The key exists for exactly one
+purpose - minting and editing the scoped tokens - and
+`pullfm_load_credentials` **refuses to run** when either variable is present:
+
+```
+REFUSING TO RUN: CLOUDFLARE_API_KEY/CLOUDFLARE_EMAIL are set.
 ```
 
 **Why no `token` argument on the provider blocks.** Any value assigned to a
@@ -88,9 +115,26 @@ value at all is the only version of this that cannot leak. The provider blocks
 in `envs/*/providers.tf` are deliberately empty.
 
 **Token scopes.** The Hetzner token needs Read & Write on the `pull-fm` project
-only. The Cloudflare token needs `Zone:DNS:Edit` and `Zone:Zone Settings:Edit`
-on `pull.fm`, plus `Account:Workers R2 Storage:Edit`. Do not reuse the personal
-fleet's global API key.
+only. Each Cloudflare environment token holds:
+
+| Resource       | Permission groups                                                     |
+| -------------- | --------------------------------------------------------------------- |
+| zone `pull.fm` | DNS Write, Zone Read, Zone Settings Write, SSL and Certificates Write |
+| account        | Workers R2 Storage Write                                              |
+
+The account-level R2 grant is the one place the scope is wider than a zone, and
+it is not avoidable: R2 buckets are account-scoped resources, and Cloudflare
+publishes no zone-level or per-bucket permission group covering bucket
+create/delete (`Workers R2 Storage Bucket Item Read/Write` scope to objects,
+not to buckets). Without it, `terraform plan` fails with `failed to make http
+request` on `cloudflare_r2_bucket`. The residual exposure is every R2 bucket on
+the account; today that set is exactly the two Pull.fm buckets, but that is a
+fact about the account, not a property enforced by the token.
+
+**The helper verifies scope rather than trusting it.** Before any apply,
+`pullfm_assert_cloudflare_scope` lists zones with the token and aborts if
+anything other than `pull.fm` comes back, and `pullfm_assert_hetzner_project`
+aborts if the Hetzner token can see the operator's personal fleet.
 
 ### Non-secret variables
 
@@ -109,12 +153,14 @@ placeholders.** There must never be a secret in either.
 
 ## Remote state
 
-The `backend "s3"` block in each `envs/*/versions.tf` is **commented out and
-carries no hardcoded bucket, endpoint or credential.** R2 is S3-compatible, so
-the stock S3 backend drives it.
+**Enabled since 2026-07-29.** The `backend "s3"` block in `envs/*/versions.tf`
+carries only the state key; the bucket, endpoint and credentials are supplied at
+`init` time and **none of them are hardcoded**. R2 is S3-compatible, so the
+stock S3 backend drives it.
 
-Bootstrapping is a chicken-and-egg problem: the config that creates the state
-bucket cannot store its state in that bucket. Order:
+Bootstrapping was a chicken-and-egg problem: the config that creates the state
+bucket cannot store its state in that bucket. The order that was followed, and
+that a fresh environment would repeat:
 
 1. Create the state bucket once, by hand:
    ```bash
@@ -122,12 +168,14 @@ bucket cannot store its state in that bucket. Order:
    ```
    Turn on **object versioning**. State is the only artifact in this project that
    cannot be rebuilt from this repository.
-2. Create an R2 API token scoped to **Object Read & Write on that bucket only**,
-   and record it in 1Password.
+2. Create an R2 API token for the state bucket and record it in 1Password as
+   `pull-fm/infra/R2_TFSTATE`. Kept separate from the environment tokens on
+   purpose: state must stay readable even if an environment credential is
+   revoked mid-incident.
 3. Copy `backend.hcl.example` to `backend.hcl` (gitignored) and fill in the
    account-specific endpoint.
-4. Run the first apply on **local state**, then uncomment the `backend "s3"`
-   block and run `terraform init -backend-config=backend.hcl -migrate-state`.
+4. Run the first apply on **local state**, then add the `backend "s3"` block and
+   run `terraform init -backend-config=backend.hcl -migrate-state`.
 
 R2 has no DynamoDB equivalent, so locking uses Terraform's native S3 lockfile
 (`use_lockfile = true`) rather than `dynamodb_table`. The `skip_*` flags in
@@ -141,8 +189,10 @@ calls that fail against R2 before `init` ever reaches the bucket.
 ```bash
 cd infra/terraform/envs/staging
 
+source ../../../lib/credentials.sh && pullfm_load_credentials staging
+
 cp terraform.tfvars.example terraform.tfvars   # then edit
-terraform init                                  # add -backend-config=backend.hcl once enabled
+terraform init -backend-config=backend.hcl
 terraform fmt -recursive -check
 terraform validate
 terraform plan -out=tfplan                      # READ THE PLAN
@@ -394,8 +444,12 @@ What the first real applies settled, none of which `validate` could have:
 - **CAX is unavailable**, and so is CX, in every EU location. The allowlist now
   admits the `cpx_1_` series; see the validation block in
   `modules/compute/variables.tf`.
-- The Cloudflare **global API key** works for every call made here. A scoped
-  token was not tested.
+- **A zone-scoped Cloudflare token is not sufficient on its own**, and the way
+  it fails is unhelpful. `cloudflare_r2_bucket` is an account-scoped resource,
+  so a token holding only zone permissions returns `failed to make http
+request` - a transport-shaped error for what is actually an authorization
+  problem. Adding `Workers R2 Storage Write` at the account level fixes it. The
+  global API key masked this because it holds everything.
 - Hetzner **load balancer health checks carry the PROXY protocol header** when
   `proxyprotocol` is enabled on the service. This is not documented by Hetzner
   and is the difference between a working origin and every target being marked

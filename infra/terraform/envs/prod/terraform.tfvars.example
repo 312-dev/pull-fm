@@ -7,8 +7,11 @@
 # is public and gitleaks blocks CI. Credentials are supplied as environment
 # variables read directly by the providers:
 #
-#   export HCLOUD_TOKEN="$(op read 'op://MCP/hetzner/pull-fm/API_TOKEN')"
-#   export CLOUDFLARE_API_TOKEN="$(op read 'op://MCP/cloudflare/pull-fm/API_TOKEN')"
+#   source infra/lib/credentials.sh && pullfm_load_credentials prod
+#
+# That exports HCLOUD_TOKEN and a per-environment CLOUDFLARE_API_TOKEN. The
+# account-wide Cloudflare global API key is bootstrap-only and the helper
+# refuses to run when CLOUDFLARE_API_KEY or CLOUDFLARE_EMAIL are set.
 #
 # The two IDs below are public identifiers shown in the Cloudflare dashboard,
 # not credentials, but they are still left as placeholders here so that a
