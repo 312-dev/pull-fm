@@ -50,21 +50,38 @@ today, and `apps/bff/package.json` says so at the script.
 
 ## Installing
 
-These are **not installed by anything yet.** `infra/staging/app/bootstrap.sh`
-copies and enables the units it knows about, and it does not know about these.
-The exact changes needed are listed under "What the deploy path still owes this
-job" below.
-
-By hand, on whichever node runs the scheduled jobs:
+**Converge installs these. Do not install them by hand.**
 
 ```bash
-sudo install -m 0644 pullfm-mb-canonical.service /etc/systemd/system/
-sudo install -m 0644 pullfm-mb-canonical.timer   /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now pullfm-mb-canonical.timer
+./infra/staging-env.sh converge
 ```
 
-The service reads one variable from `/etc/pullfm/mb-canonical.env`:
+That is the whole procedure, and it is the same one that installs the backup
+timer. Three things had to be true for it to be, and all three are now:
+
+| step                                                                 | where it lives                                                      |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `infra/mb-loader/` ships to the node                                 | `cmd_converge`, in the `observability backup mb-loader lib` tar     |
+| `/etc/pullfm/mb-canonical.env` is rendered from 1Password            | `pullfm_render_staging_secrets` in `infra/lib/secrets.sh`           |
+| the units are installed, given a PATH drop-in, and the TIMER enabled | the `if [ -d mb-loader ]` block in `infra/staging/app/bootstrap.sh` |
+
+**Installing them by hand is the failure mode, not the fallback.** A hand-placed
+`/etc/pullfm/mb-canonical.env` is overwritten by the next converge, and a
+hand-copied unit survives until somebody rebuilds the node - which is a documented
+answer to a whole class of problem here, because the node holds nothing and the
+database is Neon. A control that does not survive a rebuild disappears on the day
+it is most likely to be wanted. This job spent a day in exactly that state: the
+units were correct, committed, and installed nowhere, and an earlier attempt had
+copied them up to run `systemd-analyze verify` and removed them again.
+
+That is not a hypothetical. **The node was destroyed and rebuilt twenty minutes
+after the first load** - new tailnet address, zero timers, empty `/etc/pullfm` -
+and the next `converge`, run by somebody else for an unrelated reason and touching
+nothing in this directory, put the loader, both units, the `PATH` drop-in, the
+`0600` env file and the enabled timer back on a bare machine with no manual step.
+The 31,554,198 rows were unaffected: they are in Neon, not on the node.
+
+The service reads one variable, and `infra/lib/secrets.sh` writes it:
 
 ```
 DATABASE_URL_DIRECT=postgres://...
@@ -75,13 +92,28 @@ and the loader holds state across separate `psql` sessions; Neon's pooled
 endpoint is PgBouncer in transaction mode and hands the server connection to
 somebody else at COMMIT. The file is the credential, so it is `0600 root:root`,
 which is why the unit reads it through `EnvironmentFile=` (systemd opens it as
-PID 1) rather than the script sourcing it.
+PID 1) rather than the script sourcing it. It is a SEPARATE file from `bff.env`
+because this DSN is the owner role, which can `DROP` the live table, and
+`bff.env` is bind-mounted into the internet-facing container.
 
-Run it once by hand before trusting the timer:
+Forcing a run, which is how the first load is done and how a missed publication
+is caught up:
 
 ```bash
-sudo systemctl start pullfm-mb-canonical.service
+# --no-block, so a dropped SSH session cannot orphan a four-minute load.
+sudo systemctl start --no-block pullfm-mb-canonical.service
 journalctl -u pullfm-mb-canonical.service -f
+```
+
+`enable --now` goes on the **timer** and never on the `.service`. A unit file
+that is installed and whose timer is not enabled looks like a working control in
+a diff, in a file listing and in `ls /etc/systemd/system`, and loads exactly as
+much as no unit at all. `systemctl list-timers` showing a real NEXT is the only
+evidence that anything is scheduled:
+
+```
+NEXT                        LEFT  UNIT                       ACTIVATES
+Thu 2026-07-30 09:19:00 UTC  11h  pullfm-mb-canonical.timer  pullfm-mb-canonical.service
 ```
 
 ---
@@ -143,13 +175,28 @@ observed in one step instead of two.
 
 ### Expected cost, and how to know if yours is different
 
-|                      | first load                                            | daily no-op run |
-| -------------------- | ----------------------------------------------------- | --------------- |
-| wall clock           | **~4 min** (129 s of it the `COPY`, 98 s the indexes) | **1.72 s**      |
-| downloaded           | **2.32 GB**                                           | **533 bytes**   |
-| disk on the job host | **none** - peak RSS 19 MB                             | none            |
-| space in Postgres    | **10 GB** (6.5 GB heap, 3.9 GB indexes)               | none            |
-| rows                 | **31,554,198**                                        | none            |
+Measured by this unit on `pullfm-staging-app-1` (Ashburn, 3 vCPU) against the
+`us-east-1` Neon staging branch, 2026-07-29 21:22:39 UTC:
+
+|                      | first load                                                | daily no-op run |
+| -------------------- | --------------------------------------------------------- | --------------- |
+| wall clock           | **3 min 35 s** (138 s of it the `COPY`, 67 s the indexes) | **1.72 s**      |
+| downloaded           | **2.32 GB**                                               | **533 bytes**   |
+| disk on the job host | **none** - peak 28.4 MB RSS, free space unchanged         | none            |
+| space in Postgres    | **10 GB** (6,558 MB heap, 3,950 MB indexes)               | none            |
+| rows                 | **31,554,198**                                            | none            |
+| CPU                  | **1 min 16.7 s**                                          | negligible      |
+
+Per index: `pkey` 7.1 s, `lookup` 18.4 s, `recording` 11.9 s, `release` 9.0 s,
+`artist` (GIN) 20 s.
+
+An earlier load from a different node into the EU branch took **3 min 58 s** with
+a 129 s `COPY` and 98 s of indexes. The two totals agreeing to within 10% is a
+coincidence of two offsetting changes rather than stability: this run's download
+was **slower** (138 s against 129 s) and its index build **30% faster** (67 s
+against 98 s). Download tracks distance to `data.metabrainz.org`; indexes track
+the database's compute. They move independently, so read `mb.load_state` rather
+than this table.
 
 Two of these are load-bearing if yours differ:
 
@@ -158,11 +205,13 @@ Two of these are load-bearing if yours differ:
   2.32 GB archive nor the 7.5 GB CSV is ever written down. A node too small to
   hold the file can still load it. If you see disk filling, something has changed
   shape.
-- **Wall clock is dominated by network distance, not by the database.** The four
-  minutes above came from a host with a fast path to `data.metabrainz.org` and a
-  short one to the database. The same 2.32 GB off a congested public mirror at
-  1 MB/s is 39 minutes on its own, which is why `TimeoutStartSec=3600` is not
-  excessive.
+- **Wall clock is dominated by network distance, not by the database.** The three
+  and a half minutes above came from a datacenter host with a good path to
+  `data.metabrainz.org` and a short one to the database. The same 2.32 GB off a
+  congested public mirror at 1 MB/s is 39 minutes on its own, which is why
+  `TimeoutStartSec=3600` is not excessive. The measured worst case so far is not
+  a mirror at all: **the same load driven from a residential workstation ran at
+  0.5 MB/s, upload bound, about 5.5 hours.** Run it on the node.
 
 The loader records rows, timings and measured heap/index sizes into
 `mb.load_state` on every run, so after the first load the honest numbers for
@@ -232,45 +281,63 @@ off a charity's file host to learn something one `SELECT` already knew. That is
 
 ---
 
-## What the deploy path still owes this job
+## What the deploy path owed this job, and what it still owes
 
-All in files this work does not own. None of them is optional if the timer is to
-run unattended.
+The first four items were the gap. All four are closed, and the closing change is
+named next to each so that a reader can check the claim rather than take it.
 
-1. ~~`postgresql-client` on the node.~~ **Done, by the backup work.**
-   `bootstrap.sh` now installs `postgresql-client-18` from PGDG, keyed on the
-   major version rather than on `command -v`. `zstd`, `tar`, `curl` and `awk`
-   are all on the stock Ubuntu 24.04 image, so nothing else is missing.
+1. ~~`postgresql-client` on the node.~~ **Done.** `bootstrap.sh` installs
+   `postgresql-client-18` from PGDG, keyed on the major version rather than on
+   `command -v`, from `ensure_pg_client` - a function rather than a block inside
+   `if [ -d backup ]`, so a node converged with `mb-loader` and without `backup`
+   still gets a client. `zstd`, `tar`, `curl` and `awk` are all on the stock
+   Ubuntu 24.04 image, so nothing else is missing.
 
-2. **`/etc/pullfm/mb-canonical.env`, placed from 1Password by
-   `infra/lib/secrets.sh`.** One line, `DATABASE_URL_DIRECT=`, mode
-   `0600 root:root`, sourced from the same 1Password item the migrations use.
-   Until it exists the unit's `ConditionPathExists=` skips the run, which is
-   deliberately a skip and not a failure - but it is also silent, so this is the
-   item most likely to be forgotten and least likely to be noticed.
+2. ~~`/etc/pullfm/mb-canonical.env`, placed from 1Password.~~ **Done**, by
+   `pullfm_render_staging_secrets` in `infra/lib/secrets.sh` and shipped by
+   `cmd_converge`, root-owned `0600`, exactly the way `backup.env` and
+   `metrics.env` travel.
 
-3. **`infra/mb-loader/` synced to `/opt/pullfm/infra/mb-loader/`**, the same way
-   `infra/backup/` reaches `/opt/pullfm/infra/backup/`, and these two units
-   copied and `systemctl enable`d by `bootstrap.sh`. Copied-but-not-enabled is
-   the exact defect `infra/scripts/check-job-schedule.mjs` was written to catch.
+   **It reuses the `database_url_direct` that block already read for `bff.env`
+   rather than reading the item title a second time**, and that is deliberate
+   rather than tidy. The residency items were mid-rename while this was written:
+   `pull-fm/staging/DATABASE_URL_DIRECT_US` pointed at `us-east-1` and the plain
+   `pull-fm/staging/DATABASE_URL_DIRECT` still pointed at the EU rollback
+   project. A second read of the title would have meant two lines to flip on the
+   day of the rename, and one of them quietly loading a fortnight of catalogue
+   into the wrong database.
 
-4. **A `PATH` drop-in for this unit, mirroring the one `bootstrap.sh` already
-   writes for `pullfm-backup-dump.service`.** One more `cat >` next to that one:
+3. ~~`infra/mb-loader/` synced to `/opt/pullfm/infra/mb-loader/` and the units
+   enabled.~~ **Done.** `cmd_converge` sends `mb-loader` in the same tar as
+   `observability backup lib`; the `if [ -d mb-loader ]` block in `bootstrap.sh`
+   installs the loader and both units, and the tail of that script runs
+   `systemctl enable --now pullfm-mb-canonical.timer`. **The timer, not the
+   service** - copied-but-not-enabled is the exact defect
+   `infra/scripts/check-job-schedule.mjs` was written to catch.
+
+   Only `mb-canonical-load.sh` is shipped. `selftest.sh` stays off the node: it
+   wants a local docker Postgres from `stack:up` and exits 77 without one, and
+   nothing installed here executes it.
+
+4. ~~A `PATH` drop-in for this unit.~~ **Done**, from `install_pg_path_dropin`,
+   which now writes the same drop-in for this unit and for
+   `pullfm-backup-dump.service` instead of the backup section carrying its own
+   copy of the `cat >`:
 
    ```
    /etc/systemd/system/pullfm-mb-canonical.service.d/10-pg-path.conf
    [Service]
-   Environment=PATH=/usr/lib/postgresql/${PGMAJOR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+   Environment=PATH=/usr/lib/postgresql/18/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
    ```
 
    It is deliberately NOT hard-coded into the unit file here: `${PGMAJOR}` is a
    fact about the node's shape and about the server version, and `bootstrap.sh`
-   is where that already lives. Duplicating the literal would mean two places to
-   change and one of them silently stale.
+   is where that already lives. Duplicating the literal would mean three places
+   to change and two of them silently stale.
 
-   **This is robustness, not a blocker**, and the distinction is worth stating
-   because the backup job's version of it IS a blocker. `/usr/bin/psql` is
-   `pg_wrapper`, which dispatches to whichever major version it decides is
+   **This one was robustness, not a blocker**, and the distinction is worth
+   keeping because the backup job's version of it IS a blocker. `/usr/bin/psql`
+   is `pg_wrapper`, which dispatches to whichever major version it decides is
    current based on what else is installed. `pg_dump` **refuses outright** to
    dump a server newer than itself, so the wrong client breaks backups
    completely; `psql` will happily `COPY` into a newer server, and a client 16
@@ -278,11 +345,11 @@ run unattended.
    working. So a wrong-version client degrades this job rather than stopping it -
    but "works by luck of what got installed" is not a property to keep.
 
+Still open, and outside this work's ownership:
+
 5. **`infra/scripts/check-job-schedule.mjs` extended to cover host jobs.** It
    asserts over `infra/staging/app/systemd/` only, so neither these units nor the
    four `infra/backup/` ones are checked by it at all. That gap predates this
-   work, and this job makes it one unit wider.
-
-Until 2 and 3 are done, this job is a pair of unit files that nothing installs -
-the same shape of gap as the entrypoint that had no pnpm script, one layer
-further out.
+   work, and this job makes it one unit wider. It is the check that would have
+   caught this whole class of defect in CI rather than by somebody logging into
+   the node and counting timers.

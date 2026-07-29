@@ -37,8 +37,10 @@
 #
 #   cloud-init  (in state, therefore PUBLIC facts only) packages, docker,
 #               nginx, the tailnet, the directory layout
-#   converge    (over SSH, therefore secrets) bff.env, cache.env, the origin
-#               certificate and key, then `bash bootstrap.sh`
+#   converge    (over SSH, therefore secrets) bff.env, cache.env, backup.env,
+#               metrics.env, mb-canonical.env, alert.env, the origin certificate
+#               and key, the observability/backup/mb-loader/lib trees, then
+#               `bash bootstrap.sh`
 #
 # The one secret cloud-init carries is a Tailscale auth key, and it is minted
 # fresh per apply, single use, and ephemeral - spent the moment the node joins,
@@ -417,7 +419,21 @@ cmd_converge() {
   # `lib` is not optional decoration: infra/backup/pullfm-backup.sh sources
   # infra/lib/backup-common.sh, so shipping `backup` alone installs a unit that
   # fails on its first run rather than one that works.
-  tar czf - -C "${ROOT}/infra" observability backup lib |
+  #
+  # `mb-loader` WAS THE SAME GAP, FOUND THE SAME WAY AND ONE DAY LATER.
+  # infra/mb-loader/systemd/ held a correct service and timer that nothing
+  # installed, so `mb.canonical` sat at 0 rows against a migrated schema while
+  # the repository read as though a daily refresh was scheduled. It ships here,
+  # for the same reason `backup` does, and bootstrap.sh gates on ./mb-loader
+  # exactly as it gates on ./backup.
+  #
+  # IT MUST RUN FROM THE NODE AND NOT FROM A WORKSTATION, which is the whole
+  # reason it is worth wiring into this path rather than leaving it a manual
+  # step. The load is 2.32 GB in and 31.5M rows out. Measured from a residential
+  # workstation: 0.5 MB/s, upload bound, about 5.5 hours. Measured from this
+  # node: minutes. Distance to data.metabrainz.org and to the database is the
+  # entire cost of this job.
+  tar czf - -C "${ROOT}/infra" observability backup mb-loader lib |
     ssh_node "${app_ip}" "tar xzf - -C /tmp/pullfm-config"
 
   # The scheduled dump's credentials: the bucket-scoped R2 pair and the dump
@@ -441,6 +457,22 @@ cmd_converge() {
     log "  backup credentials installed"
   else
     warn "  no backup.env was rendered; the scheduled dump will fail on its first run"
+  fi
+
+  # The MusicBrainz loader's DSN. Same treatment, and the failure mode if it is
+  # missing is QUIETER than the backup's rather than louder, which is why it is
+  # worth a line of its own here: pullfm-mb-canonical.service carries
+  # ConditionPathExists= for this file, so an absent file makes every daily run a
+  # SKIP. A skip does not reach OnFailure and pages nobody, so the node would
+  # report a healthy timer with a real NEXT and load nothing, forever.
+  if [[ -f "${secrets}/mb-canonical.env" ]]; then
+    scp -q -i "${SSH_KEY}" -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+      "${secrets}/mb-canonical.env" "${SSH_USER}@${app_ip}:/tmp/mb-canonical.env"
+    ssh_node "${app_ip}" "sudo install -m 0600 -o root -g root /tmp/mb-canonical.env /etc/pullfm/mb-canonical.env \
+      && rm -f /tmp/mb-canonical.env"
+    log "  MusicBrainz loader DSN installed"
+  else
+    warn "  no mb-canonical.env was rendered; the canonical refresh will SKIP every run and alert nobody"
   fi
 
   # THE ALERT URL IS A CREDENTIAL AND TRAVELS LIKE ONE. On ntfy the topic name

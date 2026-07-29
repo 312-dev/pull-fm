@@ -151,6 +151,7 @@ pullfm_secret_workdir() {
 #   cache.env           Redis passwords (cache node)
 #   backup.env          the scheduled dump's credentials (app node)
 #   metrics.env         the watchdog's scrape target and token (app node)
+#   mb-canonical.env    the MusicBrainz loader's direct DSN (app node)
 #   origin.pem          Cloudflare Origin CA certificate
 #   origin.key          its private key
 #   origin-pull-ca.pem  Cloudflare's origin-pull CA, a PUBLIC certificate
@@ -427,6 +428,57 @@ PULLFM_METRICS_URL=http://127.0.0.1:3000/metrics
 PULLFM_READYZ_URL=http://127.0.0.1:3000/readyz
 PULLFM_HEALTHZ_URL=http://127.0.0.1:3000/healthz
 PULLFM_METRICS_TOKEN=${metrics_token}
+EOF
+
+  # --- the MusicBrainz canonical loader --------------------------------------
+  #
+  # WHAT WAS WRONG, AND IT IS THE SAME SHAPE AS PULLFM-RISK-012 ONE LAYER OUT.
+  # infra/mb-loader/systemd/ held a correct service and a correct timer, and
+  # NOTHING INSTALLED THEM. Enumerated on the node on 2026-07-29: no unit in
+  # /etc/systemd/system matching mb-canonical, no /opt/pullfm/infra/mb-loader,
+  # and `mb.canonical` at 0 rows against a migrated schema. An earlier attempt
+  # copied the units up to run `systemd-analyze verify` and removed them again,
+  # so the node had been touched by this work and carried no trace of it. The
+  # repository read as though the refresh was scheduled; the machine had never
+  # run it once.
+  #
+  # WHY IT IS ITS OWN FILE RATHER THAN MORE LINES IN bff.env. The unit reads it
+  # through EnvironmentFile= as PID 1, so it can be 0600 root:root and the
+  # loader never has to source a credential itself. bff.env is bind-mounted into
+  # the internet-facing container; this DSN is the OWNER role, which can DROP the
+  # live table, and the container has no business holding it. Same split, same
+  # reason, as backup.env.
+  #
+  # IT IS THE SAME `database_url_direct` bff.env GETS, DELIBERATELY, AND THE
+  # ITEM TITLE IS READ IN EXACTLY ONE PLACE ABOVE. The `_US` residency items are
+  # being renamed to their plain names while this is being written, and the plain
+  # `pull-fm/staging/DATABASE_URL_DIRECT` STILL POINTS AT THE EU ROLLBACK
+  # PROJECT. That was measured on 2026-07-29 rather than assumed: the two items
+  # resolve to endpoints in DIFFERENT REGIONS - `eu-central-1` for the plain
+  # title, `us-east-1` for the `_US` one - so "prefer the plain name" would have
+  # loaded a fortnight of catalogue into the database staging was moved off.
+  # Reading the title a second time here would mean two lines to flip on the day
+  # of the rename and one of them silently wrong. There is one read, at the top
+  # of this function, and this block consumes it.
+  #
+  # DIRECT, NEVER POOLED, and for a stronger reason than the backup's. The swap
+  # takes ACCESS EXCLUSIVE and a session advisory lock, and the loader spans
+  # several separate psql invocations; Neon's pooled endpoint is PgBouncer in
+  # transaction mode and hands the server connection to somebody else at COMMIT,
+  # which breaks a session lock silently rather than loudly.
+  #
+  # WHAT IS DELIBERATELY ABSENT. MB_CANONICAL_MAX_ROWS: it sets the row FLOOR to
+  # itself, so a capped run publishes a deliberately short table over a good one.
+  # That is an operator tool for a size-capped branch, not something a file
+  # decides every morning. MB_CANONICAL_STATEMENT_TIMEOUT: the loader clears the
+  # owner role's 15-minute default for its own session because step 6 is ONE
+  # `COPY` that runs for the whole load, and putting a ceiling back here would
+  # reintroduce the failure the prelude exists to prevent.
+  install -m 0600 /dev/null "${dir}/mb-canonical.env"
+  cat >"${dir}/mb-canonical.env" <<EOF
+# Rendered by infra/lib/secrets.sh from 1Password. NEVER COMMIT THIS FILE.
+# Read by infra/mb-loader/systemd/pullfm-mb-canonical.service via EnvironmentFile=.
+DATABASE_URL_DIRECT=${database_url_direct}
 EOF
 
   # --- SeatGeek events -------------------------------------------------------

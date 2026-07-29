@@ -169,40 +169,72 @@ consistently pick the least canonical row.
 
 ## 4. Measured footprint, and how long the load takes
 
-**The real thing, all 31,554,198 rows**, streamed from the staging application
-node into a Neon staging branch on 2026-07-29. The load completed, was verified,
-and was then discarded along with the branch it went into: hosting is moving and
-Neon regions are fixed at project creation, so that database no longer exists.
+**The real thing, all 31,554,198 rows**, loaded by
+`pullfm-mb-canonical.service` on `pullfm-staging-app-1` (Ashburn, 3 vCPU, Ubuntu
+24.04) into the `us-east-1` Neon staging branch on **2026-07-29 at 21:22:39
+UTC**. This is the load that is live: `mb.canonical` holds these rows now, and
+`mb.load_state` row 3 records them.
 
-**The numbers survive the database.** They are a shape, not this deployment's
-figures, and two of them are latency-dependent and must be re-measured on the
-first real load: the node was one short network hop from the database and had a
-fast path to `data.metabrainz.org`. The loader writes timings, row counts and
-measured sizes into `mb.load_state` on every run, so re-measuring costs nothing -
-read the table after the first load rather than trusting this section.
+**By the unit, not by hand.** `systemctl start --no-block
+pullfm-mb-canonical.service`, so the work was supervised by systemd under the
+committed `TimeoutStartSec=3600` and `MemoryMax=512M` rather than by whatever
+shell happened to be attached. Two earlier attempts driven by hand from an SSH
+session are rows 1 and 2 of `mb.load_state`, both `failed`, one of them because a
+ten-minute tool timeout killed the session out from under it. That is the
+difference the unit buys and the reason the runbook says to use it.
 
-### Time: 3 minutes 58 seconds, end to end
+**Read `mb.load_state`, not this section.** The loader writes timings, row counts
+and measured sizes on every run:
 
-| phase                                         | wall  |
-| --------------------------------------------- | ----- |
-| discovery, `.sha256`, licence gate            | 3 s   |
-| stream + `COPY` (2.32 GB archive, 7.5 GB CSV) | 129 s |
-| `count(*)` against the row floor              | 5 s   |
-| five indexes + `ANALYZE`                      | 98 s  |
-| swap + bookkeeping                            | 2 s   |
-| **total**                                     | 238 s |
+```sql
+SELECT dump_id, status, rows_loaded, finished_at - started_at AS duration,
+       pg_size_pretty(bytes_heap), pg_size_pretty(bytes_indexes)
+  FROM mb.load_state ORDER BY id DESC LIMIT 5;
+```
 
-Per index, from `\timing` inside the build: `pkey` 10.4 s, `lookup` 25.8 s,
-`recording` 28.1 s, `release` 10.7 s, `artist` (GIN) 22.8 s, `ANALYZE` 0.5 s.
+### Time: 3 minutes 35 seconds, end to end
+
+| phase                                         | wall      |
+| --------------------------------------------- | --------- |
+| discovery, `.sha256`, licence gate            | 4 s       |
+| stream + `COPY` (2.32 GB archive, 7.5 GB CSV) | 138 s     |
+| `count(*)` against the row floor              | 5 s       |
+| five indexes + `ANALYZE`                      | 67 s      |
+| swap + bookkeeping                            | 1 s       |
+| **total**                                     | **215 s** |
+
+`mb.load_state` records `00:03:30.235` for the same run; the 5-second difference
+is the unit's own start and teardown either side of the script. CPU was 1 min
+16.7 s of the 3 min 35 s, so this job is waiting on the network for most of its
+life. Per index, from `\timing` inside the build: `pkey` 7.1 s, `lookup` 18.4 s,
+`recording` 11.9 s, `release` 9.0 s, `artist` (GIN) 20 s.
+
+**The comparison with the earlier EU load is the useful part, and it is not
+reassuring in the way it first looks.** That run took 3 min 58 s with a 129 s
+`COPY` and 98 s of indexes. This one is 23 seconds faster overall, by two changes
+in opposite directions: the download got **slower** (138 s against 129 s, a
+longer path to `data.metabrainz.org`) and the index build got **30% faster** (67 s
+against 98 s, a larger Neon compute). Totals that agree to within 10% by
+offsetting error are a coincidence, not stability. Download tracks distance to the
+publisher; indexes track the database's compute; they move independently.
+
+The number that shows how wide that spread gets: **the same load driven from a
+residential workstation ran at 0.5 MB/s, upload bound, about 5.5 hours** - 92x
+this run. The timer lives on the node for that reason and no other.
 
 ### Disk on the job host: none
 
-**Peak RSS 19 MB for the entire process tree**, and the free space on the node
-was identical before and after to within measurement noise. The archive is never
-written down: `curl -> tee(sha256) -> zstd -dc -> tar -xO -> psql COPY` means the
-2.32 GB archive and the 7.5 GB CSV exist only as bytes in flight. Nothing about
-this job needs a big node - a machine that could not hold the file can still load
-it.
+**Peak 28.4 MB for the entire process tree**, from systemd's own accounting for
+the unit ("Consumed 1min 16.710s CPU time, 28.4M memory peak, 0B memory swap
+peak"), and the node's free space was byte-identical before and after (`2.9G`
+used on a 75G disk both times). An earlier `/usr/bin/time -v` run of the same
+script outside systemd reported 19 MB; the difference is the cgroup accounting
+the unit adds, not a change in the pipeline. The archive is never written down:
+`curl -> tee(sha256) -> zstd -dc -> tar -xO -> psql COPY` means the 2.32 GB
+archive and the 7.5 GB CSV exist only as bytes in flight. Nothing about this job
+needs a big node - a machine that could not hold the file can still load it, and
+this one loaded it while also serving traffic, both Redis instances and nginx in
+3.8 GB.
 
 ### Space in Postgres: 10 GB
 
@@ -215,6 +247,12 @@ it.
 | `canonical_release_idx` btree         | **331 MB**                       | 0.89 GB                  |
 | `canonical_artist_idx` GIN expression | **227 MB**                       | 1.44 GB                  |
 | **total, default index set**          | **10 GB** (3,950 MB of it index) | ≈ 12.1 GB                |
+
+**Every figure in the middle column reproduced to the megabyte on the `us-east-1`
+branch**, read out of `pg_relation_size` after the swap. That is worth noting
+because the two timings in the section above did not: storage is a property of the
+data and the index types, so it is the part of this table that travels between
+deployments unchanged, while wall clock is a property of where the job runs.
 
 ### Where the extrapolation failed, and why it matters
 
@@ -246,10 +284,13 @@ whose hard limit is `branch_logical_size_limit_bytes = 536870912` - 512 MiB per
 branch - and that the dump therefore did not fit, by a factor of about 24.
 
 That was true of the free plan and stopped being true when the plan changed. The
-project the load above ran against reported a 16 TiB branch limit and 0.25 to 8
-CU of compute autoscaling, and 10 GB fitted with room to spare.
+EU project the first load ran against reported a 16 TiB branch limit and 0.25 to
+8 CU of compute autoscaling, and 10 GB fitted with room to spare.
 
-**This is a per-project property and it does not travel.** A new project starts
+**This is a per-project property and it does not travel**, which the residency
+move is the demonstration of: the `us-east-1` project (`cold-brook-02833828`) is a
+different project, and the load above is the evidence that its `staging` branch
+holds 10 GB - not an inference from the EU project's limit. A new project starts
 on whatever plan it was created with, so before the first load on any new
 database, read the limit rather than assuming it:
 
@@ -342,6 +383,25 @@ than by absence, and measure before and after.
 
 ## 6. Running it
 
+**Normally, nothing runs it: the timer does.** `pullfm-mb-canonical.timer` fires
+daily at 09:19 UTC on the staging application node and is installed by
+`converge`. Forcing a run, which is how the first load is done and how a missed
+publication is caught up:
+
+```bash
+# On the node. --no-block, so a dropped SSH session cannot orphan the load.
+sudo systemctl start --no-block pullfm-mb-canonical.service
+journalctl -u pullfm-mb-canonical.service -f
+```
+
+**Do not run a full load from a workstation.** Measured 2026-07-29: from a
+residential connection the 2.32 GB fetch ran at **0.5 MB/s, upload bound, about
+5.5 hours**; the same load driven by the unit on the node took minutes. Distance
+to `data.metabrainz.org` and to the database is essentially the entire cost of
+this job, which is the whole reason the timer lives on the node.
+
+The forms below are the operator tools, run from a checkout:
+
 ```bash
 # Normal fortnightly run. Discovers the newest dump, declines if already loaded.
 DATABASE_URL_DIRECT=postgres://... ./infra/mb-loader/mb-canonical-load.sh
@@ -421,6 +481,22 @@ COMMIT;
 - **Staging names carry the pid**, so two loaders cannot destroy each other's
   work. They duplicate effort, which is wasteful and harmless; the advisory lock
   means the published result is one of the two loads, whole, never a mixture.
+
+**Verified after the 2026-07-29 21:22 UTC load**, on the machine rather than from
+the script's exit code: `mb.canonical` holds 31,554,198 rows, all five indexes are
+present under their canonical names (`canonical_pkey`, `canonical_lookup_idx`,
+`canonical_recording_idx`, `canonical_release_idx`, `canonical_artist_idx`), there
+is **no `mb.canonical_stage_*` table left**, and `mb.load_state` has **no row in
+`running`**. The index names are the evidence the rename half of the transaction
+committed; the absent stage table is the evidence nothing was left half-published.
+
+If a load ever does leave either behind, recovery is two statements and does not
+touch the live table:
+
+```sql
+DROP TABLE mb."canonical_stage_<pid>_<epoch>";
+UPDATE mb.load_state SET status = 'failed' WHERE status = 'running';
+```
 
 Two advisory-lock keys share namespace 7 and **must stay distinct**:
 `mb:canonical:swap` (transaction-scoped, in the loader) and `mb:canonical:refresh`
@@ -537,7 +613,7 @@ run.
 
 ---
 
-## 10. The refresh job, and what is still missing
+## 10. The refresh job, and what it took to get it running
 
 `apps/bff/src/services/mb-canonical-refresh.ts` plus
 `apps/bff/src/scripts/refresh-mb-canonical.ts`. Fortnightly or more often;
@@ -601,21 +677,55 @@ This is only affordable because the loader checks `mb.load_state` **before** it
 fetches anything. It did not always; with the licence gate first, a daily no-op
 pulled 33,554,432 bytes a day off a charity's file host instead of 533.
 
-### Not done, and outside this work's ownership
+### Installed and running. What that took, and what is still open
 
-1. **The unit files are not installed by anything.** `infra/staging/app/bootstrap.sh`
-   copies and enables the units it knows about and does not know about these.
-   See `infra/mb-loader/systemd/README.md` for the exact four changes needed:
-   `postgresql-client` on the node, `/etc/pullfm/mb-canonical.env` placed from
-   1Password, `infra/mb-loader/` synced to `/opt/pullfm/`, and the units enabled.
-2. **`psql` is absent from the staging node.** `bootstrap.sh` installs
-   `docker.io docker-compose-v2 nginx` only. `zstd`, `tar`, `curl` and `awk` are
-   all present on stock Ubuntu 24.04; `psql` is the only gap. This blocks
-   `infra/backup`'s dump job for the same reason - it needs `pg_dump` on the same
-   host and would fail today.
+1. ~~**The unit files are not installed by anything.**~~ **Closed.** `converge`
+   ships `infra/mb-loader` in the same tar as `observability backup lib`;
+   `bootstrap.sh` gates on `if [ -d mb-loader ]`, installs the loader to
+   `/opt/pullfm/infra/mb-loader/`, installs both units, writes the versioned
+   `PATH` drop-in, and runs `systemctl enable --now pullfm-mb-canonical.timer`;
+   `infra/lib/secrets.sh` renders `/etc/pullfm/mb-canonical.env` root-owned
+   `0600`. **Verified by running the real `converge` rather than by reading the
+   diff**: it created
+   `/etc/systemd/system/timers.target.wants/pullfm-mb-canonical.timer` and
+   `systemctl list-timers` then showed a NEXT.
+
+   **Then the node was rebuilt, and that is the better evidence.** Twenty
+   minutes after the load, unrelated work destroyed and recreated
+   `pullfm-staging-app-1` - new tailnet address, zero timers, empty
+   `/etc/pullfm`. The next `converge`, run by somebody else for an unrelated
+   reason and touching nothing in `infra/mb-loader`, brought the loader, the two
+   units, the `PATH` drop-in, the `0600` env file and the enabled timer back onto
+   a bare machine with no manual step. That is the property that matters: the
+   node is disposable on purpose, because the database is Neon and the node holds
+   nothing, so "rebuild it" is the documented answer to a whole class of problem.
+   A control that only exists because somebody once installed it by hand is a
+   control that disappears on exactly that day. `mb.canonical`'s 31,554,198 rows
+   were unaffected - they are in Neon, not on the node.
+
+   The state it was in before is worth keeping written down, because it is the
+   shape a repository cannot show you. The units were correct and committed, and
+   `mb.canonical` had never held a row. An earlier attempt had copied them onto
+   the node to run `systemd-analyze verify` and removed them again, so the
+   machine had been touched by this work and carried no trace of it. That is
+   PULLFM-RISK-012 in a second place: a control that exists in git, which is why
+   reading the repository would have concluded it was present.
+
+2. ~~**`psql` is absent from the staging node.**~~ **Closed.** `bootstrap.sh`
+   installs `postgresql-client-18` from PGDG via `ensure_pg_client`, keyed on the
+   major version rather than on `command -v`, because the unversioned
+   `postgresql-client` metapackage pulls client 16 on noble and a check a WRONG
+   version satisfies is not a check. It is a shared function rather than a block
+   inside the backup section, so a node converged with `mb-loader` and without
+   `backup` still gets a matching client.
+
 3. **`infra/scripts/check-job-schedule.mjs` only looks at
    `infra/staging/app/systemd/`.** Neither these units nor the four
-   `infra/backup/` ones are asserted by it at all. That gap predates this work.
+   `infra/backup/` ones are asserted by it at all. That gap predates this work,
+   and it is the check that would have caught the defect in item 1 in CI rather
+   than by somebody logging into the node and counting timers. **Still open**,
+   and outside this work's ownership.
+
 4. **The BFF entrypoint cannot run in the BFF image.**
    `apps/bff/package.json` now has `refresh:mb-canonical`, but the runtime image
    is `node:22-alpine` plus `dumb-init` and carries none of `psql`, `zstd`,

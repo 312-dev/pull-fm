@@ -51,31 +51,47 @@ ExecStart=/opt/pullfm/infra/mb-loader/mb-canonical-load.sh
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# MEASURED, NOT GUESSED - but measured somewhere else. These timings are from an
-# end-to-end load of musicbrainz-canonical-dump-20260717-080003 on 2026-07-29,
-# from an application node that sat one short network hop from the database.
-# THE HOSTING IS MOVING, so treat them as a shape rather than as this
-# deployment's numbers and re-measure on the first real load (the loader records
-# every one of them in mb.load_state, so re-measuring is free):
+# MEASURED BY THIS UNIT, ON THIS NODE. Not extrapolated, and no longer measured
+# somewhere else: an end-to-end load of
+# musicbrainz-canonical-dump-20260717-080003 driven by
+# `systemctl start pullfm-mb-canonical.service` on pullfm-staging-app-1 (Ashburn,
+# 3 vCPU) into the us-east-1 Neon staging branch on 2026-07-29 at 21:22:39 UTC:
 #
-#   discovery, .sha256, licence gate           3 s
-#   stream + COPY, 31,554,198 rows           129 s
+#   discovery, .sha256, licence gate           4 s
+#   stream + COPY, 31,554,198 rows           138 s
 #   count(*) against the row floor             5 s
-#   five indexes + ANALYZE                    98 s
-#   swap + bookkeeping                         2 s
+#   five indexes + ANALYZE                    67 s
+#   swap + bookkeeping                         1 s
 #   -----------------------------------------------
-#   total wall clock                    3 min 58 s
+#   total wall clock                    3 min 35 s   (mb.load_state: 3m30.2s)
 #
-# 3600 is 15x that, and the margin is sized by the part that is NOT the
-# database and NOT under this deployment's control. The COPY moved 2.32 GB of
-# archive and 7.5 GB of CSV in 129 seconds because that host had a fast path to
+# Per index: pkey 7.1 s, lookup 18.4 s, recording 11.9 s, release 9.0 s, artist
+# (GIN) 20 s. Peak RSS for the whole tree 28.4 MB, CPU 1 min 16.7 s, and the
+# node's free disk was byte-identical before and after.
+#
+# THE EARLIER FIGURES WERE 3 min 58 s TOTAL WITH A 129 s COPY AND 98 s OF
+# INDEXES, from a different node against a different (EU) branch. Both totals
+# land inside four minutes by completely different routes: this run's download
+# was SLOWER (138 s against 129 s, a longer path to data.metabrainz.org) and its
+# index build was 30% FASTER (67 s against 98 s, a bigger Neon compute). That
+# they agree to within 10% overall is a coincidence of two offsetting changes,
+# not stability - which is exactly why the ceiling below is not sized off either
+# number.
+#
+# The same load run from a residential workstation was measured at 0.5 MB/s,
+# upload bound, about 5.5 hours. That is the number the timer exists to avoid,
+# and it is a five-hour spread on the one phase this deployment does not control.
+#
+# 3600 is 17x the measured total, and the margin is sized by the part that is NOT
+# the database and NOT under this deployment's control. The COPY moved 2.32 GB of
+# archive and 7.5 GB of CSV in 138 seconds because this host has a good path to
 # data.metabrainz.org and a short one to the database; the SAME 2.32 GB off a
 # congested public file host at 1 MB/s is 39 minutes on its own, and that is a
 # completely ordinary thing for a charity's mirror to do. Move the job further
 # from either endpoint and only this download gets slower - the index phase
 # scales with the database's compute, not with distance.
 #
-# So: do not tighten this towards the measured four minutes. Four minutes is
+# So: do not tighten this towards the measured three and a half minutes. That is
 # what this job costs when everything is fast and close, and the timeout exists
 # for when it is neither.
 #
@@ -92,9 +108,14 @@ ExecStart=/opt/pullfm/infra/mb-loader/mb-canonical-load.sh
 # touched, so a timeout costs a wasted download and nothing else.
 TimeoutStartSec=3600
 
-# 512M against a MEASURED peak RSS of 19 MB for the whole process tree
-# (`/usr/bin/time -v`, which reports the maximum over the script and every child
-# it waits for: curl, tee, sha256sum, zstd, tar, psql). The archive is streamed,
+# 512M against a MEASURED peak of 28.4 MB for the whole process tree, which is
+# what systemd itself reported for this unit's own accounting group after the
+# 31,554,198-row load above ("Consumed 1min 16.710s CPU time, 28.4M memory peak,
+# 0B memory swap peak"). An earlier `/usr/bin/time -v` run of the same script
+# outside systemd reported 19 MB; both are the maximum over the script and every
+# child it waits for - curl, tee, sha256sum, zstd, tar, psql - and the difference
+# is the cgroup accounting the unit adds, not a change in the pipeline. The
+# archive is streamed,
 # so nothing here is proportional to the 2.3 GB download or the 7.5 GB of CSV -
 # that is the whole point of the pipeline's shape. This is not a tuning knob, it
 # is a blast-radius bound: this node also runs nginx, the BFF and both Redis
