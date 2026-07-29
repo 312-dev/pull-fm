@@ -9,3 +9,15 @@ zap/work/
 # disagree with the spec, which is the exact failure the enumerator exists to
 # prevent.
 bola/route-matrix.json
+
+# The material that is deliberately NOT published: the accepted-risk register
+# and every dated audit and DAST findings report. Each one is defensible on its
+# own; read together they are an inventory of which control is weak, until when,
+# and what compensates for it, in a repository that also publishes the hostnames
+# those controls protect. See README.md section "What is not in this directory".
+#
+# This is a working directory, not the store of record. The store of record is a
+# separate PRIVATE repository; this path exists so a checkout of it can sit here
+# and the tooling can find it without an environment variable. Nothing under it
+# is ever committed here.
+private/

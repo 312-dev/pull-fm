@@ -169,11 +169,11 @@ docker run --rm -v "$PWD/security/zap:/zap/wrk:rw" \
 
 The `exitStatus` job at the end of each plan grades the run:
 
-| Highest risk found | Exit | Effect                                                                                          |
-| ------------------ | ---- | ----------------------------------------------------------------------------------------------- |
-| High               | 1    | **Build fails.** Gate 8: "zero high/critical".                                                  |
-| Medium             | 0    | Reported, does not block. Fix it, or add it to `accepted-risks.md` with an owner and an expiry. |
-| Low / Info         | 0    | Informational                                                                                   |
+| Highest risk found | Exit | Effect                                                                                    |
+| ------------------ | ---- | ----------------------------------------------------------------------------------------- |
+| High               | 1    | **Build fails.** Gate 8: "zero high/critical".                                            |
+| Medium             | 0    | Reported, does not block. Fix it, or add it to the accepted-risk register with an expiry. |
+| Low / Info         | 0    | Informational                                                                             |
 
 Medium is deliberately non-blocking. On a solo project a blocking medium produces filter-and-forget
 behaviour, and a filtered finding is worse than a visible one. The register is where a medium goes
@@ -230,8 +230,9 @@ commit SHA, not by tag, for the reason in `PULLFM-RISK-002`.
    `node security/scripts/check-zap-fragments.mjs` passes.
 3. Mirror the decision into `rules/baseline-rules.tsv` if the packaged scans raise the same rule.
 4. Write **why**, naming the concrete Pull.fm behaviour that produces the noise. A filter whose
-   reason is "it was noisy" is an undocumented accepted risk, and those belong in
-   `accepted-risks.md` with an expiry.
+   reason is "it was noisy" is an undocumented accepted risk, and those belong in the accepted-risk
+   register with an expiry. That register is held in a private repository; see
+   [`../README.md`](../README.md), "What is not in this directory".
 
 Prefer `newRisk: "Info"` over `"False Positive"`, and scope by `urlRegex` or `evidence` rather than
 globally. An Info finding stays in the report where a human can see it change; a False Positive

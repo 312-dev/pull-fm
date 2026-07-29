@@ -140,11 +140,11 @@ routes reads as one finding rather than twelve.
 
 ### Gate grading
 
-| ZAP risk       | Meaning                                                                                              |
-| -------------- | ---------------------------------------------------------------------------------------------------- |
-| **High**       | **Blocks.** The plan's `exitStatus` job exits 1 and the workflow fails.                              |
-| **Medium**     | Reported, does not block. Must be fixed or written into `security/accepted-risks.md` with an expiry. |
-| **Low / Info** | Reported. Read them; several are the controls working.                                               |
+| ZAP risk       | Meaning                                                                                            |
+| -------------- | -------------------------------------------------------------------------------------------------- |
+| **High**       | **Blocks.** The plan's `exitStatus` job exits 1 and the workflow fails.                            |
+| **Medium**     | Reported, does not block. Must be fixed or written into the accepted-risk register with an expiry. |
+| **Low / Info** | Reported. Read them; several are the controls working.                                             |
 
 Medium is deliberately non-blocking. A blocking medium on a solo project produces filter-and-forget
 behaviour, which is worse than a finding somebody has to look at.
@@ -209,9 +209,11 @@ a scan that found something.
 **If it is a real High**, fix it. There is no accepted-risk path for a High on this gate; the gate
 clause is "zero high/critical".
 
-**If it is a Medium you intend to keep**, it needs an entry in `security/accepted-risks.md` with an
-owner and an expiry, and `check-accepted-risks.mjs` will fail CI when that expiry passes. A Medium
-with neither is an undocumented accepted risk.
+**If it is a Medium you intend to keep**, it needs an entry in the accepted-risk register with an
+owner and an expiry, and `check-accepted-risks.mjs` will fail when that expiry passes. The register
+is held in a private repository (see [`README.md`](README.md), "What is not in this directory"), so
+that expiry goes red in **that** repository's CI rather than in this one. A Medium with neither is an
+undocumented accepted risk.
 
 **If you are tempted to add an alert filter**, read the ground rules at the top of
 `rules/alert-filters.yaml`. Downgrade to `Info`, never `False Positive`, unless the alert is
@@ -245,10 +247,11 @@ stronger control than a kill switch nobody can reach. It is still the weaker foo
 
 ## 7. Lessons this tooling encodes
 
-Findings from individual scan runs are **not** kept in this file. Dated results live in
-`security/DAST-FINDINGS-<date>.md` alongside the other dated audit reports, and follow the same
-publication rule they do: a finding is published once it is closed and once infrastructure
-identifiers have been stripped.
+Findings from individual scan runs are **not** kept in this file. Dated results live in the private
+security repository as `DAST-FINDINGS-<date>.md`, alongside the dated audit reports and the
+accepted-risk register, for the reasons set out in [`README.md`](README.md) under "What is not in
+this directory". They are not published on closure either: the earlier rule here said they were, and
+that is no longer what happens.
 
 This document is the method, and the method stays public whatever the current findings are. Keeping
 the two apart is deliberate. A runbook that interleaves "how to run the scanner" with "what is

@@ -5,10 +5,28 @@
 // Gate 8 (docs/PLAN.md §7): "every accepted risk in security/accepted-risks.md
 // has an owner and expiry date, and CI fails on an expired entry."
 //
+// THE REGISTER IS NO LONGER IN THIS REPOSITORY. It moved to a private one on
+// 2026-07-29 for the reasons in security/README.md. The validator stayed here,
+// because it is the tooling rather than the finding, and it now resolves the
+// register from OUTSIDE this checkout. In order:
+//
+//   1. --file <path>
+//   2. $PULLFM_RISK_REGISTER
+//   3. security/private/accepted-risks.md   (a private checkout sitting here)
+//   4. security/accepted-risks.md           (the pre-split location)
+//
 // Exit codes:
 //   0  every entry parsed, validated, and unexpired
 //   1  at least one entry is expired or malformed  <- the Gate 8 failure
 //   2  usage error, or the register file is missing/unreadable
+//
+// A MISSING REGISTER IS A FAILURE BY DEFAULT, and that is deliberate. If a
+// register that cannot be found were treated as a register with nothing wrong
+// in it, Gate 8 would go green on every checkout that does not have the private
+// repository, which is every fork and every public CI run, and the gate would
+// then be measuring nothing while reporting success. --allow-missing opts into
+// that, loudly and on purpose, for the public CI run that genuinely cannot see
+// the register. Gate 8 is enforced where the register lives.
 //
 // Zero dependencies, on purpose. This runs in CI before `pnpm install` needs to
 // have succeeded, so it must work with nothing but a Node 22 binary and the
@@ -18,7 +36,8 @@
 //
 // Usage:
 //   node security/scripts/check-accepted-risks.mjs [options]
-//     --file <path>    register to validate (default: security/accepted-risks.md)
+//     --file <path>    register to validate (default: see resolution order above)
+//     --allow-missing  exit 0, with a SKIPPED notice, when no register is found
 //     --json           emit findings as JSON on stdout instead of text
 //     --now <date>     evaluate expiry as at YYYY-MM-DD (TESTING ONLY)
 //     --warn-days <n>  warn about entries expiring within n days (default 14)
@@ -26,12 +45,31 @@
 //     --help
 // ---------------------------------------------------------------------------
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_REGISTER = resolve(HERE, "..", "accepted-risks.md");
+
+/**
+ * Where the register may be, in precedence order, once --file is out of the
+ * way. Both are relative to this script so the validator works from any cwd.
+ *
+ * The second entry is the pre-split path. It is kept because a private checkout
+ * may reasonably be laid out either way, and because a validator that silently
+ * stops looking at a path it used to read is how a gate goes quiet.
+ */
+const REGISTER_SEARCH_PATHS = [
+  resolve(HERE, "..", "private", "accepted-risks.md"),
+  resolve(HERE, "..", "accepted-risks.md"),
+];
+
+/** First existing candidate, or null. `--file` and the env var bypass this. */
+function resolveRegister() {
+  const fromEnv = process.env.PULLFM_RISK_REGISTER;
+  if (fromEnv) return fromEnv;
+  return REGISTER_SEARCH_PATHS.find((p) => existsSync(p)) ?? null;
+}
 
 // --- Schema -----------------------------------------------------------------
 // Kept in one place so accepted-risks.md's documented schema and this validator
@@ -555,7 +593,10 @@ function warnings(register, now, warnDays) {
 
 function parseArgs(argv) {
   const opts = {
-    file: DEFAULT_REGISTER,
+    // null means "not given": main() resolves it, so that an explicit --file
+    // always wins over the environment variable and the search paths.
+    file: null,
+    allowMissing: false,
     json: false,
     now: null,
     warnDays: 14,
@@ -571,6 +612,7 @@ function parseArgs(argv) {
       return v;
     };
     if (a === "--help" || a === "-h") opts.help = true;
+    else if (a === "--allow-missing") opts.allowMissing = true;
     else if (a === "--json") opts.json = true;
     else if (a === "--quiet") opts.quiet = true;
     else if (a === "--file") opts.file = take();
@@ -586,7 +628,14 @@ function parseArgs(argv) {
 
 const USAGE = `Usage: node security/scripts/check-accepted-risks.mjs [options]
 
-  --file <path>    register to validate (default: security/accepted-risks.md)
+  --file <path>    register to validate. Without it, the register is resolved
+                   from $PULLFM_RISK_REGISTER, then security/private/, then
+                   security/. The register is held in a PRIVATE repository; see
+                   security/README.md.
+  --allow-missing  exit 0, with a SKIPPED notice, when no register is found.
+                   For the public CI run, which cannot see the private
+                   repository. Gate 8 is enforced where the register lives, so
+                   passing this anywhere else turns the gate off.
   --json           emit findings as JSON
   --now <date>     evaluate expiry as at YYYY-MM-DD. TESTING ONLY: CI must never
                    pass this, or the gate can be trivially back-dated.
@@ -594,7 +643,8 @@ const USAGE = `Usage: node security/scripts/check-accepted-risks.mjs [options]
   --quiet          suppress the OK summary
   --help
 
-Exit: 0 valid, 1 expired or malformed, 2 usage or IO error.`;
+Exit: 0 valid, 1 expired or malformed, 2 usage or IO error (including a register
+that could not be found, unless --allow-missing).`;
 
 function main() {
   let opts;
@@ -629,6 +679,40 @@ function main() {
     now = new Date(
       Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
     );
+  }
+
+  // Resolve the register only now, so --help and the usage errors above do not
+  // depend on a private checkout being present.
+  if (opts.file === null) opts.file = resolveRegister();
+
+  if (opts.file === null) {
+    const where =
+      "  --file <path>\n" +
+      "  $PULLFM_RISK_REGISTER\n" +
+      REGISTER_SEARCH_PATHS.map((p) => `  ${p}`).join("\n");
+    if (opts.allowMissing) {
+      // Deliberately on stderr and deliberately not silent. A skipped gate that
+      // prints nothing is indistinguishable from a gate that passed.
+      process.stderr.write(
+        "SKIPPED  Gate 8: no accepted-risk register found, and --allow-missing\n" +
+          "         was passed. NOTHING WAS VALIDATED HERE. The register lives in a\n" +
+          "         private repository and Gate 8 is enforced by that repository's\n" +
+          "         own CI. See security/README.md.\n",
+      );
+      if (opts.json) {
+        process.stdout.write(
+          `${JSON.stringify({ ok: true, skipped: true, file: null, entries: 0, findings: [] }, null, 2)}\n`,
+        );
+      }
+      process.exit(0);
+    }
+    process.stderr.write(
+      `cannot find an accepted-risk register. Looked at:\n${where}\n\n` +
+        "The register is held in a private repository (security/README.md).\n" +
+        "Point --file or $PULLFM_RISK_REGISTER at your checkout of it, or pass\n" +
+        "--allow-missing if this is a run that is not meant to enforce Gate 8.\n",
+    );
+    process.exit(2);
   }
 
   let text;

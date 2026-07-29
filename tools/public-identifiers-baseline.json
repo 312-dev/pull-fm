@@ -17,29 +17,9 @@
   ],
   "known": [
     {
-      "fingerprint": "ded8-5d9a-cc5d-47b5",
-      "detector": "cloudflare-resource-id",
-      "file": "docs/PLAN.md"
-    },
-    {
       "fingerprint": "f8ac-d9a0-dbe9-e2b5",
       "detector": "cloudflare-resource-id",
       "file": "infra/cost.sh"
-    },
-    {
-      "fingerprint": "472c-8bfe-8bdc-96e2",
-      "detector": "cloudflare-resource-id",
-      "file": "security/accepted-risks.md"
-    },
-    {
-      "fingerprint": "1912-3648-7b37-fc6a",
-      "detector": "cloudflare-resource-id",
-      "file": "security/accepted-risks.md"
-    },
-    {
-      "fingerprint": "7ab4-4d62-81d1-1052",
-      "detector": "cloudflare-resource-id",
-      "file": "security/accepted-risks.md"
     },
     {
       "fingerprint": "fbfb-330d-46ef-54f6",

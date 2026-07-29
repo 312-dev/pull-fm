@@ -15,13 +15,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const VALIDATOR = resolve(HERE, "check-accepted-risks.mjs");
 const FIXTURES = resolve(HERE, "..", "testdata", "accepted-risks");
-const REGISTER = resolve(HERE, "..", "accepted-risks.md");
+
+// The real register moved to a private repository on 2026-07-29 (see
+// security/README.md), so a public checkout usually does not have one. The
+// fixtures below are committed here and always run: they are what proves the
+// validator still catches each way a register can be wrong, and they are the
+// reason this file can skip the two live-register cases without the suite
+// becoming decorative.
+//
+// Resolution deliberately mirrors the validator's own order, so "the tests
+// looked at a different file than the gate does" cannot happen quietly.
+const REGISTER =
+  process.env.PULLFM_RISK_REGISTER ??
+  [
+    resolve(HERE, "..", "private", "accepted-risks.md"),
+    resolve(HERE, "..", "accepted-risks.md"),
+  ].find((p) => existsSync(p)) ??
+  null;
+
+const NO_REGISTER =
+  REGISTER === null || !existsSync(REGISTER)
+    ? "no accepted-risk register in this checkout; it is held privately. Set PULLFM_RISK_REGISTER to run these two."
+    : false;
 
 // A date well before every fixture expiry, so "expired" cases fail for the
 // reason under test rather than because real time moved on.
@@ -60,16 +82,48 @@ function findings(result) {
 
 const fieldsIn = (result) => findings(result).map((f) => f.field);
 
-test("the real register is valid today", () => {
+test("the real register is valid today", { skip: NO_REGISTER }, () => {
   const r = run(["--file", REGISTER]);
   assert.equal(r.code, 0, `real register failed validation:\n${r.stderr}`);
 });
 
-test("the real register still parses as strict JSON output", () => {
-  const r = run(["--file", REGISTER, "--json"]);
-  const parsed = JSON.parse(r.stdout);
+test(
+  "the real register still parses as strict JSON output",
+  { skip: NO_REGISTER },
+  () => {
+    const r = run(["--file", REGISTER, "--json"]);
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.ok, true);
+    assert.ok(parsed.entries >= 1);
+  },
+);
+
+// The two cases above can skip, so the behaviour that lets them skip has to be
+// tested itself, or "the register is private" becomes a way for the gate to
+// stop running without anyone noticing.
+test("a register that cannot be found is a failure, not a pass", () => {
+  const r = run(["--file", resolve(FIXTURES, "does-not-exist.md")]);
+  assert.equal(r.code, 2, r.stderr);
+});
+
+test("--allow-missing exits 0 only when no register is found at all", () => {
+  const missing = run(["--allow-missing", "--json"]);
+  // In a checkout that HAS a register this validates it; in one that does not,
+  // it skips. Both are exit 0, and the JSON says which happened.
+  assert.equal(missing.code, 0, missing.stderr);
+  const parsed = JSON.parse(missing.stdout);
   assert.equal(parsed.ok, true);
-  assert.ok(parsed.entries >= 1);
+  assert.equal(parsed.skipped === true, NO_REGISTER !== false);
+
+  // --allow-missing must not soften a register that exists and is broken.
+  const broken = run([
+    "--allow-missing",
+    "--file",
+    resolve(FIXTURES, "expired.md"),
+    "--now",
+    NOW,
+  ]);
+  assert.equal(broken.code, 1, broken.stdout);
 });
 
 test("a well-formed register passes, and a retired entry is exempt from expiry", () => {

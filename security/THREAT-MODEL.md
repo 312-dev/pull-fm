@@ -266,7 +266,7 @@ rating, using the asset ranking in §2.
 | T28 | E   | Nomad HTTP API (4646) reachable, or a leaked Nomad ACL token: `nomad var get nomad/jobs/pull-fm` returns the KEK directly, converting an infrastructure finding into A1.                                                                           | **Critical** |
 | T29 | E   | GitHub Actions token or a mutable action tag used to push a backdoored image or read repository secrets.                                                                                                                                           | High         |
 | T30 | D   | **KEK loss** rather than disclosure: 1Password lockout plus a lost offline escrow makes every user's tokens permanently undecryptable. `PLAN.md` §5 flags this as unrecoverable; it is the only threat here whose mitigation is purely procedural. | High         |
-| T31 | I   | Cloudflare account compromise, shared with the personal fleet (`PLAN.md` §10, open decision 4). Accepted and registered rather than mitigated: see [`accepted-risks.md`](accepted-risks.md) `PULLFM-RISK-001`.                                     | High         |
+| T31 | I   | Cloudflare account compromise, shared with the personal fleet (`PLAN.md` §10, open decision 4). Accepted and registered rather than mitigated: `PULLFM-RISK-001` in the private accepted-risk register.                                            | High         |
 
 ---
 
@@ -521,8 +521,9 @@ intention, not a mitigation.
 
 ## 7. Residual risk
 
-Accepted deliberately, all of it recorded in [`accepted-risks.md`](accepted-risks.md) with an
-owner and an expiry so it resurfaces instead of decaying.
+Accepted deliberately, all of it recorded in the accepted-risk register with an owner and an
+expiry so it resurfaces instead of decaying. That register is **not in this repository**: see
+[`README.md`](README.md) "What is not in this directory" for where it went and why.
 
 1. **BFF code execution defeats the vault.** Structural, not fixable without an HSM or a separate
    decryption service with its own authorization, neither of which is justifiable at this scale or

@@ -111,8 +111,20 @@ jobs:
 
       # Gate 8: an accepted risk with no expiry is a permanently ignored
       # finding, so an expired entry fails the build.
-      - name: "Gate 8: accepted-risk register"
-        run: node security/scripts/check-accepted-risks.mjs
+      #
+      # THE REGISTER MOVED TO A PRIVATE REPOSITORY on 2026-07-29, so this run
+      # cannot see it and --allow-missing makes that a loud SKIPPED rather than
+      # a red build. Read this step honestly: on this repository Gate 8 is NOT
+      # enforced, it is enforced by the private repository's own CI against the
+      # same validator, which is still here because the tooling is not the
+      # finding. If this step ever prints OK rather than SKIPPED, a register
+      # has reappeared in the public tree and that is the thing to look at.
+      #
+      # The validator fails (exit 2) on a missing register WITHOUT this flag,
+      # which is what stops the same situation going quietly green anywhere
+      # else. See security/README.md.
+      - name: "Gate 8: accepted-risk register (enforced in the private repo)"
+        run: node security/scripts/check-accepted-risks.mjs --allow-missing
 
       # The four background jobs enforce the retention windows the privacy
       # policy publishes, and they spent a while existing as commands that

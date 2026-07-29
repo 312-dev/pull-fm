@@ -441,7 +441,8 @@ through historical DNS, certificate transparency, and any outbound connection th
 [`.github/workflows/security.yml`](../.github/workflows/security.yml) uses `gitleaks-action@v2`,
 `actions/checkout@v4`, and the container image `semgrep/semgrep:latest`. Gate 8 requires **pinned
 tool versions**, so as written the gate cannot honestly be marked green. Registered as
-`PULLFM-RISK-002` in [`accepted-risks.md`](accepted-risks.md) with the shortest expiry of any entry.
+`PULLFM-RISK-002` in the accepted-risk register, with the shortest expiry of any entry. The
+register is held privately; see [`README.md`](README.md) "What is not in this directory".
 
 Also in scope: `/metrics` exposure (see API5), Postgres statement logging capturing bound parameters
 (T07, the same trap that makes pgcrypto unusable per `PLAN.md` §5), Redis without auth or TLS on the

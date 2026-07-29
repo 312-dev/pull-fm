@@ -10,3 +10,9 @@ LICENSE
 # (security/.gitignore), but prettier does not read .gitignore, so without this
 # `pnpm format:check` fails on ZAP's HTML the moment anyone runs a scan.
 security/zap/work/
+
+# The unpublished security material (accepted-risk register, dated audit and
+# DAST findings reports). Gitignored via security/.gitignore, but prettier does
+# not read .gitignore, so without this `pnpm format:check` reports on files that
+# are not part of this repository at all.
+security/private/
