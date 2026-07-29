@@ -139,8 +139,107 @@ sed -i '/^PRIVATE_IP=/d' "${ENV_FILE}"
 printf 'PRIVATE_IP=%s\n' "${PRIVATE_IP}" >>"${ENV_FILE}"
 chmod 0600 "${ENV_FILE}"
 
+# --- the address has to exist before anything binds to it -------------------
+#
+# WHAT WAS WRONG. A rebuild in ash on 2026-07-29 came up with the Hetzner
+# private NIC present, DOWN and configured nowhere, because cloud-init read the
+# metadata service before Hetzner attached the private network. `docker compose
+# up` then died with "failed to bind host port 10.20.1.11:6379: cannot assign
+# requested address", converge stopped at its last step, and the BFF failed
+# closed on its rate limiter and refused all traffic.
+#
+# WHY THIS SHAPE. The bind failure names the address but not the reason, so it
+# reads as a compose or a docker problem for as long as it takes somebody to run
+# `ip addr`. Asserting first turns the same fault into one line that says which
+# address is missing and where the repair lives. /usr/local/sbin/pullfm-private-net
+# is installed by cloud-init (see the compute module's template) and is the one
+# place that knows how to re-derive the interface from the metadata service; this
+# calls it rather than carrying a second copy of that logic, and still refuses to
+# continue if it did not help.
+assert_private_ip() {
+  ip -4 -o addr show 2>/dev/null | grep -qFw -- "${PRIVATE_IP}"
+}
+
+if ! assert_private_ip; then
+  echo "${PRIVATE_IP} is not assigned to any interface on this node." >&2
+  if [ -x /usr/local/sbin/pullfm-private-net ]; then
+    echo "re-deriving the private interface from the metadata service" >&2
+    /usr/local/sbin/pullfm-private-net 60 || true
+  fi
+fi
+
+if ! assert_private_ip; then
+  echo >&2
+  echo "REFUSING TO START REDIS: ${PRIVATE_IP} is not assigned to any" >&2
+  echo "interface on this node, so every published port would fail to bind." >&2
+  echo >&2
+  ip -4 -br addr >&2 || true
+  echo >&2
+  echo "Hetzner attaches the private network AFTER boot, so cloud-init can" >&2
+  echo "render its network config without it. See:" >&2
+  echo "  /var/lib/pullfm/private-net-FAILED" >&2
+  echo "  journalctl -t pullfm-private-net" >&2
+  echo "  /usr/local/sbin/pullfm-private-net   (re-runs the repair)" >&2
+  exit 1
+fi
+
 cd /opt/pullfm-cache
 docker compose --env-file "${ENV_FILE}" up -d
+
+# --- a container that failed to bind must not be left looking healthy --------
+#
+# WHAT WAS WRONG, and it is the second half of the same incident. Once the
+# interface was up, the Redis containers still had NO PUBLISHED PORTS, because
+# they had been CREATED during the converge in which the bind was impossible and
+# the retry above merely STARTED the containers that already existed. `docker ps`
+# reported both `healthy` throughout, and it was telling the truth about the only
+# thing it was asked: the compose healthcheck runs `redis-cli ping` INSIDE the
+# container, over the container's own loopback, and says nothing whatsoever about
+# whether a host port exists. The BFF, which reaches Redis from a different
+# network namespace, saw nothing. Recovery was `docker compose down && up`.
+#
+# WHY THIS SHAPE, AND NOT `up -d --force-recreate` UNCONDITIONALLY. Recreating
+# on every converge would be simpler and it would restart the QUOTA instance
+# every time, which is live rate-limit and quota state; the BFF fails closed on
+# its limiter, so each converge would buy a window of refused traffic to fix a
+# fault that is not usually present. So the binding is CHECKED and the recreate
+# is the remedy, not the routine. `--force-recreate` rather than `down`: it
+# discards exactly the wrong thing (the container) without removing the compose
+# network or going anywhere near the redisquota volume.
+#
+# WHY IT IS CHECKED TWICE, in two different ways. `docker ps` proves docker
+# believes it published the port; a TCP connect proves something is listening on
+# that address for real. The first can be true while the second is false, and it
+# is the second that the BFF depends on.
+published_ok() {
+  local svc port cid ports
+  for svc in redis-cache:6379 redis-quota:6380; do
+    port="${svc##*:}"
+    svc="${svc%%:*}"
+    cid="$(docker compose --env-file "${ENV_FILE}" ps -q "${svc}" 2>/dev/null)"
+    [ -n "${cid}" ] || return 1
+    ports="$(docker ps --no-trunc --filter "id=${cid}" --format '{{.Ports}}')"
+    printf '%s' "${ports}" | grep -qF -- "${PRIVATE_IP}:${port}->" || return 1
+  done
+}
+
+if ! published_ok; then
+  echo >&2
+  echo "the redis containers are not publishing ${PRIVATE_IP}:6379 and :6380;" >&2
+  echo "recreating them rather than starting the containers that failed to bind" >&2
+  docker ps --format '  {{.Names}}  {{.Status}}  [{{.Ports}}]' >&2 || true
+  docker compose --env-file "${ENV_FILE}" up -d --force-recreate
+fi
+
+if ! published_ok; then
+  echo >&2
+  echo "REDIS IS NOT PUBLISHED ON ${PRIVATE_IP}:6379 and :6380 after a forced" >&2
+  echo "recreate. The BFF reaches Redis from another network namespace, so it" >&2
+  echo "would come up and fail closed on its rate limiter." >&2
+  docker ps --format '  {{.Names}}  {{.Status}}  [{{.Ports}}]' >&2 || true
+  docker compose --env-file "${ENV_FILE}" logs --tail 30 >&2 || true
+  exit 1
+fi
 
 echo
 echo "waiting for redis"
@@ -153,6 +252,18 @@ for _ in $(seq 1 30); do
     break
   fi
   sleep 2
+done
+
+# The proof that is worth having, from OUTSIDE the containers: a TCP connect to
+# the published address, which is the thing the BFF actually does and the thing
+# every check above this line was unable to see.
+for port in 6379 6380; do
+  if timeout 3 bash -c "</dev/tcp/${PRIVATE_IP}/${port}" 2>/dev/null; then
+    echo "  ${PRIVATE_IP}:${port} accepts connections"
+  else
+    echo "nothing is listening on ${PRIVATE_IP}:${port}" >&2
+    exit 1
+  fi
 done
 
 docker compose --env-file "${ENV_FILE}" ps
