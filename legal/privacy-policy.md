@@ -18,6 +18,17 @@
 > before this is published.
 >
 > **Items marked `[CONFIRM]` need an operator or counsel decision.**
+>
+> **Before publishing, run `make legal`** (or
+> `node legal/check-publication-blockers.mjs`). It exits non-zero while any
+> marker remains, prints each with a file and line, and flags the ones that are
+> void or misleading rather than merely incomplete. **`terms-of-service.md`
+> currently has two that make its dispute framework void**, so neither document
+> can be published today.
+>
+> The `[CONFIRM: state of organisation]` in section 2 is the **same fact** as the
+> two placeholders in `terms-of-service.md` section 16. Fill all three together,
+> from 312.dev LLC's formation record. Do not guess it.
 
 **Version:** DRAFT-0 (unpublished)
 **Last updated:** 2026-07-29
@@ -244,9 +255,10 @@ do not expire. So it gets its own section.
   explains why, since that is a deliberate restriction of a right you have.
 - The application key is held outside the database and escrowed. `[OPEN]` The
   escrow currently has a **single holder** (the operator), which is recorded as
-  an accepted risk in the public register at
-  [`../security/accepted-risks.md`](../security/accepted-risks.md)
-  (`PULLFM-RISK-003`).
+  an accepted risk (`PULLFM-RISK-003`). That register was public until
+  2026-07-29 and is now held privately, for the reasons in
+  [`../security/README.md`](../security/README.md); the gap it records is
+  unchanged, and is stated here rather than only there.
 
 ---
 
@@ -493,12 +505,21 @@ assessment for the security audit trail are in
 
 ## 9. Where your data is, and who else touches it
 
-**The honest version has two halves, and a policy that gives only the first half
-is misleading.** Everything you create in Pull.fm stays in the European Union.
-Your identity, meaning your email address, your name, and the record of your
-sign-ins, is processed in the **United States** by WorkOS. There is no EU
+**The honest version has three parts, and a policy that gives only the first is
+misleading.** Everything you create in Pull.fm is **stored** in the European
+Union. Your identity, meaning your email address, your name, and the record of
+your sign-ins, is processed in the **United States** by WorkOS. There is no EU
 residency option for that, so this policy states it rather than implying
 otherwise.
+
+The third part is about **transit rather than storage**, and it was missing from
+earlier versions of this document. Every request you make to Pull.fm is decrypted
+by **Cloudflare** at whichever of its data centres is nearest to you, which may
+be anywhere in the world and is frequently outside the EU. That decryption
+handles your **IP address**, which this policy classes as personal data in
+section 4, along with the URL path, your user agent, and the rest of your request
+headers. Storage residency and transit residency are different questions, and
+answering only the first one would leave you with a false picture.
 
 ### Where each thing actually sits
 
@@ -509,9 +530,11 @@ otherwise.
 | Application servers                                                                          | **Hetzner Cloud**, EU sites only                               | No                                           |
 | Encrypted database backups                                                                   | Neon's own backups, and object storage in an EU jurisdiction   | No                                           |
 | **Email address, name, sign-in events, session records**                                     | **WorkOS, United States**                                      | **Yes.** See "International transfers" below |
+| **Every request in transit: your IP address, the URL path, your headers**                    | **Cloudflare**, at the data centre nearest you, worldwide      | **Yes.** See "International transfers" below |
+| Encrypted backup objects at rest in Cloudflare R2                                            | Pinned to an EU jurisdiction bucket                            | No                                           |
 | Operator access                                                                              | From the United States, by one person                          | Access, not storage. See below               |
 
-Two structural guarantees behind the EU rows, rather than a promise:
+Three structural guarantees behind the EU rows, rather than a promise:
 
 - The Neon project's region is chosen at creation and **Neon does not permit
   changing the region of an existing project**, so residency is a property of the
@@ -519,6 +542,20 @@ Two structural guarantees behind the EU rows, rather than a promise:
 - The infrastructure code for the application servers **refuses to build** in a
   non-EU Hetzner site: the location variable is validated against an EU-only
   list, so a US or APAC region is a hard error rather than a configuration slip.
+- The backup bucket is created with Cloudflare's **`eu` jurisdiction** set, which
+  pins the objects to EU infrastructure rather than merely requesting a location
+  hint, and the infrastructure code rejects any other value it is not explicitly
+  given. Backup objects are also encrypted before they get there.
+
+**No such guarantee exists for the Cloudflare edge row, and none is available to
+us.** Every DNS record for Pull.fm is proxied through Cloudflare on purpose: an
+unproxied record would publish the origin server's IP address and remove the
+whole edge trust boundary. The consequence is that Cloudflare's global anycast
+network answers every request, and TLS is terminated wherever that lands. The
+only Cloudflare product that confines TLS termination to a chosen region,
+**Regional Services**, is an **Enterprise add-on**, which this deployment is not
+on. So this is a disclosed property of the architecture, not a setting that has
+been left wrong.
 
 The infrastructure code now matches this description. The self-hosted-Postgres
 layout that predated the move to Neon is gone from the Terraform: the database is
@@ -565,6 +602,65 @@ protection questionnaire.
 served from a trust centre that cannot be read as plain text. Before publication,
 read it and name any subprocessor that would surprise a reader.
 
+**To Cloudflare (a US company, at data centres worldwide).** This is a separate
+transfer from the WorkOS one and it had not been disclosed. It is described here
+in full rather than folded into the sentence above, because it works differently:
+it is continuous, it applies to **every visitor** rather than to account holders,
+and it happens in transit rather than by storing anything.
+
+What actually crosses a border:
+
+| What                                                        | Why Cloudflare has it                                                                  |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| **Your IP address**                                         | It is the source address of the connection. Unavoidable for any reverse proxy          |
+| The **URL path**, HTTP method, status, and timing           | Cloudflare has to route and cache the request                                          |
+| Your **user agent** and other request headers               | Passed through, and used by the bot and abuse controls                                 |
+| The **request and response bodies**, decrypted in memory    | TLS terminates at the edge, so everything in the request is in the clear at that point |
+| **Nothing stored on our behalf**, other than the R2 backups | The backups are encrypted before upload and pinned to an EU jurisdiction bucket        |
+
+Cloudflare is not merely passing bytes: it decrypts them. **We hold its private
+TLS certificate relationship precisely so that it can**, because the edge
+protections we rely on need to see the request. Describing Cloudflare as only a
+"TLS terminator" would understate what it processes, which is why the table above
+is itemised.
+
+The transfer safeguard, as far as we have been able to establish it:
+
+| Instrument                                     | Position                                                                                                                                                    |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Cloudflare Data Processing Addendum**        | Published. It applies the **EU SCCs** to restricted transfers                                                                                               |
+| **SCCs Module Two** (controller to processor)  | The operative module for us: the DPA applies Module Two "where Customer is a Controller", which is what we are                                              |
+| **SCCs Module Three** (processor to processor) | Applies to Cloudflare's own subprocessors                                                                                                                   |
+| **UK International Data Transfer Addendum**    | The DPA deems the EU SCCs amended by the UK Addendum, and deems that Addendum executed                                                                      |
+| **Switzerland**                                | The same SCCs apply with the Swiss FADP substituted for the GDPR references                                                                                 |
+| **How it attaches to us**                      | Cloudflare's Self-Serve Subscription Agreement section 6.1 incorporates the DPA **by reference** whenever personal data is involved. See the `[OPEN]` below |
+
+`[OPEN]` **The safeguard is probably in place and we have not proved it, which is
+not the same thing.** Three specific gaps, in the order they should be closed:
+
+1. **We have not confirmed which Cloudflare agreement governs this account.**
+   The incorporation-by-reference route above is the Self-Serve Subscription
+   Agreement. If this account is on different terms, the analysis changes. This
+   is a five-minute check against the account's own billing page and it has not
+   been done.
+2. **Incorporation in section 6.1 is conditional**, on Customer Content
+   including personal data of European data subjects. It plainly does here, so
+   the condition is met; but a safeguard that depends on our own reading of a
+   condition is weaker than one that is signed, and it should be recorded in
+   writing that we rely on it.
+3. **No dated copy of the DPA is on file.** Cloudflare can revise a published
+   document; without a dated copy we cannot later show what we were relying on.
+   This is the same failing already recorded for WorkOS in the table below, and
+   the same fix.
+
+`[OPEN]` **There is no technical remedy available to us, only a contractual
+one.** Keeping the decryption inside the EU requires Cloudflare **Regional
+Services**, which is an Enterprise add-on. Until that is bought, or an EU-based
+edge is used instead, the honest statement is the one made above: your IP address
+and request metadata are decrypted outside the EU by a US company, under the SCCs
+and nothing stronger. This is disclosed rather than mitigated, and a reader in
+the EU is entitled to weigh it.
+
 **Operator access from the United States.** 312.dev LLC is a US company, so the
 controller sits outside the EU even for the data that never leaves it: the
 operator can read the EU database from the United States in the course of running
@@ -574,19 +670,22 @@ transfer of this kind needs one at all.]`
 
 ### Service providers (processors and sub-processors)
 
-| Provider                     | What they handle                                                                    | Where                                             | Written processor contract                                                                                                                        |
-| ---------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Neon** (database)          | Every application table, and the backups of it                                      | Frankfurt, Germany (EU)                           | `[OPEN]` Not on file                                                                                                                              |
-| **Hetzner Online GmbH**      | Application servers, cache                                                          | EU sites only                                     | `[OPEN]` Not on file                                                                                                                              |
-| **Cloudflare, Inc.**         | DNS, TLS termination, edge protection, and object storage holding encrypted backups | Global edge; backups in an EU jurisdiction bucket | `[OPEN]` Not on file                                                                                                                              |
-| **WorkOS, Inc.**             | Authentication and identity                                                         | United States                                     | The published DPA, incorporated automatically. `[CONFIRM]` that the WorkOS agreement itself is executed, and keep a dated copy of the DPA on file |
-| **GitHub, Inc. (Microsoft)** | Source hosting and release distribution. Handles no user data.                      | United States                                     | Not required                                                                                                                                      |
+| Provider                     | What they handle                                                                                                                                                                                             | Where                                                                                                 | Written processor contract                                                                                                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Neon** (database)          | Every application table, and the backups of it                                                                                                                                                               | Frankfurt, Germany (EU)                                                                               | `[OPEN]` Not on file                                                                                                                                                                                             |
+| **Hetzner Online GmbH**      | Application servers, cache                                                                                                                                                                                   | EU sites only                                                                                         | `[OPEN]` Not on file                                                                                                                                                                                             |
+| **Cloudflare, Inc.**         | DNS, and the reverse proxy every request passes through: TLS is terminated at the edge, so IP addresses, paths, headers and bodies are processed in the clear. Also object storage holding encrypted backups | **Global edge**, at the data centre nearest each visitor; backups pinned to an EU jurisdiction bucket | Published DPA, incorporated by reference under Self-Serve Subscription Agreement 6.1, applying SCCs Module Two. `[OPEN]` Not confirmed for this account and no dated copy on file. See "International transfers" |
+| **WorkOS, Inc.**             | Authentication and identity                                                                                                                                                                                  | United States                                                                                         | The published DPA, incorporated automatically. `[CONFIRM]` that the WorkOS agreement itself is executed, and keep a dated copy of the DPA on file                                                                |
+| **GitHub, Inc. (Microsoft)** | Source hosting and release distribution. Handles no user data.                                                                                                                                               | United States                                                                                         | Not required                                                                                                                                                                                                     |
 
 `[OPEN]` Article 28 requires a written processor contract with each of them.
-**Neon, Hetzner, and Cloudflare are still outstanding.** WorkOS is covered by an
-addendum that applies by its own terms, which is the exception rather than the
-pattern, and it should still be downloaded, dated, and filed so that what we
-agreed to is provable later.
+**Neon and Hetzner are still outstanding.** WorkOS is covered by an addendum that
+applies by its own terms, and **Cloudflare** by a published DPA that its
+self-serve agreement incorporates by reference; those two are the exception
+rather than the pattern. Both should still be downloaded, dated, and filed so
+that what we agreed to is provable later, and the Cloudflare one carries the
+additional check in "International transfers" above: confirm which Cloudflare
+agreement this account is actually on.
 
 ### Upstream data sources (not processors)
 
@@ -691,8 +790,11 @@ secret is not a design.
 
 **Known limits, published rather than implied:** the operator is a single point
 of failure for key custody, and the hosting account is shared with unrelated
-personal services. Both are recorded, with expiry dates for re-decision, in
-[`../security/accepted-risks.md`](../security/accepted-risks.md).
+personal services. Both are recorded, with expiry dates for re-decision, in an
+accepted-risk register that is no longer public
+([`../security/README.md`](../security/README.md) explains why). The limits
+themselves stay published here, which is the part that concerns you: moving the
+register does not retract anything this policy says.
 
 ### If there is a breach
 
@@ -733,10 +835,12 @@ A checklist, so that nothing above is quietly published while still untrue.
 | 1   | **The retention jobs are built, tested and scheduled, and the schedule has never fired** because no compute is deployed to run it. The windows in sections 7 and 8 are enforced on each run, and a run is presently started by hand. A schedule must be verified to have fired before those windows are stated as unqualified promises.                                                                                             | 7, 8    |
 | 2   | No log retention period is configured anywhere. A number must exist in the system before it is stated here.                                                                                                                                                                                                                                                                                                                         | 8       |
 | 3   | Manually taken logical dumps in object storage have no expiry rule and persist until deleted by hand. State a maximum age and enforce it, or say plainly that they are kept until deleted. The Neon PITR window itself is settled at 6 hours.                                                                                                                                                                                       | 7, 8    |
-| 4   | No data processing agreements are on file with **Neon, Hetzner, or Cloudflare**. WorkOS is covered by an addendum that incorporates automatically; file a dated copy.                                                                                                                                                                                                                                                               | 9       |
+| 4   | No data processing agreements are on file with **Neon or Hetzner**. WorkOS and Cloudflare are each covered by a published addendum that incorporates by its own terms; file a dated copy of both.                                                                                                                                                                                                                                   | 9       |
 | 5   | No EU Article 27 representative is appointed.                                                                                                                                                                                                                                                                                                                                                                                       | 2       |
 | 6   | Controller's state of organisation, postal address, and governing supervisory authority are unfilled.                                                                                                                                                                                                                                                                                                                               | 2, 10   |
 | 7   | The US-access transfer mechanism for controller-side access is undecided. The WorkOS transfer itself is settled: SCCs Modules Two and Three plus the UK Addendum.                                                                                                                                                                                                                                                                   | 9       |
+| 7a  | **The Cloudflare transfer is disclosed but not proved.** Every request, including the IP addresses this policy classes as personal data, is decrypted at a non-EU point of presence by a US company. The safeguard is the SCCs inside Cloudflare's published DPA, incorporated by reference. Confirm which Cloudflare agreement this account is on, and file a dated copy. Section 9 states this rather than papering it.           | 9       |
+| 7b  | **There is no technical fix within reach for 7a.** Confining TLS termination to the EU needs Cloudflare Regional Services, an Enterprise add-on. Decide whether to buy it, move the edge, or publish the position as it stands.                                                                                                                                                                                                     | 9       |
 | 8   | ~~Expired `idempotency_keys` and `connect_states` rows are never deleted.~~ **Resolved:** `sweep:expired` deletes both an hour past expiry. Scheduling it is item 1.                                                                                                                                                                                                                                                                | 8       |
 | 9   | ~~The sign-in methods sentence disagrees with `docs/PLAN.md` section 4.~~ **Resolved:** `docs/PLAN.md` section 4a records magic link only, and a test and a database constraint enforce it. `legal/terms-of-service.md` section 4 still described social sign-in when this row was first marked resolved, and was corrected on 2026-07-29; check the sibling documents, not only the plan, before closing a row of this kind again. | 3.1     |
 | 10  | The WorkOS subprocessor list has not been read and summarized.                                                                                                                                                                                                                                                                                                                                                                      | 9       |
