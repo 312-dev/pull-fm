@@ -71,6 +71,10 @@ import {
 import { errors } from "../lib/errors.js";
 import { decodeCursor, encodeCursor } from "../lib/cursor.js";
 import type { SigningKeys } from "../lib/keys.js";
+import {
+  CanonicalArtistLookupGate,
+  type ArtistLookupGate,
+} from "./artist-lookup-gate.js";
 import type { ConnectionService } from "./connections.js";
 import type { UpstreamBundle } from "./upstream.js";
 
@@ -215,6 +219,15 @@ export class DiscoveryService {
   readonly #upstream: UpstreamBundle;
   readonly #connections: ConnectionService;
   readonly #keys: SigningKeys;
+  /**
+   * Decides whether an artist MBID is worth an upstream similarity call.
+   *
+   * Constructed here rather than injected because its two local probes are
+   * private to this class, and because there is exactly one correct wiring of
+   * it: a gate that consulted a different cache from the one the lookup uses
+   * would decline calls whose answers were already warm.
+   */
+  readonly #artistGate: ArtistLookupGate;
 
   constructor(
     upstream: UpstreamBundle,
@@ -224,6 +237,16 @@ export class DiscoveryService {
     this.#upstream = upstream;
     this.#connections = connections;
     this.#keys = keys;
+    this.#artistGate = new CanonicalArtistLookupGate({
+      canonical: upstream.canonical,
+      // "Anything this product has already resolved or learned." Both probes
+      // are indexed single-row reads, and both are the SAME reads the lookup
+      // itself would perform, so a warm artist can never be declined.
+      knownLocally: async (mbid) => {
+        if ((await this.#peekArtist(mbid)) !== null) return true;
+        return (await this.#nameFromCrosswalk("artist", mbid)) !== null;
+      },
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -941,14 +964,36 @@ export class DiscoveryService {
     };
   }
 
-  /** labs.api similar artists. Returns [] on any failure, by its own contract. */
+  /**
+   * labs.api similar artists. Returns [] on any failure, by its own contract.
+   *
+   * THE EXISTENCE CHECK LIVES INSIDE `load`, AND THAT PLACEMENT IS THE DESIGN.
+   * `CachedUpstream.fetch` calls `load` only on a miss, so:
+   *
+   *   - a warm entry is served without the gate ever running, which makes it
+   *     impossible for the gate to turn a cached answer into an empty one;
+   *   - a declined lookup throws before the provider is touched, so `#fill`
+   *     never reaches `store.set` and NO NEGATIVE IS CACHED. A dump loaded an
+   *     hour later changes the answer immediately rather than after a seven-day
+   *     TTL of wrong empties;
+   *   - an EXPIRED entry still falls back to its stale payload, because a
+   *     declined call takes the same path as a failed one.
+   *
+   * The route sees `[]`, which is what it already saw for an artist labs does
+   * not know. Nothing on the wire changes; the upstream call does not happen.
+   */
   async #labsSimilarArtists(artistMbid: string): Promise<SimilarArtistRef[]> {
     try {
       const result = await this.#upstream.cache.fetch<SimilarArtistRef[]>({
         provider: "listenbrainz",
         key: `labs-similar:${artistMbid}`,
         ttlSeconds: TTL.labsSimilar,
-        load: () => this.#upstream.listenbrainz.similarArtists(artistMbid),
+        load: async () => {
+          if (!(await this.#artistGate.worthAsking(artistMbid))) {
+            throw NOT_WORTH_ASKING;
+          }
+          return this.#upstream.listenbrainz.similarArtists(artistMbid);
+        },
         parse: (payload) =>
           asArray(payload).flatMap((row) => {
             const name = stringField(row, "name");
@@ -1218,6 +1263,19 @@ const LISTENBRAINZ_ATTRIBUTION: Attribution = {
 };
 
 const NO_CONNECTION = new Error("no ListenBrainz connection for this subject");
+
+/**
+ * Signals "do not spend an upstream call on this identifier".
+ *
+ * A thrown sentinel rather than a return value, because the decision has to
+ * happen inside `CachedUpstream.fetch`'s `load` closure - the only place that
+ * runs on a miss and not on a hit - and `load` must produce a payload or fail.
+ * Failing is the correct shape anyway: `#fill` then writes nothing, so a
+ * declined lookup leaves no trace to invalidate later.
+ */
+const NOT_WORTH_ASKING = new Error(
+  "artist mbid is not known to any local record; declining the upstream call",
+);
 
 function attributionOf(a: Attribution): Attribution {
   return { source: a.source, text: a.text };
