@@ -61,8 +61,14 @@ const schema = z.object({
 
   HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().int().positive().max(65535).default(3000),
+  /**
+   * `silent` is included because the test suites need it. It is deliberately
+   * NOT usable in production: the cross-field check in loadConfig rejects it
+   * there, because a service that logs nothing cannot be investigated and Gate
+   * 3 requires 24 hours of logs to grep to zero, which presupposes logs.
+   */
   LOG_LEVEL: z
-    .enum(["fatal", "error", "warn", "info", "debug", "trace"])
+    .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
 
   DATABASE_URL: z.string().url(),
@@ -97,8 +103,93 @@ const schema = z.object({
   CREDENTIAL_KEKS: kekSetSchema,
   CREDENTIAL_ACTIVE_KEK_ID: z.string().min(1),
 
+  /**
+   * Public origin this API is reached at, e.g. https://api-staging.pull.fm.
+   *
+   * Used to build the connect-flow callback URL handed to Last.fm and the
+   * single-use export download link. Both are compared for exact equality on
+   * the way back in, so a wrong value fails closed rather than silently
+   * accepting a foreign redirect target.
+   */
+  PUBLIC_BASE_URL: z.string().url().default("http://127.0.0.1:3000"),
+
   WORKOS_CLIENT_ID: z.string().min(1),
   WORKOS_API_KEY: z.string().min(1),
+
+  /**
+   * Shared secret for `POST /v1/webhooks/workos` signature verification.
+   *
+   * Optional in configuration but never optional in effect: without it the
+   * webhook route refuses every request with 503, and in production startup
+   * fails outright (see the cross-field check in loadConfig). An unverified
+   * webhook handler is an unauthenticated mass-deletion endpoint, because
+   * `user.deleted` cascades through the credential vault. See THREAT-MODEL T20.
+   */
+  WORKOS_WEBHOOK_SECRET: z.string().min(1).optional(),
+
+  /**
+   * Override for the WorkOS API origin and the JWKS endpoint.
+   *
+   * These exist for one reason: the BOLA and auth suites need to mint tokens
+   * against a JWKS they control, so the authorization code under test runs
+   * completely unmodified while only the identity provider is substituted
+   * (security/BOLA-TESTING.md section 3, option B).
+   *
+   * That seam is a total authentication bypass if it is ever reachable in
+   * production, so it is closed by three independent controls, two of which
+   * live in loadConfig below:
+   *
+   *   1. In production both values are IGNORED and derived from
+   *      WORKOS_CLIENT_ID, so they are not operator-settable at all.
+   *   2. A startup assertion refuses to boot if the effective host is not the
+   *      WorkOS host. Fail closed at boot, not at first request.
+   *   3. A test asserts the assertion, so deleting it fails CI.
+   */
+  WORKOS_API_BASE_URL: z.string().url().default("https://api.workos.com"),
+  WORKOS_JWKS_URL: z.string().url().optional(),
+
+  /** Serves the self-hosted OpenAPI browser at /docs. */
+  DOCS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+
+  /**
+   * Personal API tokens.
+   *
+   * A cap per user exists because an uncapped list of long-lived credentials is
+   * how a compromised account keeps its foothold after the password (here, the
+   * social identity) is recovered.
+   */
+  API_TOKEN_MAX_PER_USER: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(100)
+    .default(10),
+  API_TOKEN_DEFAULT_TTL_DAYS: z.coerce.number().int().positive().default(90),
+  API_TOKEN_MAX_TTL_DAYS: z.coerce.number().int().positive().default(365),
+  /** Default per-token requests per minute, counted in the quota Redis. */
+  API_TOKEN_DEFAULT_RATE_LIMIT: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(600)
+    .default(60),
+
+  /**
+   * How recently the caller must have authenticated for DELETE /v1/me.
+   *
+   * Account deletion is the only irreversible operation in the API, so it
+   * requires a proof of recent authentication rather than merely a valid
+   * session (THREAT-MODEL M16).
+   */
+  DELETE_FRESH_AUTH_MAX_AGE_S: z.coerce.number().int().positive().default(900),
+
+  /** Minimum gap between two export requests by the same subject (M17/API4). */
+  EXPORT_COOLDOWN_S: z.coerce.number().int().positive().default(300),
+  /** Lifetime of the single-use export download link. */
+  EXPORT_LINK_TTL_S: z.coerce.number().int().positive().default(600),
 
   /**
    * MusicBrainz requires a descriptive User-Agent identifying the application
@@ -131,6 +222,17 @@ const schema = z.object({
         .filter(Boolean),
     ),
 
+  /**
+   * Global per-IP request ceiling.
+   *
+   * A floor, not the real control: personal API tokens carry their own budget
+   * and the routes that spend metered upstream quota get tighter limits. Kept
+   * configurable because the right value differs between a staging box running
+   * a load suite and a production node behind Cloudflare.
+   */
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
+  RATE_LIMIT_WINDOW: z.string().default("1 minute"),
+
   /** Serves 503 with Retry-After on every route except health. */
   MAINTENANCE_MODE: z
     .enum(["true", "false"])
@@ -143,6 +245,20 @@ export type RawConfig = z.infer<typeof schema>;
 export interface Config extends Omit<RawConfig, "CREDENTIAL_KEKS"> {
   readonly CREDENTIAL_KEKS: ReadonlyMap<string, string>;
   readonly isProduction: boolean;
+  /** Effective JWKS endpoint after the production derivation below. */
+  readonly workosJwksUrl: string;
+  /** Effective WorkOS API origin after the production derivation below. */
+  readonly workosApiBaseUrl: string;
+  /** Token prefix for this deployment: `pfm_live` or `pfm_test`. */
+  readonly apiTokenPrefix: "pfm_live" | "pfm_test";
+}
+
+/** The only host WorkOS identity material may ever be fetched from. */
+export const WORKOS_HOST = "api.workos.com";
+
+/** JWKS endpoint for a WorkOS client id. Derived, never configured, in prod. */
+export function workosJwksUrlFor(clientId: string): string {
+  return `https://${WORKOS_HOST}/sso/jwks/${encodeURIComponent(clientId)}`;
 }
 
 /**
@@ -181,5 +297,61 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
-  return { ...cfg, isProduction: cfg.DEPLOY_ENV === "production" };
+  const isProduction =
+    cfg.DEPLOY_ENV === "production" || cfg.NODE_ENV === "production";
+
+  // --- The JWKS seam, closed ------------------------------------------------
+  // Control 2 of three (security/BOLA-TESTING.md section 3): in production the
+  // identity endpoints are DERIVED from the WorkOS client id, which is already
+  // required configuration, so there is no operator-settable value to get
+  // wrong. An override present in the environment is ignored rather than
+  // honoured, because honouring it is a complete authentication bypass.
+  const workosJwksUrl = isProduction
+    ? workosJwksUrlFor(cfg.WORKOS_CLIENT_ID)
+    : (cfg.WORKOS_JWKS_URL ?? workosJwksUrlFor(cfg.WORKOS_CLIENT_ID));
+  const workosApiBaseUrl = isProduction
+    ? `https://${WORKOS_HOST}`
+    : cfg.WORKOS_API_BASE_URL;
+
+  // Control 1 of three: fail closed at boot rather than at first request. If
+  // the derivation above were ever weakened, this still refuses to start.
+  if (isProduction) {
+    for (const [name, value] of [
+      ["WORKOS_JWKS_URL", workosJwksUrl],
+      ["WORKOS_API_BASE_URL", workosApiBaseUrl],
+    ] as const) {
+      const url = new URL(value);
+      if (url.protocol !== "https:" || url.hostname !== WORKOS_HOST) {
+        throw new Error(
+          `invalid configuration:\n  ${name}: must be https://${WORKOS_HOST} in production, got "${value}". ` +
+            "A non-WorkOS identity endpoint in production is a complete authentication bypass.",
+        );
+      }
+    }
+
+    if (cfg.LOG_LEVEL === "silent") {
+      throw new Error(
+        "invalid configuration:\n  LOG_LEVEL: silent is not permitted in production. " +
+          "Gate 3 requires 24 hours of logs to grep to zero, which presupposes logs.",
+      );
+    }
+
+    // An unverified WorkOS webhook is an unauthenticated mass-deletion
+    // endpoint (THREAT-MODEL T20), so production refuses to start without the
+    // signing secret rather than serving a route that cannot be trusted.
+    if (cfg.WORKOS_WEBHOOK_SECRET === undefined) {
+      throw new Error(
+        "invalid configuration:\n  WORKOS_WEBHOOK_SECRET: required in production. " +
+          "Without it POST /v1/webhooks/workos cannot verify signatures, and it handles user.deleted.",
+      );
+    }
+  }
+
+  return {
+    ...cfg,
+    isProduction,
+    workosJwksUrl,
+    workosApiBaseUrl,
+    apiTokenPrefix: cfg.DEPLOY_ENV === "production" ? "pfm_live" : "pfm_test",
+  };
 }

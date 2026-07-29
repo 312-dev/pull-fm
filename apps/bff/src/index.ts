@@ -8,13 +8,27 @@
 
 import { loadConfig } from "./config.js";
 import { buildServer } from "./server.js";
+import { buildServices, closeServices } from "./wiring.js";
 
 async function main(): Promise<void> {
   // Before the logger exists, so a configuration error prints plainly and the
   // process exits non-zero rather than starting up half-configured.
   const cfg = loadConfig();
 
-  const app = await buildServer(cfg);
+  // A bootstrap logger for the wiring phase. Replaced by the Fastify logger for
+  // everything after; this exists only so a construction-time failure is not
+  // silent.
+  const bootstrapLog = {
+    error: (obj: unknown, msg?: string) => {
+      console.error(msg ?? "error", obj);
+    },
+    warn: (obj: unknown, msg?: string) => {
+      console.warn(msg ?? "warning", obj);
+    },
+  };
+
+  const services = buildServices(cfg, bootstrapLog);
+  const app = await buildServer(cfg, { services });
 
   /**
    * Graceful shutdown.
@@ -38,8 +52,10 @@ async function main(): Promise<void> {
 
     app
       .close()
+      // Connection pools are closed after the server stops accepting, so an
+      // in-flight request is never handed a dead pool mid-transaction.
+      .then(() => closeServices(services))
       .then(() => {
-        app.log.info("shutdown complete");
         process.exit(0);
       })
       .catch((err: unknown) => {

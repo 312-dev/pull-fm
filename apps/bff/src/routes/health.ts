@@ -15,6 +15,8 @@
 
 import type { FastifyInstance } from "fastify";
 
+import { annotate } from "../lib/openapi.js";
+
 export interface HealthDeps {
   /** Returns true when Postgres answers a trivial query. */
   checkDatabase?: () => Promise<boolean>;
@@ -35,37 +37,77 @@ export async function registerHealthRoutes(
    * Liveness. Deliberately dependency-free and unlogged: it is polled every few
    * seconds and would otherwise dominate the logs.
    */
-  app.get("/healthz", { logLevel: "silent" }, () => ({
-    status: "ok",
-    uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-    // The commit actually serving traffic. A deploy pipeline that only reports
-    // its own exit code proves the deployer ran, not that the code shipped.
-    version: deps.version ?? "unknown",
-  }));
+  app.get(
+    "/healthz",
+    {
+      logLevel: "silent",
+      schema: {
+        operationId: "healthz",
+        summary: "Liveness. Never touches a dependency.",
+        tags: ["platform"],
+        response: {
+          200: {
+            type: "object",
+            properties: {
+              status: { type: "string" },
+              uptimeSeconds: { type: "integer" },
+              version: { type: "string" },
+            },
+            required: ["status", "version"],
+          },
+        },
+        ...annotate({ authz: "public", dast: "include" }),
+      },
+    },
+    () => ({
+      status: "ok",
+      uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+      // The commit actually serving traffic. A deploy pipeline that only
+      // reports its own exit code proves the deployer ran, not that the code
+      // shipped.
+      version: deps.version ?? "unknown",
+    }),
+  );
 
   /**
    * Readiness. Reports per-dependency status so a failure names the culprit
    * rather than requiring a log dive.
    */
-  app.get("/readyz", { logLevel: "silent" }, async (_req, reply) => {
-    const checks: Record<string, "ok" | "fail" | "skipped"> = {};
+  app.get(
+    "/readyz",
+    {
+      logLevel: "silent",
+      schema: {
+        operationId: "readyz",
+        summary: "Readiness. Checks dependencies.",
+        tags: ["platform"],
+        response: {
+          200: readinessSchema,
+          503: readinessSchema,
+        },
+        ...annotate({ authz: "public", dast: "include" }),
+      },
+    },
+    async (_req, reply) => {
+      const checks: Record<string, "ok" | "fail" | "skipped"> = {};
 
-    // Checks run concurrently: a serial readiness probe that waits on a hung
-    // database also delays the Redis answer, and the probe itself times out.
-    const [db, redis] = await Promise.all([
-      deps.checkDatabase ? safely(deps.checkDatabase) : Promise.resolve(null),
-      deps.checkRedis ? safely(deps.checkRedis) : Promise.resolve(null),
-    ]);
+      // Checks run concurrently: a serial readiness probe that waits on a hung
+      // database also delays the Redis answer, and the probe itself times out.
+      const [db, redis] = await Promise.all([
+        deps.checkDatabase ? safely(deps.checkDatabase) : Promise.resolve(null),
+        deps.checkRedis ? safely(deps.checkRedis) : Promise.resolve(null),
+      ]);
 
-    checks["database"] = db === null ? "skipped" : db ? "ok" : "fail";
-    checks["redis"] = redis === null ? "skipped" : redis ? "ok" : "fail";
+      checks["database"] = db === null ? "skipped" : db ? "ok" : "fail";
+      checks["redis"] = redis === null ? "skipped" : redis ? "ok" : "fail";
 
-    const ready = !Object.values(checks).includes("fail");
-    return reply.code(ready ? 200 : 503).send({
-      status: ready ? "ready" : "not_ready",
-      checks,
-    });
-  });
+      const ready = !Object.values(checks).includes("fail");
+      return reply.code(ready ? 200 : 503).send({
+        status: ready ? "ready" : "not_ready",
+        checks,
+      });
+    },
+  );
 
   /**
    * Prometheus scrape target.
@@ -74,16 +116,41 @@ export async function registerHealthRoutes(
    * exists now so the scrape config, dashboards, and alert rules can be written
    * and tested against a real endpoint rather than a promise.
    */
-  app.get("/metrics", { logLevel: "silent" }, async (_req, reply) => {
-    return reply
-      .type("text/plain; version=0.0.4")
-      .send(
-        "# HELP pullfm_build_info Build information.\n" +
-          "# TYPE pullfm_build_info gauge\n" +
-          'pullfm_build_info{version="0.0.0"} 1\n',
-      );
-  });
+  app.get(
+    "/metrics",
+    {
+      logLevel: "silent",
+      schema: {
+        operationId: "metrics",
+        summary: "Prometheus scrape target (must be unreachable from the edge)",
+        tags: ["platform"],
+        ...annotate({ authz: "system", dast: "include" }),
+      },
+    },
+    async (_req, reply) => {
+      return reply
+        .type("text/plain; version=0.0.4")
+        .send(
+          "# HELP pullfm_build_info Build information.\n" +
+            "# TYPE pullfm_build_info gauge\n" +
+            `pullfm_build_info{version="${deps.version ?? "unknown"}"} 1\n`,
+        );
+    },
+  );
 }
+
+/** Shared by the 200 and 503 readiness responses so they cannot drift apart. */
+const readinessSchema = {
+  type: "object",
+  properties: {
+    status: { type: "string", enum: ["ready", "not_ready"] },
+    checks: {
+      type: "object",
+      additionalProperties: { type: "string", enum: ["ok", "fail", "skipped"] },
+    },
+  },
+  required: ["status", "checks"],
+} as const;
 
 /** Runs a check, converting a throw or a hang into a clean false. */
 async function safely(check: () => Promise<boolean>): Promise<boolean> {
