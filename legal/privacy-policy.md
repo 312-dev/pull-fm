@@ -184,14 +184,14 @@ itself. The last-used IP is recorded at most once per minute per token.
 
 ### 3.5 Operational and security data
 
-| What                                                                                                                                                                                                                                            | Where                    | Why                                                                                                                                      |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Request logs: request id, method, path (**query string stripped**), response status, **your IP address**, and your user agent                                                                                                                   | application logs         | Debugging and abuse investigation. The query string is stripped because it can carry a search term or a credential.                      |
-| Web server access logs                                                                                                                                                                                                                          | nginx on the origin node | Same                                                                                                                                     |
-| An audit record of credential-affecting events: account deletion, export requested, export downloaded, sign-in callback, rejected webhook. Each holds an internal user id, the action, the outcome, non-secret context, and **your IP address** | `audit_log`              | So that a security incident produces a scoped, evidenced answer rather than a mass "rotate everything" notice                            |
-| A record that a deletion happened: the internal id of the deleted account, when it was requested and completed, and how many rows went                                                                                                          | `deletion_log`           | To prove erasure occurred, and to re-apply it if a backup is ever restored                                                               |
-| Short-lived rate-limit counters, an export cooldown counter, single-use export ticket claims, and session revocations                                                                                                                           | Redis                    | Abuse prevention and sign-out. Keys contain opaque identifiers; values expire between 60 seconds and the remaining life of your session. |
-| An idempotency record for each mutating request: your key, a hash of the request, and the response we returned                                                                                                                                  | `idempotency_keys`       | So a retry on a flaky mobile connection does not create a duplicate. **Expires after 24 hours.**                                         |
+| What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Where                    | Why                                                                                                                                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Request logs: request id, method, path (**query string stripped**), response status, **your IP address**, and your user agent                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | application logs         | Debugging and abuse investigation. The query string is stripped because it can carry a search term or a credential.                                                 |
+| Web server access logs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | nginx on the origin node | Same                                                                                                                                                                |
+| An audit record of credential-affecting events, from a closed list defined in [`../apps/bff/src/lib/audit.ts`](../apps/bff/src/lib/audit.ts): sign-in code requested, verified or failed; sign-in callback; session refreshed or revoked; profile updated; connection started, created, connected or deleted; personal API token created, rotated, revoked or used after expiry; export requested or downloaded; account deleted; deletion webhook accepted or rejected; unverified directory record reaped. Each holds an internal user id (or none, for the events that have no signed-in subject), the action, the outcome, non-secret context, and **your IP address** | `audit_log`              | So that a security incident produces a scoped, evidenced answer rather than a mass "rotate everything" notice                                                       |
+| A record that a deletion happened: the internal id of the deleted account, when it was requested and completed, and how many rows went                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | `deletion_log`           | To prove erasure occurred, and to re-apply it if a backup is ever restored                                                                                          |
+| Short-lived rate-limit counters, an export cooldown counter, single-use export ticket claims, and session revocations                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Redis                    | Abuse prevention and sign-out. Keys contain opaque identifiers; values expire between 60 seconds and the remaining life of your session.                            |
+| An idempotency record for each mutating request: your key, a hash of the request, and the response we returned                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `idempotency_keys`       | So a retry on a flaky mobile connection does not create a duplicate. **Stops being valid after 24 hours, and the row is deleted an hour after that.** See section 8 |
 
 **IP addresses are personal data and we treat them as such.** We keep them
 because a service that spends a third party's rate-limited quota cannot
@@ -331,27 +331,49 @@ cascade here, so an account deleted upstream does not leave orphaned data.
 
 ### What survives deletion, honestly
 
-| Survives                             | Contains                                                                                                                                                                                                      | Why                                                                                                                                                                     |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Deletion record** (`deletion_log`) | the internal id of the deleted account, timestamps, row counts                                                                                                                                                | To demonstrate erasure, and to re-apply it if a backup is restored                                                                                                      |
-| **Audit records** (`audit_log`)      | today: the internal id of the deleted account, the action, the outcome, and **the IP address** of the request. Intended: the same rows with the id replaced by an irreversible pseudonym and the IP truncated | Security evidence must survive the deletion it records, or a hostile deletion erases its own trail. Deleting an account is a plausible last step of an account takeover |
-| **Encrypted backups**                | your rows, as they were at backup time                                                                                                                                                                        | See below                                                                                                                                                               |
-| **Logs**                             | request id, internal id, IP, user agent - no email, no credential                                                                                                                                             | See section 8                                                                                                                                                           |
+| Survives                             | Contains                                                                                                                                                                                                                                                                    | Why                                                                                                                                                                     |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Deletion record** (`deletion_log`) | the internal id of the deleted account, timestamps, row counts                                                                                                                                                                                                              | To demonstrate erasure, and to re-apply it if a backup is restored                                                                                                      |
+| **Audit records** (`audit_log`)      | for the first 30 days after deletion: the internal id of the deleted account, the action, the outcome, and **the IP address** of the request. After that, the same rows with the id replaced by an irreversible random pseudonym and the IP truncated to its network prefix | Security evidence must survive the deletion it records, or a hostile deletion erases its own trail. Deleting an account is a plausible last step of an account takeover |
+| **Encrypted backups**                | your rows, as they were at backup time                                                                                                                                                                                                                                      | See below                                                                                                                                                               |
+| **Logs**                             | request id, internal id, IP, user agent - no email, no credential                                                                                                                                                                                                           | See section 8                                                                                                                                                           |
 
-`[OPEN]` **`audit_log` currently has no retention limit and is never purged.**
-That means an IP address linked to an internal account identifier persists
-indefinitely after the account is deleted. This is not defensible as written.
+**`audit_log` has a retention limit, and it is enforced by code rather than by
+intention.** Audit rows are kept, because a trail a user can erase by deleting
+their account is worthless in exactly the case it exists for, but the
+identifiers in them are removed after a bounded window:
 
-The fix is designed and specified in
-[`../docs/compliance/data-retention-policy.md`](../docs/compliance/data-retention-policy.md):
-audit rows are kept, but the identifiers in them are removed after a bounded
-window. The internal account id is replaced by a random pseudonym that exists
-nowhere else and cannot be reversed by anyone including us, and the IP address is
-truncated to its network prefix. Full-fidelity rows last 90 days, or 30 days
-after an account is deleted, whichever comes first; anonymized rows are hard
-deleted at 400 days. **That specification is not implemented yet.** Until it is,
-the true statement is the one above, and **this policy must not be published**
-with a retention promise the code does not keep.
+- The internal account id is replaced by a **random pseudonym**. It is a fresh
+  random UUID minted inside the database statement that applies it, once per
+  account per batch, and written **nowhere else**. There is no key, no pepper,
+  and no mapping table, so nobody, including us, can reverse it. A keyed hash
+  was considered and deliberately rejected: `deletion_log` permanently retains
+  the UUID of every deleted account, so anyone holding both a pepper and that
+  table could re-identify every anonymized row by brute force over a candidate
+  set of a few thousand. A random value has no such property.
+- The IP address is **truncated to its network prefix**: a `/24` for IPv4, a
+  `/48` for IPv6. The host part is overwritten in place and is not recorded
+  anywhere else.
+- Rows that never had a signed-in subject (a rejected webhook, a reaped
+  directory record, a failed sign-in attempt) carry no id to replace, so they
+  get **no pseudonym**; their IP is truncated on the same schedule.
+
+The windows: **90 days** at full fidelity, or **30 days** after the account is
+deleted, whichever comes first, then anonymized in place; **400 days** from the
+event, then hard deleted. The reasoning behind each number, and the
+legitimate-interest assessment for keeping the rows at all, is in
+[`../docs/compliance/data-retention-policy.md`](../docs/compliance/data-retention-policy.md).
+The mechanism is
+[`../apps/bff/src/services/audit-retention.ts`](../apps/bff/src/services/audit-retention.ts),
+run by `pnpm --filter @pull-fm/bff purge:audit`, and it is covered by
+integration tests against a real database that assert both what it must
+anonymize and what it must refuse to.
+
+`[OPEN]` **Nothing runs it on a schedule yet.** See the note at the end of
+section 8, which applies to every window stated in this section. Until a
+schedule exists, these are the windows the system applies **when the job is
+run**, not periods after which data has automatically gone, and this policy must
+not be published stating them without that qualification.
 
 ### Backups
 
@@ -364,37 +386,77 @@ accept, and it comes with three commitments that make it meaningful:
 1. Backups are **put beyond use**: encrypted at rest, access-controlled with a
    credential that is not the database credential, and never queried to serve
    live traffic.
-2. Retention is **bounded**: your data disappears from the backup set when the
-   last backup containing it ages out.
+2. Retention of the automatic history is **bounded**: your data disappears from
+   it when the last point in time containing it ages out.
 3. **A restore replays the deletions.** Before a restored system serves traffic,
    every account in the deletion record is re-deleted. That is what makes the
    erasure durable rather than merely apparent.
 4. A restored backup yields your connected-service credentials **only as
    ciphertext**, under a key that was never in the database.
 
-`[OPEN]` **The retention window has no number.** The database is now hosted by
-Neon, so the point-in-time-recovery window is a Neon project setting rather than
-something this repository configures, and it has not been recorded anywhere. This
-policy must state a specific window (for example "up to 30 days") before
-publication, and that number must be the one actually set on the project.
+**The point-in-time-recovery window is 6 hours.** The database is hosted by Neon,
+which keeps a copy-on-write history rather than periodic snapshots, and the
+window is set in this repository as `history_retention_seconds = 21600` in
+[`../infra/neon/variables.tf`](../infra/neon/variables.tf). Six hours is the
+ceiling on the plan in use, not a choice; raising it is a plan upgrade. In
+practice that means a deletion is beyond point-in-time recovery within six hours
+of being applied.
+
+`[OPEN]` **There is a second backup path that is not bounded by a number.**
+Alongside Neon's own history, logical dumps of the database are written to an
+object-storage bucket in an EU jurisdiction, taken by hand before a destructive
+operation rather than on a schedule. That bucket deliberately carries **no
+expiry rule**, because a dump taken to survive a destructive operation must
+outlive it. A dump therefore persists until it is deleted by hand, so commitment
+2 above does not apply to it. Before publication this needs either a stated
+maximum age for a dump, enforced by something, or a sentence here saying plainly
+that dumps are retained until manually deleted.
 
 ---
 
 ## 8. How long we keep things
 
-| Data                                                        | Retention                                                                                                                                                                                                                                                                                                                                    |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Account, connections, wishlist, API tokens                  | Until you delete them or delete your account                                                                                                                                                                                                                                                                                                 |
-| Idempotency records                                         | `[OPEN]` They stop being **valid** after 24 hours, which the schema does enforce, but nothing **deletes** them, so the row (including the cached response body) survives until you delete your account. A sweeper is specified in the retention policy and is not built.                                                                     |
-| In-flight connect state                                     | `[OPEN]` Same shape: expiry is checked on read, minutes after issue, but the row is never deleted.                                                                                                                                                                                                                                           |
-| Redis rate-limit counters, export cooldowns, export tickets | 60 seconds to about 11 minutes                                                                                                                                                                                                                                                                                                               |
-| Session revocations in Redis                                | Until the revoked session would have expired anyway                                                                                                                                                                                                                                                                                          |
-| Application and web server logs                             | `[OPEN]` **No retention period is configured anywhere in the system today.** Logs are intended to ship to a hosted log service, and no numeric retention exists in infrastructure code. A number must be set and stated here before publication; a policy that says "we keep logs for N days" while nothing enforces N is a false statement. |
-| Audit records                                               | `[OPEN]` **Indefinite today.** The intended position is 90 days at full fidelity, or 30 days after account deletion, then anonymized, then hard deleted at 400 days. See section 7.                                                                                                                                                          |
-| Personal API token last-used IP                             | `[OPEN]` Kept for the life of the token today. Intended: cleared 90 days after the token was last used.                                                                                                                                                                                                                                      |
-| Deletion records                                            | Indefinite. They hold an internal identifier and timestamps, and nothing else.                                                                                                                                                                                                                                                               |
-| Encrypted backups                                           | `[OPEN]` The point-in-time-recovery window, once configured. See section 7.                                                                                                                                                                                                                                                                  |
-| Identity data held by WorkOS                                | Deleted when you delete your account. On termination of our agreement with them, their addendum commits them to delete it other than backup and archival copies, which go on their own schedule. `[OPEN]` That schedule is not published.                                                                                                    |
+| Data                                                        | Retention                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Account, connections, wishlist, API tokens                  | Until you delete them or delete your account                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Idempotency records                                         | They stop being **valid** after 24 hours, which the schema enforces, and the row itself, including the cached response body, is **deleted an hour after that**. The extra hour is slack against clock skew, so the sweep can never remove a record an in-flight request still considers valid. Enforced by `sweep:expired`, whose intended cadence is hourly. **See the scheduling note below.**                                                                                                                                       |
+| In-flight connect state                                     | Same shape and the same job: `expires_at` is minutes after issue, and the row is deleted an hour past it. **See the scheduling note below.**                                                                                                                                                                                                                                                                                                                                                                                           |
+| Redis rate-limit counters, export cooldowns, export tickets | 60 seconds to about 11 minutes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Session revocations in Redis                                | Until the revoked session would have expired anyway                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Application and web server logs                             | `[OPEN]` **No retention period is configured anywhere in the system today.** Logs are intended to ship to a hosted log service, and no numeric retention exists in infrastructure code. A number must be set and stated here before publication; a policy that says "we keep logs for N days" while nothing enforces N is a false statement.                                                                                                                                                                                           |
+| Audit records                                               | **90 days** at full fidelity, or **30 days** after your account is deleted, whichever comes first. Past that the row is anonymized in place: the account id is replaced by an irreversible random pseudonym and the IP is truncated to a `/24` or `/48`. The anonymized row is hard deleted **400 days** from the event. Applied by `purge:audit`, whose intended cadence is daily. See section 7 and **the scheduling note below**.                                                                                                   |
+| Personal API token last-used IP                             | Cleared **90 days** after the token was last used, by setting the column to null in place. A token with an IP recorded but no recorded use is also cleared, because that state can only come from a bug and the safe resolution is to drop the IP. Applied by the same `purge:audit` job. **See the scheduling note below.**                                                                                                                                                                                                           |
+| Deletion records                                            | Indefinite. They hold an internal identifier and timestamps, and nothing else.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Encrypted backups                                           | **6 hours** for Neon's point-in-time-recovery history. `[OPEN]` Manually taken logical dumps in object storage have no expiry rule and persist until deleted by hand. See section 7.                                                                                                                                                                                                                                                                                                                                                   |
+| Identity data held by WorkOS                                | Deleted when you delete your account. Separately, an address that was sent a sign-in code but never verified leaves an **unverified record at WorkOS and no account here**; `reap:unverified` deletes those once they pass `AUTH_UNVERIFIED_REAP_AFTER_S`, and **the scheduling note below applies to that job too**. On termination of our agreement with WorkOS, their addendum commits them to delete identity data other than backup and archival copies, which go on their own schedule. `[OPEN]` That schedule is not published. |
+
+### `[OPEN]` The scheduling note, which qualifies five rows above
+
+**The retention jobs are written and tested. Nothing schedules them yet.** This
+has to be stated rather than glossed, because the difference between "a job
+exists" and "a job runs" is the whole difference between a retention commitment
+and a retention aspiration.
+
+What exists: `purge:audit` (the audit anonymization, the 400-day delete, and the
+token last-used-IP clearing), `sweep:expired` (the idempotency and connect-state
+deletion), and `reap:unverified` (the unverified WorkOS records). All three are
+real code with the windows above compiled in, all three are covered by
+integration tests that run against a real database, all three are safe to run
+twice and safe to interrupt, and all three refuse to run concurrently with
+themselves. Run any one of them and it enforces exactly the numbers in this
+table.
+
+What does not exist: **anything that invokes them.** They are `pnpm` entrypoints
+and nothing more. There is no cron entry, no systemd timer, no in-database
+schedule, and no in-process timer for any of them anywhere in this repository or
+in any deployed environment. The two scheduled units that do exist deploy the
+application and refresh an IP allowlist, and neither touches user data.
+
+So the honest statement of the current position is: **these are the retention
+windows the system applies each time the job is run, and the job is presently run
+by hand.** Until a schedule exists and is verified, this policy must not state
+the windows above as unqualified promises, and the `[OPEN]` marker stays.
+Closing it is a scheduler entry and a check that it fired, not new code.
 
 The full schedule, the reasoning behind each number, and the legitimate-interest
 assessment for the security audit trail are in
@@ -431,10 +493,12 @@ Two structural guarantees behind the EU rows, rather than a promise:
   non-EU Hetzner site: the location variable is validated against an EU-only
   list, so a US or APAC region is a hard error rather than a configuration slip.
 
-`[OPEN]` The Terraform in this repository still contains the earlier
-self-hosted-Postgres layout from before the move to Neon, and the staging stack
-is currently down. That is an inconsistency in the infrastructure code, not in
-this description, but the two must agree before publication.
+The infrastructure code now matches this description. The self-hosted-Postgres
+layout that predated the move to Neon is gone from the Terraform: the database is
+managed by a root of its own at [`../infra/neon/`](../infra/neon/), pinned to
+`aws-eu-central-1`, and the Hetzner node that used to run Postgres now runs only
+the cache. Staging is brought up for a test run and torn down afterwards by
+design, so "the staging stack is down" is its normal state and not a discrepancy.
 
 ### International transfers
 
@@ -634,18 +698,18 @@ Security: see [`../SECURITY.md`](../SECURITY.md)
 
 A checklist, so that nothing above is quietly published while still untrue.
 
-| #   | Item                                                                                                                                                                  | Section |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| 1   | `audit_log` retains an IP address linked to a deleted account, indefinitely. Designed in `docs/compliance/data-retention-policy.md`, **not implemented**.             | 7, 8    |
-| 2   | No log retention period is configured anywhere. A number must exist in the system before it is stated here.                                                           | 8       |
-| 3   | The Neon point-in-time-recovery window has no recorded value.                                                                                                         | 7, 8    |
-| 4   | No data processing agreements are on file with **Neon, Hetzner, or Cloudflare**. WorkOS is covered by an addendum that incorporates automatically; file a dated copy. | 9       |
-| 5   | No EU Article 27 representative is appointed.                                                                                                                         | 2       |
-| 6   | Controller's state of organisation, postal address, and governing supervisory authority are unfilled.                                                                 | 2, 10   |
-| 7   | The US-access transfer mechanism for controller-side access is undecided. The WorkOS transfer itself is settled: SCCs Modules Two and Three plus the UK Addendum.     | 9       |
-| 8   | Expired `idempotency_keys` and `connect_states` rows are never deleted, so section 8's retention line was wrong and is now marked open.                               | 8       |
-| 9   | The sign-in methods sentence must be checked against the launch configuration, and `docs/PLAN.md` section 4 disagrees with it today.                                  | 3.1     |
-| 10  | The WorkOS subprocessor list has not been read and summarized.                                                                                                        | 9       |
-| 11  | WorkOS may use personal data "to build or improve the quality of its services", and their addendum is silent on AI/ML training. Decide whether to seek a commitment.  | 3.1, 9  |
-| 12  | Terraform still describes the pre-Neon self-hosted database. Infrastructure and this document must agree.                                                             | 9       |
-| 13  | This document has not been reviewed by a lawyer.                                                                                                                      | all     |
+| #   | Item                                                                                                                                                                                                                                                                                   | Section |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| 1   | **The retention jobs are built and tested but nothing schedules them.** The windows in sections 7 and 8 are enforced on each run, and the job is presently run by hand. A schedule must exist, and be verified to have fired, before those windows are stated as unqualified promises. | 7, 8    |
+| 2   | No log retention period is configured anywhere. A number must exist in the system before it is stated here.                                                                                                                                                                            | 8       |
+| 3   | Manually taken logical dumps in object storage have no expiry rule and persist until deleted by hand. State a maximum age and enforce it, or say plainly that they are kept until deleted. The Neon PITR window itself is settled at 6 hours.                                          | 7, 8    |
+| 4   | No data processing agreements are on file with **Neon, Hetzner, or Cloudflare**. WorkOS is covered by an addendum that incorporates automatically; file a dated copy.                                                                                                                  | 9       |
+| 5   | No EU Article 27 representative is appointed.                                                                                                                                                                                                                                          | 2       |
+| 6   | Controller's state of organisation, postal address, and governing supervisory authority are unfilled.                                                                                                                                                                                  | 2, 10   |
+| 7   | The US-access transfer mechanism for controller-side access is undecided. The WorkOS transfer itself is settled: SCCs Modules Two and Three plus the UK Addendum.                                                                                                                      | 9       |
+| 8   | ~~Expired `idempotency_keys` and `connect_states` rows are never deleted.~~ **Resolved:** `sweep:expired` deletes both an hour past expiry. Scheduling it is item 1.                                                                                                                   | 8       |
+| 9   | ~~The sign-in methods sentence disagrees with `docs/PLAN.md` section 4.~~ **Resolved:** `docs/PLAN.md` section 4a records magic link only, and a test and a database constraint enforce it.                                                                                            | 3.1     |
+| 10  | The WorkOS subprocessor list has not been read and summarized.                                                                                                                                                                                                                         | 9       |
+| 11  | WorkOS may use personal data "to build or improve the quality of its services", and their addendum is silent on AI/ML training. Decide whether to seek a commitment.                                                                                                                   | 3.1, 9  |
+| 12  | ~~Terraform still describes the pre-Neon self-hosted database.~~ **Resolved:** the database is `infra/neon`, pinned to `aws-eu-central-1`; the former Postgres node is now cache only.                                                                                                 | 9       |
+| 13  | This document has not been reviewed by a lawyer.                                                                                                                                                                                                                                       | all     |

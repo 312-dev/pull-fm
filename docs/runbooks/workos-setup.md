@@ -34,7 +34,9 @@ a custom auth domain replaces it. Fixing that means the custom domain add-on at
 Auth has no such hosted-branding surface: the user sees an email and a code.
 Social login can be enabled later at any time with no migration, because nothing
 about a magic-link account forecloses linking a Google identity to the same email
-afterwards.
+afterwards. It is **deferred, not rejected**, and the decision plus what would
+have to become true to revisit it lives in
+[`docs/PLAN.md` section 4a](../PLAN.md).
 
 **Why passkeys are off, and this is the one that would be permanent.** WorkOS
 states plainly:
@@ -193,17 +195,23 @@ because one bounds the rate and the other bounds the duration:
 on directory pollution. Anyone retuning them upward needs to know that, and it
 is written into the code at both call sites for that reason.
 
-**The reaper** deletes records that were auto-created and never verified. It
-runs as a scheduled command, not inside the API:
+**The reaper** deletes records that were auto-created and never verified. It is a
+command, not something the API does on a request:
 
 ```
 pnpm --filter @pull-fm/bff reap:unverified
 ```
 
+**Nothing in this repository schedules it, and putting it on a schedule is a step
+of this runbook, not something that has already happened.** Until it is
+scheduled, `AUTH_UNVERIFIED_REAP_AFTER_S` bounds how long an unconsented record
+survives _a run_, not how long it exists. This is the same gap recorded as item 1
+of the appendix in `legal/privacy-policy.md`, which covers the other two
+retention jobs.
+
 Run it **hourly or daily**. The window is a duration, not a cadence, so running
 it more often reaps nothing extra; running it less often than daily means
-`AUTH_UNVERIFIED_REAP_AFTER_S` stops being an upper bound on how long an
-unconsented record exists.
+`AUTH_UNVERIFIED_REAP_AFTER_S` stops being an upper bound at all.
 
 It deletes a record only when **all four** hold, and the first is the one that
 makes it safe: WorkOS reports `email_verified` **strictly false**; the record is
@@ -231,10 +239,10 @@ in production you have the option to provide your own custom domain").
 
 For production, decide between two positions:
 
-| Option                                       | Cost                | Consequence                                                                                                                                                                                         |
-| -------------------------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Leave the default** (`workos-mail.com`)    | $0                  | Sign-in codes arrive from a domain the user has never heard of. Measurably worse deliverability and a phishing-shaped first impression, on the one email the product cannot afford to have filtered |
-| **Custom email domain** (`no-reply@pull.fm`) | Add-on, `[CONFIRM]` | Sign-in codes come from our own domain                                                                                                                                                              |
+| Option                                       | Cost                                      | Consequence                                                                                                                                                                                         |
+| -------------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Leave the default** (`workos-mail.com`)    | $0                                        | Sign-in codes arrive from a domain the user has never heard of. Measurably worse deliverability and a phishing-shaped first impression, on the one email the product cannot afford to have filtered |
+| **Custom email domain** (`no-reply@pull.fm`) | Paid add-on. Price `[CONFIRM]`, see below | Sign-in codes come from our own domain                                                                                                                                                              |
 
 To configure the custom email domain: dashboard **Domains** section, in the
 **production** environment, add the domain, create the **3 CNAME records** WorkOS
@@ -243,11 +251,19 @@ displays with the DNS provider (Cloudflare, in the `pull.fm` zone), then click
 immediately. Once verified, authentication emails are sent from
 `no-reply@pull.fm`.
 
-`[CONFIRM]` whether the custom **email** domain is included in the plan or is
-part of the $99/mo custom-domain add-on. WorkOS's pricing page lists a single
-"$99/mo" custom domain line and the email-domain documentation does not restate
-it. Do not assume it is free, and do not assume it is the same purchase as the
-AuthKit auth domain. Ask WorkOS before budgeting.
+**It is not free.** Re-checked against the live documentation on 2026-07-29:
+`workos.com/docs/custom-domains` lists **four** custom domain types (email,
+AuthKit, Admin Portal, Authentication API) and says of the feature as a whole,
+"This is a paid service, for which you can find additional details on our pricing
+page". So a custom email domain is a paid add-on, and the "included in the plan"
+half of the old question is answered: it is not.
+
+`[CONFIRM]` **whether all four domain types are one $99/mo purchase or $99/mo
+each.** `workos.com/pricing` lists exactly one "Custom domain $99/mo" line and
+does not say which of the four it buys; the email-domain page states no price at
+all. The two readings differ by $99/mo on a project whose entire target run rate
+is about that, so this is worth an email to WorkOS rather than an assumption. Do
+not budget a number until they answer.
 
 Because Magic Auth is the **only** sign-in method at launch, email deliverability
 is not a polish item, it is the availability of the login. If the default sender
@@ -337,12 +353,12 @@ fresh WorkOS environment.
 
 ## 9. What this costs
 
-| Item                      | Cost                                                                                                       |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| AuthKit / User Management | **$0.** WorkOS prices the first 1M monthly active users free                                               |
-| Custom domain add-on      | $99/mo. **Not purchased.** See section 0                                                                   |
-| Audit Logs product        | $99/mo per million events. **Not purchased**, and not needed: our audit trail is our own `audit_log` table |
-| Radar (fraud protection)  | First 1,000 checks free, then $100/mo per 50,000. Not enabled                                              |
+| Item                      | Cost                                                                                                                               |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| AuthKit / User Management | **$0.** WorkOS prices the first 1M monthly active users free                                                                       |
+| Custom domain add-on      | $99/mo. **Not purchased.** See section 0. Whether a custom email domain is that same $99 or a second one is `[CONFIRM]`, section 5 |
+| Audit Logs product        | $99/mo per million events. **Not purchased**, and not needed: our audit trail is our own `audit_log` table                         |
+| Radar (fraud protection)  | First 1,000 checks free, then $100/mo per 50,000. Not enabled                                                                      |
 
 ## 10. Sources
 
@@ -356,7 +372,7 @@ live documentation on **2026-07-29**.
 | Magic Auth enabled in the **Authentication** section; 10 minute code expiry                                                        | `workos.com/docs/user-management/magic-auth`                               |
 | `magic_auth/send` auto-creates an unverified user and returns 200 for an unknown address                                           | **Live staging API probe, 2026-07-29.** Not documented; see section 4a     |
 | Passkeys enabled in the **Authentication** section; domain binding quotes                                                          | `workos.com/docs/authkit/passkeys`                                         |
-| Custom domains are production-only; four domain types                                                                              | `workos.com/docs/custom-domains`                                           |
+| Custom domains are production-only; four domain types (email, AuthKit, Admin Portal, Authentication API); "This is a paid service" | `workos.com/docs/custom-domains`                                           |
 | **Domains** section, 3 CNAME records, **Verify now**, 72 hour retry, `workos-mail.com` / `workos.dev` defaults, `no-reply@` result | `workos.com/docs/custom-domains/email`                                     |
 | Google consent screen shows WorkOS branding by default; custom domain yields a new redirect URI                                    | `workos.com/docs/integrations/google-oauth`                                |
 | First 1M MAUs free; custom domain $99/mo; Audit Logs and Radar pricing                                                             | `workos.com/pricing`                                                       |
@@ -367,12 +383,22 @@ Client ID"). It is the developer **API Keys** page in the dashboard. Correct thi
 line the first time someone runs the runbook.
 
 `[CONFIRM]` Whether a custom **email** domain is billed under the same $99/mo
-custom-domain add-on as the AuthKit auth domain.
+custom-domain add-on as the AuthKit auth domain, or as a second one. Narrowed but
+not closed against the live documentation on 2026-07-29: custom domains are
+confirmed to be a paid service, and the pricing page lists one $99/mo line
+against four domain types without saying which. Full detail in section 5.
 
-**Conflict to resolve, not a documentation error:** `docs/PLAN.md` section 4
-records the auth decision as "Google + Apple OAuth and magic-link only", and
-`legal/privacy-policy.md` section 3.1 describes sign-in with Google, Apple, or a
-magic link. This runbook configures **magic link only** at launch. One of the
-three has to move. The privacy policy is the one that must be right on the day it
-is published, because it is a statement of fact to users about what identity data
-we receive.
+**The sign-in set is settled: magic link only.** The conflict this runbook used
+to record is resolved.
+[`docs/PLAN.md` section 4a](../PLAN.md) carries the full reasoning, supersedes
+the earlier "Google + Apple OAuth and magic-link only" wording in section 4, and
+is the place to argue with the decision rather than here.
+`legal/privacy-policy.md` section 3.1 agrees, and always did.
+
+Read section 4a before enabling anything in the **Authentication** dashboard
+section. It is enforced by three independent controls, not just written down: a
+test that fails if any password, social, passkey or SSO route is ever registered,
+the `users_auth_method_chk` constraint in
+`packages/db/migrations/0005_magic_auth_identity.sql`, and the route and service
+headers. Adding a sign-in method means changing that section, a test, and a
+migration, which is the intended cost.
