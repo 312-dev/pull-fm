@@ -8,23 +8,26 @@ bucket = "pull-fm-tfstate"
 key    = "neon/terraform.tfstate"
 region = "auto"
 
-# THE `.eu.` FORM DOES NOT FIND THIS BUCKET. Verified 2026-07-29: an R2
-# jurisdiction endpoint only lists buckets created in that jurisdiction, and
-# `pull-fm-tfstate` is NOT in the EU jurisdiction, despite
-# infra/terraform/README.md documenting `wrangler r2 bucket create
-# pull-fm-tfstate --jurisdiction eu`. The EU endpoint returns only
-# `pull-fm-backups-staging`, which is correctly EU-pinned.
+# NOTE THE ABSENCE OF `.eu.` HERE. It is deliberate and this example used to be
+# wrong about it.
 #
-# The live infra/terraform/envs/staging/backend.hcl already uses the non-EU form
-# below, so this example has been disagreeing with the only working
-# configuration in the repository.
+# An R2 jurisdiction endpoint only sees buckets created in that jurisdiction, so
+# the two forms are not interchangeable: the wrong one fails at `terraform init`
+# with a missing-bucket error rather than falling back. Verified 2026-07-29 by
+# enumerating both endpoints with the state credential:
 #
-# Left as a finding rather than fixed silently: the resolution is either to
-# accept a non-EU state bucket (state holds infrastructure metadata and the
-# database credential, not user personal data, so this is not the same GDPR
-# question the backups bucket answers) or to recreate it with `--jurisdiction
-# eu` and migrate the objects. Tracked in security/accepted-risks.md,
-# PULLFM-RISK-008.
+#   https://<account>.r2.cloudflarestorage.com      -> pull-fm-tfstate
+#   https://<account>.eu.r2.cloudflarestorage.com   -> pull-fm-backups-staging
+#
+# So `pull-fm-tfstate` is NOT EU-pinned, even though infra/terraform/README.md
+# documented creating it with `--jurisdiction eu`. Anybody following the runbook
+# with the old `.eu.` value could not init. The backups bucket, which is the one
+# holding actual user data, IS correctly EU-pinned by modules/backup-storage.
+#
+# Whether the state bucket should be recreated in the EU jurisdiction to match
+# the residency posture is an open decision, not a settled one: see
+# PULLFM-RISK-010 in security/accepted-risks.md. Do not recreate it casually,
+# because it holds live state.
 endpoints = {
   s3 = "https://REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
 }

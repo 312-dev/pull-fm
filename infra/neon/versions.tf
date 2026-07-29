@@ -51,8 +51,16 @@ terraform {
   # `connection_uri` attribute land in state in plaintext. That is a property of
   # the provider and cannot be configured away. The state bucket is therefore
   # the trust boundary for the production database credential, which is why it
-  # is a separate R2 token from the environment credentials and why object
-  # versioning is on. See README.md, "What is in the state file".
+  # uses a separate R2 token from the environment credentials.
+  #
+  # THIS COMMENT USED TO END "and why object versioning is on". R2 does not
+  # implement object versioning: PutBucketVersioning and GetBucketVersioning are
+  # both unimplemented in Cloudflare's S3 compatibility matrix. There is no undo
+  # for a write to the state object, so ALWAYS take a verified snapshot first:
+  #
+  #   infra/lib/tfstate-snapshot.sh snapshot infra/neon
+  #
+  # See README.md, "What is in the state file", and PULLFM-RISK-008.
   backend "s3" {
     key = "neon/terraform.tfstate"
   }

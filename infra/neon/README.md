@@ -101,15 +101,31 @@ Consequences that follow from that, rather than opinions about it:
 - The R2 state bucket is the trust boundary for the production database
   credential. It uses a **separate** R2 token from the environment credentials so
   state stays readable if an environment credential is revoked mid-incident.
-- **Object versioning is OFF, and earlier revisions of this file said it was on.**
-  Probed on 2026-07-29: `GetBucketVersioning` returns an empty configuration at
-  exit 0, and `head-object` on the live state object returns no `VersionId`.
-  Two consequences pull in opposite directions and both are real. Recovery is
-  worse, because a corrupted state write cannot be rolled back to a previous
-  object and the rollback procedure in the runbook does not currently work.
-  Credential hygiene is better, because there is no historical state object
-  quietly holding a superseded password. Turning versioning on is the right call
-  and reinstates the first trade-off; it is tracked in `PULLFM-RISK-008`.
+  That token turns out to be account-scoped rather than bucket-scoped, so it also
+  reaches the backups bucket; tracked as `PULLFM-RISK-009`.
+- **R2 DOES NOT SUPPORT OBJECT VERSIONING, and earlier revisions of this file
+  said it was enabled.** This is a platform limitation, not a setting nobody
+  turned on. Cloudflare's S3 compatibility matrix lists `PutBucketVersioning` and
+  `GetBucketVersioning` as unimplemented, and does not list `ListObjectVersions`
+  at all.
+
+  The reason the earlier claim survived review is worth keeping, because it is
+  the trap: `aws s3api get-bucket-versioning` against R2 returns an **empty
+  configuration at exit 0**, whereas `get-bucket-policy` returns an explicit
+  `NotImplemented`. In S3 an empty versioning configuration means "never
+  enabled", so one unsupported API says no by erroring and the other says no by
+  shrugging. Only the first is noticeable.
+
+  Two consequences, and they pull in opposite directions. Recovery is worse:
+  restoring a previous version of the state object was documented in three places
+  as the rollback for a bad apply and has never been possible. Credential hygiene
+  is better: there is no historical state object quietly holding a superseded
+  database password, so a rotation genuinely retires the old credential.
+
+  The rollback is replaced by verified pre-apply snapshots
+  (`infra/lib/tfstate-snapshot.sh`), which are the same idea implemented with
+  APIs R2 actually has. Tracked in `PULLFM-RISK-008`.
+
 - A plan file must never be committed or attached to a public pull request.
   `tfplan` and `*.tfplan` are gitignored.
 
@@ -274,10 +290,13 @@ upgrade as the retirement condition. The least-privilege `pullfm_app` role is th
 main compensating control: it does not narrow who can reach the endpoint, it
 narrows what reaching it is worth.
 
-The state file is registered separately as **`PULLFM-RISK-008`**. Note that its
-review notes carry an open finding: object versioning on `pull-fm-tfstate` is
-documented here and in two other places as being on, and probing the bucket on
-2026-07-29 says it is not.
+Three further risks come from where the state lives rather than from Neon:
+
+| Risk              | What                                                                         |
+| ----------------- | ---------------------------------------------------------------------------- |
+| `PULLFM-RISK-008` | The database password is plaintext in state, and R2 cannot version objects   |
+| `PULLFM-RISK-009` | The state R2 key is account-scoped, so it also reaches the backups bucket    |
+| `PULLFM-RISK-010` | `pull-fm-tfstate` is not in the EU jurisdiction the residency posture claims |
 
 ## What this configuration does not manage
 

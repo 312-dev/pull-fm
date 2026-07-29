@@ -190,11 +190,38 @@ bucket cannot store its state in that bucket. The order that was followed, and
 that a fresh environment would repeat:
 
 1. Create the state bucket once, by hand:
+
    ```bash
-   wrangler r2 bucket create pull-fm-tfstate --jurisdiction eu
+   wrangler r2 bucket create pull-fm-tfstate
    ```
-   Turn on **object versioning**. State is the only artifact in this project that
-   cannot be rebuilt from this repository.
+
+   **Do not add `--jurisdiction eu` here, and do not believe an older revision of
+   this file that did.** The live `pull-fm-tfstate` is not in the EU
+   jurisdiction, verified on 2026-07-29 by enumerating both endpoints: the
+   default endpoint returns `pull-fm-tfstate` and the EU endpoint returns only
+   `pull-fm-backups-staging`. A jurisdiction endpoint only lists buckets created
+   in that jurisdiction, so the two forms are not interchangeable and the wrong
+   one fails at `terraform init` rather than falling back. Whether the bucket
+   _should_ be recreated in the EU jurisdiction is an open decision recorded as
+   `PULLFM-RISK-010`; the backups bucket, which holds actual user data, is
+   already EU-pinned by `modules/backup-storage`.
+
+   **There is no object versioning to turn on.** R2 does not implement it.
+   Cloudflare's S3 compatibility matrix lists `PutBucketVersioning` and
+   `GetBucketVersioning` as unimplemented and does not list `ListObjectVersions`
+   at all. State is still the only artifact in this project that cannot be
+   rebuilt from this repository, so it is protected by explicit pre-apply
+   snapshots instead:
+
+   ```bash
+   infra/lib/tfstate-snapshot.sh snapshot infra/neon      # before every apply
+   ```
+
+   That copies the live state to a timestamped key, reads it back, compares
+   digests, and exits non-zero if the copy cannot be verified, so a failed
+   snapshot stops the apply rather than being discovered during a recovery. See
+   the header of that script and `PULLFM-RISK-008`.
+
 2. Create an R2 API token for the state bucket and record it in 1Password as
    `pull-fm/infra/R2_TFSTATE`. Kept separate from the environment tokens on
    purpose: state must stay readable even if an environment credential is

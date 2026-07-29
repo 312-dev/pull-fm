@@ -277,8 +277,16 @@ That is the worst correlated failure in the system, because the thing you would
 use to recover (state and backups) is inside the thing that failed.
 
 **Mitigations that exist:** hardware-key MFA; tokens scoped to the minimum zone
-and bucket; object versioning on the state bucket; backup objects encrypted by
-pgBackRest so bucket access alone yields ciphertext.
+and bucket; verified pre-apply state snapshots
+(`infra/lib/tfstate-snapshot.sh`); backup objects encrypted by pgBackRest so
+bucket access alone yields ciphertext.
+
+**A mitigation that was listed here and never existed:** object versioning on
+the state bucket. R2 does not implement it, so it was never a control. The
+snapshot script replaces it for the bad-apply case, and only for that case:
+snapshots live in the same bucket under the same credential, so they do nothing
+about the correlated failure this section is actually about. The off-Cloudflare
+gap below therefore covers state as well as backups, not just backups.
 
 **Mitigation that does not exist:** an off-Cloudflare copy of the backup
 repository. `[OPEN]` For a service with real user data, backups should not live

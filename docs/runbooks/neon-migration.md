@@ -234,9 +234,18 @@ cd infra/neon
 source ../lib/credentials.sh && pullfm_load_credentials neon
 cp backend.hcl.example backend.hcl        # fill in the R2 endpoint
 terraform init -backend-config=backend.hcl
+
+../lib/tfstate-snapshot.sh snapshot .     # verified state backup, BEFORE the apply
+
 terraform plan -out=tfplan                # READ IT. Expect 0 to destroy.
 terraform apply tfplan
 ```
+
+The snapshot step is not optional and is not ceremony. R2 cannot version objects
+(section 7.1), so this is the only rollback that exists for a bad apply. It exits
+non-zero if the copy cannot be read back, which stops the apply. On the very
+first apply it prints "nothing to snapshot" and succeeds, because there is no
+state yet to protect.
 
 `pullfm_load_credentials neon` reads the API key from 1Password by **item ID**
 (the item's title contains parentheses, which are not legal in an `op://`
@@ -448,14 +457,30 @@ decommissioned, or anyone leaves. **A rotation is also the correct response to
 "I think I pasted the connection string somewhere".** It costs a minute.
 
 Terraform state holds the owner password in plaintext (`PULLFM-RISK-008`), so a
-rotation is not complete until no readable state object still contains the old
-one. Object versioning on `pull-fm-tfstate` is **off**, verified by probing the
-bucket on 2026-07-29 rather than by reading the docs that said otherwise, so the
-current state object is the only one and a rotation genuinely does retire the old
-credential. **This changes when versioning is turned on**, which it should be for
-the recovery reasons in section 7.1: from that point a rotation leaves the old
-password in a previous object version, which is acceptable only because a rotated
-credential is a dead one, and is not acceptable if the rotation was skipped.
+rotation is not complete until no readable object still contains the old one.
+
+R2 cannot version objects, so the live state key holds exactly one version and
+overwriting it genuinely destroys the old credential. **The state snapshots
+introduced in section 7.1 do not have that property**, and this is the one place
+the two mechanisms are in tension. A snapshot is a full copy of state, so every
+snapshot taken before a rotation still contains the password that rotation was
+meant to kill.
+
+That is acceptable, on one condition that has to actually hold: a rotated
+credential is a dead one, so a stale copy of it is inert. It stops being
+acceptable the moment a rotation is skipped or half-finished. After rotating,
+either let retention age the pre-rotation snapshots out, or delete them
+deliberately:
+
+```bash
+infra/lib/tfstate-snapshot.sh list infra/neon
+# then delete the ones predating the rotation, if the exposure warrants it
+```
+
+Deleting them costs the rollback history for those applies, which is the trade.
+For a routine rotation, leave them. For a rotation prompted by suspected
+disclosure, delete them, because in that case the old credential may not be dead
+at all.
 
 ---
 
@@ -467,23 +492,63 @@ Three separate failures, three separate answers. They are not interchangeable.
 
 Because the apply is import-heavy, the most likely bad outcome is resources
 adopted into state that should not have been. The fix for that is
-`terraform state rm`, which detaches without touching Neon, and it does not need
-versioning.
+`terraform state rm`, which detaches without touching Neon and needs no backup at
+all. Reach for it first.
 
-**The restore-a-previous-state-object path does not currently exist.** Object
-versioning on `pull-fm-tfstate` is off, confirmed by probing the bucket on
-2026-07-29; earlier revisions of this runbook asserted it was on. Turn it on
-before relying on this paragraph. Until then, take a copy of the state object
-before any import-heavy apply:
+**Earlier revisions of this runbook said to restore the previous version of the
+state object. That was never possible and cannot be made possible.** R2 does not
+implement object versioning: Cloudflare's S3 compatibility matrix lists
+`PutBucketVersioning` and `GetBucketVersioning` as unimplemented and omits
+`ListObjectVersions` entirely. The instruction was not describing a switch nobody
+had flipped, it was describing a feature that does not exist on this platform.
 
-```bash
-aws s3 cp "s3://pull-fm-tfstate/neon/terraform.tfstate" \
-  "./neon-tfstate-$(date +%FT%H%M).json" \
-  --endpoint-url "https://<account>.r2.cloudflarestorage.com"
+It is worth knowing why nobody caught it, because the same shape will recur with
+other R2 features. Probing the bucket does not produce an error:
+
+```
+aws s3api get-bucket-versioning --bucket pull-fm-tfstate   # exit 0, empty body
+aws s3api get-bucket-policy     --bucket pull-fm-tfstate   # NotImplemented
 ```
 
-That copy contains the production database password in plaintext. Keep it off
-shared storage and delete it when the apply is confirmed good.
+An empty versioning configuration is exactly what S3 returns for a bucket where
+versioning was never enabled. One unsupported API says no by erroring, the other
+says no by shrugging, and only the first one gets noticed.
+
+**Take a verified snapshot before every apply instead:**
+
+```bash
+source infra/lib/credentials.sh && pullfm_load_credentials neon
+infra/lib/tfstate-snapshot.sh snapshot infra/neon
+
+# before an import-heavy or destructive apply, also keep a copy off Cloudflare:
+infra/lib/tfstate-snapshot.sh snapshot infra/neon --local ~/tfstate-backups
+```
+
+It copies the live state to a timestamped key, **reads it back and compares
+digests**, and exits non-zero if it cannot. That ordering is the point: the
+snapshot is proved readable before the apply runs, not discovered to be unreadable
+during a recovery. A backup nobody has read is not a backup, which is the same
+lesson Gate 4 exists to teach about database restores.
+
+To roll back:
+
+```bash
+infra/lib/tfstate-snapshot.sh list    infra/neon
+infra/lib/tfstate-snapshot.sh restore infra/neon snapshots/neon/terraform.tfstate/<stamp>.tfstate
+terraform -chdir=infra/neon plan       # expect no changes
+```
+
+`restore` refuses if the snapshot's Terraform `lineage` does not match the live
+state, and snapshots the current state before overwriting it, so a restore to the
+wrong snapshot is itself reversible.
+
+**What this does not cover.** Snapshots sit in the same bucket, under the same
+credential, as the state they protect. They answer "the apply went wrong". They
+do not answer "the bucket is gone" or "the Cloudflare account was suspended",
+which `PULLFM-RISK-001` says is a live possibility because that account is shared
+with an unrelated personal fleet. `--local` is the answer to those, and the copy
+it writes contains the production database password in plaintext at mode 0600:
+keep it off synced or shared storage and delete it once the apply is confirmed.
 
 ### 7.2 The schema or the data is wrong, but Neon is fine
 

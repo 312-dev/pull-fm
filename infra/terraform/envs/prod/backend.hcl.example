@@ -9,7 +9,13 @@ key    = "prod/terraform.tfstate"
 region = "auto"
 
 endpoints = {
-  s3 = "https://REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID.eu.r2.cloudflarestorage.com"
+  # NO `.eu.` HERE, DELIBERATELY. An R2 jurisdiction endpoint only sees buckets
+  # created in that jurisdiction, and `pull-fm-tfstate` is not EU-pinned
+  # (verified 2026-07-29 by enumerating both endpoints). The `.eu.` form this
+  # example used to carry fails at `terraform init` with a missing-bucket error.
+  # The backups bucket IS EU-pinned; that is a different bucket. See
+  # PULLFM-RISK-010.
+  s3 = "https://REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
 }
 
 # Native state locking via a lockfile object. R2 has no DynamoDB analogue.
