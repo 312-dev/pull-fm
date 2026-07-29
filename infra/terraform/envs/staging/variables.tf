@@ -109,9 +109,36 @@ variable "app_hostname" {
   default     = "app-staging.pull.fm"
 }
 
+# ---------------------------------------------------------------------------
+# THIS STILL NAMES THE EU BUCKET AFTER THE US CUTOVER, AND THAT IS A DELIBERATE
+# NON-CHANGE RATHER THAN AN OVERSIGHT.
+# ---------------------------------------------------------------------------
+#
+# The backup tooling (infra/lib/backup-common.sh) now reads and writes
+# `pull-fm-backups-staging-us`, which was created BY HAND in the default
+# jurisdiction with an ENAM location hint, because R2 has no `us` jurisdiction
+# to pin to and jurisdiction is fixed at creation.
+#
+# WHY THIS VARIABLE WAS NOT SIMPLY REPOINTED. `bucket_name` is ForceNew on
+# `cloudflare_r2_bucket`, and `modules/backup-storage` marks that resource
+# `prevent_destroy = true` with the note that "if this is destroyed the service
+# is gone". So editing this default does not rename anything. It plans a DESTROY
+# AND CREATE of the bucket holding every database backup, and `prevent_destroy`
+# then fails the plan - which is the lock working, not a bug to route around.
+# The create half would fail anyway, because the US bucket already exists and is
+# not in this state.
+#
+# WHAT REPOINTING ACTUALLY REQUIRES, so nobody rediscovers it under pressure:
+# `terraform state rm module.backup_storage.cloudflare_r2_bucket.backups`
+# followed by an `import` block for the existing US bucket, plus a
+# `jurisdiction = "default"` argument on the module call (the module defaults to
+# `eu`), plus a pre-apply snapshot from infra/lib/tfstate-snapshot.sh. That is a
+# reviewed change with an apply behind it, not a variable edit, and it is the
+# owner's call. Until it happens, Terraform manages the EU bucket that is being
+# kept as the rollback, and the tooling manages the US bucket that is live.
 variable "backup_bucket_name" {
   type        = string
-  description = "R2 bucket for pgBackRest."
+  description = "R2 bucket for pgBackRest. Still the EU bucket: see the block above before changing it."
   default     = "pull-fm-backups-staging"
 }
 

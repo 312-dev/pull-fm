@@ -197,7 +197,7 @@ done
 # jobs) and not one of them a backup; nothing in /etc/systemd/system matching
 # backup, ledger or erasure; /etc/cron.d holding only distribution defaults; and
 # `infra/backup/pullfm-backup.sh` not present on the node at all. Every dump in
-# `pull-fm-backups-staging` had been taken by hand from a workstation. That is
+# the backups bucket had been taken by hand from a workstation. That is
 # PULLFM-RISK-012: the documented control existed in git, which is why reading
 # the repository would have concluded it was present.
 #

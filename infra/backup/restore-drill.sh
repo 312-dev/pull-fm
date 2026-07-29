@@ -61,7 +61,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # ARGUMENT PARSING. backup-common.sh declares the variable `readonly` with a
 # `${VAR:-default}` fallback, so an assignment afterwards is not "an override
 # that loses to the default", it is a fatal "readonly variable" under `set -e`.
-: "${PULLFM_LEDGER_BUCKET:=pull-fm-ledger-drill}"
+#
+# US CUTOVER: this is `pull-fm-ledger-drill-us`, default jurisdiction, ENAM
+# location hint, and it is deliberately UNLOCKED for the reason above. The EU
+# `pull-fm-ledger-drill` still exists and is the rollback; it is not deleted.
+: "${PULLFM_LEDGER_BUCKET:=pull-fm-ledger-drill-us}"
 export PULLFM_LEDGER_BUCKET
 
 # shellcheck source=../lib/backup-common.sh
@@ -86,9 +90,17 @@ done
 
 # The drill ledger bucket's credential. The bucket itself is chosen above the
 # source; this half needs `pullfm_op_field`, so it has to be after it.
+#
+# ADDRESSED BY TITLE, AND IT USED TO BE AN ITEM ID. The id here was a live
+# finding in `tools/check-public-identifiers.mjs`: a vault item id is a direct
+# object reference, so publishing one in a public repository turns any vault
+# access from a search problem into a fetch. `op item get` takes either form,
+# the title is unambiguous, and the `_US` suffix says which side of the
+# residency cutover this credential belongs to.
+readonly PULLFM_DRILL_LEDGER_OP_ITEM="${PULLFM_DRILL_LEDGER_OP_ITEM:-pull-fm/staging/R2_DRILL_LEDGER_CREDENTIALS_US}"
 if [[ -z "${PULLFM_LEDGER_ACCESS_KEY_ID:-}" ]]; then
-  PULLFM_LEDGER_ACCESS_KEY_ID="$(pullfm_op_field 'v54n6f5eimazwibfp6tgd7ck5u' 'access key id')"
-  PULLFM_LEDGER_SECRET_ACCESS_KEY="$(pullfm_op_field 'v54n6f5eimazwibfp6tgd7ck5u' 'secret access key')"
+  PULLFM_LEDGER_ACCESS_KEY_ID="$(pullfm_op_field "${PULLFM_DRILL_LEDGER_OP_ITEM}" 'access key id')"
+  PULLFM_LEDGER_SECRET_ACCESS_KEY="$(pullfm_op_field "${PULLFM_DRILL_LEDGER_OP_ITEM}" 'secret access key')"
   export PULLFM_LEDGER_ACCESS_KEY_ID PULLFM_LEDGER_SECRET_ACCESS_KEY
 fi
 
@@ -179,16 +191,38 @@ pullfm_need psql pg_dump pg_restore openssl aws op python3 curl
 pullfm_backup_load_neon
 pullfm_backup_load_r2
 
-TARGET_ID="$(pullfm_neon GET "/branches" | python3 -c '
+# THE "IS THIS MAIN" GUARD IS ASKED OF THE CONTROL PLANE, AND IT USED TO BE A
+# HARDCODED BRANCH ID.
+#
+# WHAT WAS WRONG. The line below used to compare TARGET_ID against a literal
+# `br-...` belonging to the EU project's default branch. Two things were wrong
+# with that and only one of them is about the residency move:
+#
+#   1. It is a live Neon branch id in a public repository, which addresses a
+#      restorable copy of production data through the provider control plane.
+#      `tools/check-public-identifiers.mjs` has a detector for exactly this.
+#   2. It is pinned to ONE PROJECT. Point this drill at any other project - the
+#      US project it now runs against, a scratch project, a future one - and the
+#      literal matches nothing, so the guard silently stops guarding while still
+#      reading like a safety check. A guard that cannot fire is worse than no
+#      guard, because it stops anyone from writing a real one.
+#
+# WHY THIS SHAPE. `GET /branches` already returns `default` per branch and the
+# response is already being parsed, so resolving the target and identifying the
+# default branch is one pass over data that was fetched anyway. It costs nothing
+# and it is correct on whatever project PULLFM_NEON_PROJECT_ID names.
+read -r TARGET_ID TARGET_IS_DEFAULT <<<"$(pullfm_neon GET "/branches" | python3 -c '
 import json, sys
 want = sys.argv[1]
 for b in json.load(sys.stdin)["branches"]:
     if b["id"] == want or b["name"] == want:
-        print(b["id"]); break
+        print(b["id"], "yes" if b.get("default") else "no"); break
 else:
     sys.exit("no such branch: " + want)
 ' "${TARGET_BRANCH}")"
-[[ "${TARGET_ID}" != "br-curly-wave-as91izv6" ]] || pullfm_die "that is main"
+[[ "${TARGET_IS_DEFAULT}" == "no" ]] ||
+  pullfm_die "${TARGET_BRANCH} (${TARGET_ID}) is the project's DEFAULT branch, which is main.
+The drill destroys data and rolls the branch back; it will not do that to main."
 
 DSN="$(pullfm_backup_load_dsn)"
 pullfm_info "dsn: $(pullfm_dsn_redact "${DSN}")"

@@ -3,7 +3,7 @@
  * Proves the server-side query ceilings are REAL on a live deployment, by
  * measuring them rather than by reading them back.
  *
- *   PGURL_ITEM=pull-fm/staging/DATABASE_URL node packages/db/scripts/verify-query-ceilings.mjs
+ *   PGURL_ITEM=pull-fm/staging/DATABASE_URL_US node packages/db/scripts/verify-query-ceilings.mjs
  *   DATABASE_URL='postgres://...' node packages/db/scripts/verify-query-ceilings.mjs
  *
  * Point it at the POOLED endpoint with the APPLICATION role. That is the only

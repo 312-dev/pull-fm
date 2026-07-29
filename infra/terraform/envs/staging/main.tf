@@ -13,6 +13,38 @@ locals {
     environment = local.environment
     managed_by  = "terraform"
   }
+
+  # ---------------------------------------------------------------------------
+  # THE NETWORK ZONE IS DERIVED FROM THE LOCATION, AND IT USED TO BE AN UNSET
+  # MODULE DEFAULT.
+  # ---------------------------------------------------------------------------
+  #
+  # WHAT WAS WRONG. `module "network"` never passed `network_zone`, so
+  # modules/network's default of "eu-central" applied. That was invisible and
+  # correct while every accepted location was in eu-central, and it becomes a
+  # failed apply the moment one is not: a Hetzner server can only attach to a
+  # subnet in ITS OWN network zone, so an `ash` node and an `eu-central` subnet
+  # do not compose. The error arrives during apply, after the old node has
+  # already been destroyed.
+  #
+  # WHY A DERIVATION AND NOT A SECOND VARIABLE. Two variables that must agree
+  # are two variables that will eventually disagree, and the disagreement here
+  # costs a half-destroyed environment. Hetzner's site-to-zone mapping is a fact
+  # about the vendor, not a choice, so it belongs in a lookup rather than in a
+  # tfvars file somebody has to remember to edit twice. Read from
+  # GET /v1/locations on 2026-07-29.
+  #
+  # NOTE THAT CHANGING THIS REPLACES THE SUBNET. `network_zone` is ForceNew on
+  # hcloud_network_subnet, so a location move across zones destroys and recreates
+  # the subnet, and therefore every server attachment hanging off it. That is
+  # part of what makes the US move a destructive apply rather than a resize.
+  network_zone = {
+    fsn1 = "eu-central"
+    nbg1 = "eu-central"
+    hel1 = "eu-central"
+    ash  = "us-east"
+    hil  = "us-west"
+  }[var.location]
 }
 
 # Cloudflare publishes its edge ranges here. Reading them live means a new
@@ -28,6 +60,7 @@ module "network" {
   name_prefix     = local.name_prefix
   ip_range        = var.network_ip_range
   subnet_ip_range = var.subnet_ip_range
+  network_zone    = local.network_zone
   labels          = local.labels
 
   delete_protection = var.network_delete_protection

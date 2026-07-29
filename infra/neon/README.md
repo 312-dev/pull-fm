@@ -1,5 +1,53 @@
 # Pull.fm - Neon serverless Postgres
 
+> ## THIS ROOT STILL ADOPTS THE EU PROJECT. THE DATABASE IS IN THE US.
+>
+> **Read this before running anything here.** The US cutover created a second
+> Neon project, `cold-brook-02833828` (`pull-fm-us`, `aws-us-east-1`, Postgres
+> 18, PITR 7 days), with the same two branch NAMES as the EU project, `main` and
+> `staging`. The branch and endpoint ids are deliberately not written here; ask
+> the control plane for them, which is what `tools/check-public-identifiers.mjs`
+> exists to enforce. Both branches are bootstrapped, migrated
+> and verified, and every connection string the application and the backup
+> tooling use now points at them: `pull-fm/{staging,prod}/DATABASE_URL_US` and
+> `..._DIRECT_US` in 1Password, and `PULLFM_NEON_PROJECT_ID` in
+> `infra/lib/backup-common.sh`.
+>
+> **This Terraform root was deliberately not repointed, and it was not a
+> shortcut.** Every sentence below about "one project, adopted by import" is
+> still true of the EU project and is now also the thing standing in the way:
+>
+> - `variable "region_id"` has a `validation` requiring `startswith("aws-eu-")`.
+>   The US project fails it. That validation is a stated GDPR control, so
+>   relaxing it is a posture decision and not a typo fix.
+> - `neon_project.pullfm` carries `prevent_destroy`, and a project's region and
+>   `pg_version` are ForceNew. There is no in-place move; the only expression
+>   Terraform has for "different project" is destroy-and-create, which for this
+>   resource means deleting the live EU database that is being kept as the
+>   rollback.
+> - The import ids in `imports.tf` are the EU branch and endpoint. Repointing
+>   means `terraform state rm` on all six resources plus `import` blocks for the
+>   US project, its database, its owner role and BOTH endpoints. Note that
+>   `neon_branch.staging` and `neon_endpoint.staging` are currently CREATED
+>   rather than imported, so without new import blocks a repointed apply would
+>   cut a second staging branch on the US project rather than adopt the existing
+>   one.
+> - The `pullfm_app` role and its grants are not resources here at all, so none
+>   of that state surgery touches them. They were applied with
+>   `sql/*.sql` per branch and verified; see below.
+>
+> A pre-apply snapshot from `infra/lib/tfstate-snapshot.sh` is mandatory before
+> any of that, because R2 cannot version the state object.
+>
+> **There is also pre-existing drift on this root, unrelated to the cutover.**
+> `terraform plan` on 2026-07-29 reported `neon_endpoint.staging`
+> `autoscaling_limit_max_cu 8 -> 1`: the live EU staging endpoint was raised to
+> 8 CU outside Terraform. The claim below that "the plan is clean" is no longer
+> accurate.
+>
+> The `PGURL_ITEM=pull-fm/<env>/DATABASE_URL` invocations further down should
+> read `..._DATABASE_URL_US` when they are being run against the live database.
+>
 > ## APPLIED 2026-07-29. PLAN IS CLEAN.
 >
 > Applied against the live Neon control plane: **4 imported, 2 added, 1 changed,

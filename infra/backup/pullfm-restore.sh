@@ -67,9 +67,31 @@ source "${ROOT}/infra/lib/backup-common.sh"
 readonly RP_PREFIX="rp-"
 readonly RP_KEEP_DEFAULT=4
 
-# Branch ids that must never be the TARGET of a restore run from this tool
+# Branch NAMES that must never be the TARGET of a restore run from this tool
 # without an explicit override. `main` is production.
-readonly PROTECTED_BRANCHES="br-curly-wave-as91izv6 main"
+#
+# THE HARDCODED BRANCH ID THAT USED TO SIT HERE IS GONE, AND ITS JOB IS NOW DONE
+# BY THE CONTROL PLANE.
+#
+# WHAT WAS WRONG. This list held the literal id of the EU project's default
+# branch alongside the name. Two problems, and the residency move only exposed
+# the second:
+#
+#   1. A live Neon branch id in a public repository addresses a restorable copy
+#      of production data. `tools/check-public-identifiers.mjs` has a detector
+#      for precisely this shape.
+#   2. It only protected ONE PROJECT. Against the US project the literal matches
+#      nothing, so half of this guard silently stopped guarding while still
+#      reading like two layers of protection. The name `main` happened to still
+#      match, which is what makes this the dangerous kind of dead check: it
+#      looks redundant right up until somebody renames a branch.
+#
+# WHY THIS SHAPE. `_assert_not_protected` now asks Neon which branch is the
+# DEFAULT one, which is the property that actually means "production" and is the
+# same property `neon_project.default_branch_id` is built on. It is true on any
+# project, it survives a rename, and it costs one API call on a path that is
+# already several.
+readonly PROTECTED_BRANCHES="main"
 
 _resolve_branch() { # name-or-id -> id
   local want="$1"
@@ -90,20 +112,37 @@ _branch_name() {
     python3 -c 'import json,sys; print(json.load(sys.stdin)["branch"]["name"])'
 }
 
+_is_default_branch() { # id -> "yes" | "no"
+  pullfm_neon GET "/branches/$1" |
+    python3 -c 'import json,sys; print("yes" if json.load(sys.stdin)["branch"].get("default") else "no")'
+}
+
 _assert_not_protected() {
-  local id="$1" name
+  local id="$1" name why=""
   name="$(_branch_name "${id}")"
-  local p
-  for p in ${PROTECTED_BRANCHES}; do
-    if [[ "${id}" == "${p}" || "${name}" == "${p}" ]]; then
-      [[ "${PULLFM_ALLOW_PROTECTED:-0}" == "1" ]] || pullfm_die \
-        "REFUSING: '${name}' (${id}) is a protected branch.
+
+  # The project's default branch, whatever it is called. This is the half that
+  # replaced the hardcoded id; see the comment on PROTECTED_BRANCHES.
+  if [[ "$(_is_default_branch "${id}")" == "yes" ]]; then
+    why="it is the project's DEFAULT branch, which is production"
+  else
+    local p
+    for p in ${PROTECTED_BRANCHES}; do
+      if [[ "${id}" == "${p}" || "${name}" == "${p}" ]]; then
+        why="its name is on PROTECTED_BRANCHES"
+        break
+      fi
+    done
+  fi
+
+  if [[ -n "${why}" ]]; then
+    [[ "${PULLFM_ALLOW_PROTECTED:-0}" == "1" ]] || pullfm_die \
+      "REFUSING: '${name}' (${id}) is a protected branch: ${why}.
 
 This tool will not restore, reset or delete production data. If that is
 genuinely the intent, the operator sets PULLFM_ALLOW_PROTECTED=1 by hand, which
 is deliberately something a script cannot do for them."
-    fi
-  done
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -475,8 +514,9 @@ usage: infra/backup/pullfm-restore.sh <command> [options]
                                         is overwritten. Works with Neon gone.
                                         Prints the new database name.
 
-main (br-curly-wave-as91izv6) is refused as a target unless
-PULLFM_ALLOW_PROTECTED=1 is set by hand.
+The project's DEFAULT branch (`main`, production) is refused as a target unless
+PULLFM_ALLOW_PROTECTED=1 is set by hand. The default branch is identified by
+asking Neon, not from a list in this file, so a rename does not disarm it.
 
 Every restore path leaves one thing undone: replay-deletions. See
 infra/backup/pullfm-backup.sh and docs/RUNBOOK-DR.md section 5.

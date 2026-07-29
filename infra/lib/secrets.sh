@@ -86,14 +86,21 @@ readonly PULLFM_MB_USER_AGENT="${PULLFM_MB_USER_AGENT:-PullFM/0.1.0 (ope@312.dev
 # is why `tools/check-public-identifiers.mjs` rejects one in a tracked file.
 #
 # THIS TOKEN IS BUCKET-SCOPED AND THAT IS THE WHOLE REASON THE NODE MAY HOLD IT.
-# It was rotated on 2026-07-29 to reach `pull-fm-backups-staging` and nothing
-# else. `pull-fm/staging/R2_LEDGER_CREDENTIALS` is a DIFFERENT token for a
-# DIFFERENT bucket (`pull-fm-ledger-staging`) and the two are never
+# It reaches `pull-fm-backups-staging-us` and nothing else.
+# `pull-fm/staging/R2_LEDGER_CREDENTIALS_US` is a DIFFERENT token for a
+# DIFFERENT bucket (`pull-fm-ledger-staging-us`) and the two are never
 # interchangeable: the backup token cannot see the ledger bucket at all, and a
 # ledger command run with it reports an EMPTY LEDGER rather than a permission
 # error, which is the shape of a check that reports success while checking
 # nothing. See the header of infra/lib/backup-common.sh.
-readonly PULLFM_BACKUP_OP_ITEM="${PULLFM_BACKUP_OP_ITEM:-pull-fm/staging/R2_CREDENTIALS}"
+#
+# THE `_US` SUFFIX IS THE RESIDENCY CUTOVER AND IT IS DELIBERATELY A NEW ITEM
+# RATHER THAN AN EDITED ONE. An R2 jurisdiction is fixed when the bucket is
+# created, so moving residency means new buckets and new bucket-scoped tokens.
+# The EU items (`pull-fm/staging/R2_CREDENTIALS`, `..._LEDGER_CREDENTIALS`) are
+# left exactly as they were, because they are the rollback and because a
+# rollback that requires restoring a vault item from history is not a rollback.
+readonly PULLFM_BACKUP_OP_ITEM="${PULLFM_BACKUP_OP_ITEM:-pull-fm/staging/R2_CREDENTIALS_US}"
 readonly PULLFM_CIPHER_OP_ITEM="${PULLFM_CIPHER_OP_ITEM:-pull-fm/infra/BACKUP_DUMP_KEY}"
 
 _pullfm_secret_die() { printf '\033[31m%s\033[0m\n' "$*" >&2; return 1; }
@@ -187,8 +194,17 @@ pullfm_render_staging_secrets() {
   # POOLED is what the application uses. DIRECT is what the migration runner
   # uses, because it takes a session-level advisory lock and a transaction
   # pooler silently breaks session-scoped locks rather than failing loudly.
-  database_url="$(_pullfm_field 'pull-fm/staging/DATABASE_URL' 'credential')" || return 1
-  database_url_direct="$(_pullfm_field 'pull-fm/staging/DATABASE_URL_DIRECT' 'credential')" || return 1
+  #
+  # `_US` NAMES THE US NEON PROJECT, NOT A NEW KIND OF SECRET. A Neon region is
+  # immutable, so the move out of the EU is a NEW PROJECT with new endpoints and
+  # therefore new connection strings. The EU items are still populated, still
+  # point at a live project, and are the rollback: converge with
+  # PULLFM_STAGING_DB_SUFFIX-style overrides is deliberately NOT offered here,
+  # because a node that can be pointed at either database by an environment
+  # variable is a node whose residency posture is whatever the last person
+  # exported. Rolling back is an edit to these two lines and a converge.
+  database_url="$(_pullfm_field 'pull-fm/staging/DATABASE_URL_US' 'credential')" || return 1
+  database_url_direct="$(_pullfm_field 'pull-fm/staging/DATABASE_URL_DIRECT_US' 'credential')" || return 1
   redis_cache_pw="$(_pullfm_field 'pull-fm/staging/REDIS_CACHE_PASSWORD' 'password')" || return 1
   redis_quota_pw="$(_pullfm_field 'pull-fm/staging/REDIS_QUOTA_PASSWORD' 'password')" || return 1
   kek="$(_pullfm_field 'pull-fm/staging/CREDENTIAL_KEK' 'password')" || return 1
@@ -224,11 +240,17 @@ pullfm_render_staging_secrets() {
   # ITS OWN BUCKET AND ITS OWN CREDENTIAL. R2 tokens scope to a bucket and never
   # to a prefix, so a credential that could write ledger/deletions/ inside the
   # backups bucket would also let a compromised BFF delete every backup. This
-  # key pair reaches pull-fm-ledger-staging and nothing else.
-  ledger_key="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 'access key id')" || return 1
-  ledger_secret="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 'secret access key')" || return 1
-  ledger_endpoint="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 's3 endpoint')" || return 1
-  ledger_bucket="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 'bucket')" || return 1
+  # key pair reaches pull-fm-ledger-staging-us and nothing else.
+  #
+  # THE BUCKET AND THE ENDPOINT ARE READ OUT OF THE ITEM RATHER THAN WRITTEN
+  # HERE, which is why the residency move needed no change to these four lines
+  # beyond the item title. The vault item is the record of which bucket a
+  # credential opens; a bucket name written in this file would be a second
+  # source of truth that a token rotation could silently contradict.
+  ledger_key="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS_US' 'access key id')" || return 1
+  ledger_secret="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS_US' 'secret access key')" || return 1
+  ledger_endpoint="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS_US' 's3 endpoint')" || return 1
+  ledger_bucket="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS_US' 'bucket')" || return 1
 
   # The SeatGeek client id lives in the item's NOTES ("client id = <35 chars>")
   # and the secret is the password. Optional: without the id the events route
@@ -305,7 +327,7 @@ EOF
   # seven pullfm timers, none of them a backup; no unit in /etc/systemd/system
   # matching backup or ledger; infra/backup/pullfm-backup.sh not present on the
   # node at all; /etc/cron.d holding only distribution defaults. Every dump in
-  # `pull-fm-backups-staging` had been produced by hand from a workstation, so a
+  # the backups bucket had been produced by hand from a workstation, so a
   # documented retention window was being applied to objects that arrived only
   # when somebody remembered. That is PULLFM-RISK-012, and this block plus the
   # install section of infra/staging/app/bootstrap.sh is the fix.

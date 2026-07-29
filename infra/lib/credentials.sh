@@ -41,7 +41,36 @@ readonly PULLFM_ZONE="pull.fm"
 # The Neon organisation and project. Public identifiers, not credentials: they
 # are the same values committed in infra/neon/terraform.tfvars.example.
 readonly PULLFM_NEON_ORG_ID="${PULLFM_NEON_ORG_ID:-org-tiny-leaf-89756764}"
-readonly PULLFM_NEON_PROJECT="${PULLFM_NEON_PROJECT:-pull-fm}"
+
+# ---------------------------------------------------------------------------
+# THE SCOPE ASSERTION EXPECTS TWO PROJECTS FOR THE LENGTH OF THE US CUTOVER, AND
+# IT USED TO EXPECT EXACTLY ONE.
+# ---------------------------------------------------------------------------
+#
+# WHAT WAS WRONG. `pullfm_assert_neon_scope` compared every project name the key
+# can see against a single expected name and refused to run on any extra. That
+# was correct while there was one project. A Neon REGION IS IMMUTABLE, so moving
+# residency to the US meant creating `pull-fm-us` alongside `pull-fm`, and from
+# the moment that project existed this function refused every call:
+#
+#   REFUSING TO RUN: this Neon key can see projects other than pull-fm:
+#   pull-fm-us
+#
+# which takes out `pullfm_load_credentials neon` and therefore every `terraform`
+# command in infra/neon, for a state of the world that is intended.
+#
+# WHY A LIST AND NOT A PREFIX. The obvious repair is to accept anything starting
+# `pull-fm`, and that is the repair that quietly deletes the control: this
+# function exists to notice a key whose blast radius is wider than this
+# repository, and a personal project called `pull-fm-scratch` would then pass.
+# An explicit set still refuses everything that is not named here.
+#
+# THIS LIST MUST SHRINK BACK TO ONE. `pull-fm` is the EU project and it is the
+# rollback for the cutover; it is deliberately not deleted. When it is finally
+# retired, remove it from this list in the same change, because a second
+# accepted project that no longer exists is a standing exemption nobody reads.
+readonly PULLFM_NEON_PROJECTS="${PULLFM_NEON_PROJECTS:-pull-fm
+pull-fm-us}"
 
 # 1Password item holding the Neon API key, addressed BY ITEM ID.
 #
@@ -136,10 +165,17 @@ else:
     return 1
   fi
 
+  # -x against a FILE of accepted names rather than a single -x pattern: the
+  # accepted set has two entries during the cutover and `grep -vx` takes one
+  # pattern per line, so a here-string of the list is the whole implementation.
+  # Still an exact whole-line match, so `pull-fm-us-scratch` is not accepted by
+  # `pull-fm-us` being on the list.
   local unexpected
-  unexpected="$(grep -vx "${PULLFM_NEON_PROJECT}" <<<"${names}" | grep -v '^$' || true)"
+  unexpected="$(grep -vxF -f <(printf '%s\n' "${PULLFM_NEON_PROJECTS}") <<<"${names}" |
+    grep -v '^$' || true)"
   if [[ -n "${unexpected}" ]]; then
-    _pullfm_die "REFUSING TO RUN: this Neon key can see projects other than ${PULLFM_NEON_PROJECT}:
+    _pullfm_die "REFUSING TO RUN: this Neon key can see projects other than
+$(printf '%s\n' "${PULLFM_NEON_PROJECTS}" | sed 's/^/  /'):
 ${unexpected}"
     return 1
   fi

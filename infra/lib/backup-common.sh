@@ -60,24 +60,60 @@
 
 readonly PULLFM_BACKUP_OP_VAULT="${PULLFM_BACKUP_OP_VAULT:-MCP}"
 
-# 1Password items, addressed BY ITEM ID. Item ids are opaque locators, not
-# secrets: they are useless without vault access, and they are stable across
-# renames in a way titles are not. infra/lib/credentials.sh commits the Neon one
-# already for the same reason.
-readonly PULLFM_BACKUP_OP_R2="${PULLFM_BACKUP_OP_R2:-2ujy54s7j45zzme66ebu3sxfgi}"      # pull-fm/staging/R2_CREDENTIALS
-readonly PULLFM_LEDGER_OP_R2="${PULLFM_LEDGER_OP_R2:-pddkglqusnb2vhcz3f562kuhuq}"      # pull-fm/staging/R2_LEDGER_CREDENTIALS
+# ---------------------------------------------------------------------------
+# 1PASSWORD ITEMS ARE ADDRESSED BY TITLE HERE, AND THEY USED TO BE ADDRESSED BY
+# ITEM ID.
+# ---------------------------------------------------------------------------
+#
+# WHAT WAS WRONG. This file carried four base32 item ids with the reasoning that
+# "an item id is an opaque locator, not a secret". `tools/check-public-
+# identifiers.mjs` disagrees, and it is the one that gets to decide: an item id
+# is a DIRECT OBJECT REFERENCE, so it turns any vault access from a search
+# problem into a fetch. Two of these lines were live findings in that check on
+# the day the US cutover started, and infra/lib/secrets.sh had already reached
+# the opposite conclusion and written it down ("the title is what belongs in a
+# PUBLIC repository").
+#
+# WHY THIS SHAPE. `op item get` takes a title or an id interchangeably, and the
+# titles here are unambiguous, so nothing is lost by using the readable half.
+# It also makes the US cutover legible: `..._US` at the end of a title says
+# which side of the migration a credential belongs to, where one opaque string
+# replacing another says nothing at all. The EU items keep their old titles and
+# are the rollback, so both sets exist and neither can be reached by accident.
+#
+# The Neon API key is the exception and stays an id: its title contains
+# parentheses, which are not legal in an op:// reference, and it is the same key
+# for both projects so there is no US twin of it.
+readonly PULLFM_BACKUP_OP_R2="${PULLFM_BACKUP_OP_R2:-pull-fm/staging/R2_CREDENTIALS_US}"
+readonly PULLFM_LEDGER_OP_R2="${PULLFM_LEDGER_OP_R2:-pull-fm/staging/R2_LEDGER_CREDENTIALS_US}"
 readonly PULLFM_BACKUP_OP_NEON="${PULLFM_BACKUP_OP_NEON:-5ccxlg635x37rybelz53yeaqf4}"   # Neon API key
-readonly PULLFM_BACKUP_OP_DSN="${PULLFM_BACKUP_OP_DSN:-63fl4tdvyw3euzs4a2b2b7bvvu}"     # DATABASE_URL_DIRECT (staging owner)
-readonly PULLFM_BACKUP_OP_CIPHER="${PULLFM_BACKUP_OP_CIPHER:-4batahf3ih4fmyd7jhksgg6czu}"      # pull-fm/infra/BACKUP_DUMP_KEY
+readonly PULLFM_BACKUP_OP_DSN="${PULLFM_BACKUP_OP_DSN:-pull-fm/staging/DATABASE_URL_DIRECT_US}"
+readonly PULLFM_BACKUP_OP_CIPHER="${PULLFM_BACKUP_OP_CIPHER:-pull-fm/infra/BACKUP_DUMP_KEY}"
 
-readonly PULLFM_BACKUP_BUCKET="${PULLFM_BACKUP_BUCKET:-pull-fm-backups-staging}"
+# ---------------------------------------------------------------------------
+# THE US BUCKETS AND THE US PROJECT. THE EU ONES STILL EXIST AND ARE THE
+# ROLLBACK.
+# ---------------------------------------------------------------------------
+#
+# Residency moved from the EU to the US. Neither an R2 jurisdiction nor a Neon
+# region can be changed in place, so the move is expressed the only way the
+# platforms allow: NEW BUCKETS AND A NEW PROJECT, with the EU originals left
+# alive and untouched. Everything below points at the US side; nothing deletes
+# the EU side, and a rollback is an edit to these four values (or the matching
+# environment overrides) and nothing else.
+#
+# The US buckets are DEFAULT jurisdiction with an ENAM location hint, not
+# `us`-jurisdiction, because R2 has no US jurisdiction to pin to. That is why
+# they answer on the account's default S3 host and the EU ones do not; see
+# `pullfm_backup_r2_endpoint` below, which probes rather than trusting either.
+readonly PULLFM_BACKUP_BUCKET="${PULLFM_BACKUP_BUCKET:-pull-fm-backups-staging-us}"
 
 # THE LEDGER IS A SEPARATE BUCKET, AND THAT IS A SECURITY BOUNDARY RATHER THAN
 # TIDINESS.
 #
 # R2 API tokens scope to a BUCKET and never to a prefix. The erasure ledger is
 # written by the BFF, which is internet-facing, so a token that let it write
-# `ledger/deletions/` inside `pull-fm-backups-staging` would also have let a
+# `ledger/deletions/` inside `pull-fm-backups-staging-us` would also have let a
 # compromised BFF delete every database backup. Splitting the bucket is the only
 # way to give the application a credential that cannot reach the backups.
 #
@@ -86,8 +122,19 @@ readonly PULLFM_BACKUP_BUCKET="${PULLFM_BACKUP_BUCKET:-pull-fm-backups-staging}"
 # succeeding at both under a token holding only that group. What actually makes
 # the ledger append-only is the bucket lock rule `erasure-ledger-immutable`, and
 # lock rules are per-bucket too. See PULLFM-RISK-009 and PULLFM-RISK-011.
-readonly PULLFM_LEDGER_BUCKET="${PULLFM_LEDGER_BUCKET:-pull-fm-ledger-staging}"
-readonly PULLFM_NEON_PROJECT_ID="${PULLFM_NEON_PROJECT_ID:-steep-frost-83698289}"
+readonly PULLFM_LEDGER_BUCKET="${PULLFM_LEDGER_BUCKET:-pull-fm-ledger-staging-us}"
+
+# The US Neon project (aws-us-east-1, Postgres 18). The EU project it replaces
+# is still live, still serving, and is NOT to be deleted: it is the rollback for
+# the whole database half of this cutover. A Neon region is immutable, so there
+# was never an in-place move to make.
+#
+# NOTE FOR ANYONE READING infra/neon: that Terraform root still ADOPTS THE EU
+# PROJECT. This constant and that root disagree on purpose during the cutover,
+# because repointing the root is a state operation (import blocks plus a
+# region-validation change) and not a variable edit. The backup and restore
+# tooling here never reads Terraform state, so it can move first.
+readonly PULLFM_NEON_PROJECT_ID="${PULLFM_NEON_PROJECT_ID:-cold-brook-02833828}"
 readonly PULLFM_NEON_API="${PULLFM_NEON_API:-https://console.neon.tech/api/v2}"
 
 # Key prefixes. These are the retention classes; see `retention-apply` in
@@ -198,7 +245,7 @@ pullfm_backup_load_r2() {
 #
 # A SEPARATE LOADER RATHER THAN A FLAG, because the two credentials are not
 # interchangeable and the failure when they are confused is quiet: the backup
-# token cannot see `pull-fm-ledger-staging` at all, so a ledger command run with
+# token cannot see `pull-fm-ledger-staging-us` at all, so a ledger command run with
 # it does not fail with "forbidden", it reports an EMPTY LEDGER. `replay-deletions`
 # treats an empty ledger as "nothing to replay" and exits 0, which is precisely
 # the shape of a check that reports success while checking nothing. Every ledger
@@ -285,6 +332,15 @@ is jurisdiction-scoped. The other one answers NoSuchBucket."
   # the common case; both are tried, and a duplicate costs one wasted HEAD.
   # No jurisdiction is hard-coded as THE answer anywhere: this list is a set of
   # guesses and the bucket decides which one is right.
+  #
+  # THE `.eu.` CANDIDATE STAYS AFTER THE US CUTOVER, and it is not dead code.
+  # The US buckets are default-jurisdiction and answer on the first derived
+  # host, so it is never reached for them. It is reached the moment anyone
+  # exercises the rollback by overriding PULLFM_BACKUP_BUCKET or
+  # PULLFM_LEDGER_BUCKET back to an EU bucket, which is exactly the situation in
+  # which nobody wants to be debugging a NoSuchBucket. Deleting it would save
+  # one HEAD on a path that is already the fast one and would break the only
+  # path that matters when it matters.
   candidates="${recorded}
 https://${host}.r2.cloudflarestorage.com
 https://${host}.eu.r2.cloudflarestorage.com"

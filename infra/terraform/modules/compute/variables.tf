@@ -8,13 +8,40 @@ variable "labels" {
   description = "Labels applied to every resource in this module."
 }
 
+# ---------------------------------------------------------------------------
+# THIS ACCEPTS US SITES NOW, AND IT USED TO ACCEPT ONLY EU ONES.
+# ---------------------------------------------------------------------------
+#
+# WHAT CHANGED, AND WHY IT IS A POSTURE DECISION RATHER THAN A TYPO FIX. The
+# previous validation allowed fsn1, nbg1 and hel1 with the message "US and APAC
+# sites would break the EU-only data residency assumption". That was the correct
+# encoding of the posture at the time. The posture is now US-only, so the
+# validation had to move or the whole move would be unplannable: Terraform
+# rejects a disallowed value at plan time, so this list is what decides whether
+# `terraform plan -var location=ash` produces a plan or an error.
+#
+# WHY THE EU SITES STAY ON THE LIST. They are the rollback. A validation that
+# permitted only US sites would make "put it back in Helsinki" a code change
+# during an incident, which is when a code change is least affordable.
+#
+# APAC IS STILL REFUSED. `sin` is a real Hetzner site and there is no posture
+# under which it is correct for this product, so leaving it out keeps the list a
+# statement of intent rather than a list of everything the vendor sells.
+#
+# NOT EVERY SERVER TYPE EXISTS AT EVERY SITE, AND THIS VALIDATION CANNOT SEE
+# THAT. Checked against the Hetzner API on 2026-07-29: `cpx22`, which is what
+# staging runs, is offered in fsn1, hel1, nbg1 and sin and NOT in ash or hil.
+# So a location change on its own destroys the node and then fails to create the
+# replacement. `cpx21` (3 vCPU, 4 GB, same memory, one more core) is the nearest
+# type available in ash. Changing the location without also changing the server
+# type is the single most likely way to turn this move into an outage.
 variable "location" {
   type        = string
-  description = "Hetzner location. Must be an EU site: Pull.fm processes EU personal data and the GDPR posture assumes EU-only hosting."
+  description = "Hetzner site. US sites (ash, hil) are the current posture; the EU sites (fsn1, nbg1, hel1) are kept accepted as the rollback. Check that app_server_type is actually offered at the site you pick: cpx22 is not available in ash."
 
   validation {
-    condition     = contains(["fsn1", "nbg1", "hel1"], var.location)
-    error_message = "location must be an EU Hetzner site (fsn1, nbg1 or hel1). US and APAC sites would break the EU-only data residency assumption."
+    condition     = contains(["fsn1", "nbg1", "hel1", "ash", "hil"], var.location)
+    error_message = "location must be one of the US sites (ash Ashburn, hil Hillsboro) or the EU sites kept for rollback (fsn1, nbg1, hel1). APAC (sin) is deliberately not accepted."
   }
 }
 

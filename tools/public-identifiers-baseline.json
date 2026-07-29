@@ -37,21 +37,6 @@
       "file": "infra/scripts/check-origin-config.sh"
     },
     {
-      "fingerprint": "8305-44c0-c0ee-b1bd",
-      "detector": "neon-branch-id",
-      "file": "infra/backup/pullfm-restore.sh"
-    },
-    {
-      "fingerprint": "8305-44c0-c0ee-b1bd",
-      "detector": "neon-branch-id",
-      "file": "infra/backup/pullfm-restore.sh"
-    },
-    {
-      "fingerprint": "8387-a11a-470a-0911",
-      "detector": "neon-branch-id",
-      "file": "infra/backup/restore-drill.sh"
-    },
-    {
       "fingerprint": "a981-1b17-b109-cc80",
       "detector": "neon-branch-id",
       "file": "infra/neon/README.md"
@@ -87,22 +72,7 @@
       "file": "infra/neon/outputs.tf"
     },
     {
-      "fingerprint": "0d5a-dfe7-e54d-9a13",
-      "detector": "password-manager-item-id",
-      "file": "infra/lib/backup-common.sh"
-    },
-    {
       "fingerprint": "d60f-46ec-5999-d63a",
-      "detector": "password-manager-item-id",
-      "file": "infra/lib/backup-common.sh"
-    },
-    {
-      "fingerprint": "e5ae-db2d-3582-6556",
-      "detector": "password-manager-item-id",
-      "file": "infra/lib/backup-common.sh"
-    },
-    {
-      "fingerprint": "56c5-bbac-f1ab-b3ca",
       "detector": "password-manager-item-id",
       "file": "infra/lib/backup-common.sh"
     },

@@ -86,15 +86,15 @@ records stay in the environment roots.
 
 ## Prerequisites
 
-| Requirement                     | Notes                                                                                                               |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Terraform `~> 1.15`             | Pinned by `required_version`. Native S3 state locking (`use_lockfile`) needs >= 1.10.                               |
-| Hetzner Cloud project `pull-fm` | Created by hand. A **separate project** from the personal fleet, so a compromised token has a bounded blast radius. |
-| Cloudflare zone `pull.fm`       | Already on the account. See the open decision in `docs/PLAN.md` section 10 about the shared Cloudflare account.     |
-| An R2 state bucket              | Created once by hand; see [Remote state](#remote-state).                                                            |
-| A Neon project                  | `steep-frost-83698289`, created by hand in the console and adopted by [`infra/neon`](../neon/) via import blocks.   |
-| Tailscale tailnet               | The only path to SSH. See [Ingress posture](#ingress-posture).                                                      |
-| Billing alerts                  | Gate $. Cloudflare armed, Hetzner manual. [`docs/RUNBOOK-COST.md`](../../docs/RUNBOOK-COST.md).                     |
+| Requirement                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Terraform `~> 1.15`             | Pinned by `required_version`. Native S3 state locking (`use_lockfile`) needs >= 1.10.                                                                                                                                                                                                                                                                                                                 |
+| Hetzner Cloud project `pull-fm` | Created by hand. A **separate project** from the personal fleet, so a compromised token has a bounded blast radius.                                                                                                                                                                                                                                                                                   |
+| Cloudflare zone `pull.fm`       | Already on the account. See the open decision in `docs/PLAN.md` section 10 about the shared Cloudflare account.                                                                                                                                                                                                                                                                                       |
+| An R2 state bucket              | Created once by hand; see [Remote state](#remote-state).                                                                                                                                                                                                                                                                                                                                              |
+| A Neon project                  | `steep-frost-83698289` (EU), created by hand in the console and adopted by [`infra/neon`](../neon/) via import blocks. **A second project `cold-brook-02833828` (`pull-fm-us`, `aws-us-east-1`) now exists and is where the database actually lives**; the shell tooling points at it and `infra/neon` does not yet. See the cutover note at the head of [`infra/neon/README.md`](../neon/README.md). |
+| Tailscale tailnet               | The only path to SSH. See [Ingress posture](#ingress-posture).                                                                                                                                                                                                                                                                                                                                        |
+| Billing alerts                  | Gate $. Cloudflare armed, Hetzner manual. [`docs/RUNBOOK-COST.md`](../../docs/RUNBOOK-COST.md).                                                                                                                                                                                                                                                                                                       |
 
 ### Environment variables
 
@@ -201,10 +201,18 @@ that a fresh environment would repeat:
    default endpoint returns `pull-fm-tfstate` and the EU endpoint returns only
    `pull-fm-backups-staging`. A jurisdiction endpoint only lists buckets created
    in that jurisdiction, so the two forms are not interchangeable and the wrong
-   one fails at `terraform init` rather than falling back. Whether the bucket
-   _should_ be recreated in the EU jurisdiction is an open decision recorded as
-   `PULLFM-RISK-010`; the backups bucket, which holds actual user data, is
-   already EU-pinned by `modules/backup-storage`.
+   one fails at `terraform init` rather than falling back.
+
+   `PULLFM-RISK-010` recorded the open decision about recreating the state
+   bucket in the EU jurisdiction. **The US cutover answers it from the other
+   direction**: the replacement data buckets (`pull-fm-backups-staging-us`,
+   `pull-fm-ledger-staging-us`, `pull-fm-ledger-drill-us`) are default
+   jurisdiction with an ENAM location hint, because R2 has no `us` jurisdiction
+   to pin to, so state and data now share the default endpoint. The EU buckets
+   still exist and are the rollback. `modules/backup-storage` still defaults
+   `jurisdiction = "eu"` and `envs/staging` still names the EU backups bucket;
+   both are `prevent_destroy` resources and neither can be renamed by editing a
+   variable. See the note on `backup_bucket_name` in `envs/staging/variables.tf`.
 
    **There is no object versioning to turn on.** R2 does not implement it.
    Cloudflare's S3 compatibility matrix lists `PutBucketVersioning` and
