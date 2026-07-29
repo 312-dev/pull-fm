@@ -706,3 +706,31 @@ to its original parent with zero rows. One finding: section 5.3.
 The report is written to `s3://pull-fm-backups-staging/drills/<run>-report.json`,
 which has a 14-day expiry, because evidence that only exists on the laptop of
 whoever ran the drill is not evidence.
+
+**Reproduced the same evening**, run `20260729T085508Z`, on a scratch branch:
+5.6 s branch restore, 5.4 s PITR, 21.3 s dump restore, same verdicts, same
+finding. Two runs is not a trend, but a drill that produces the same numbers
+twice is a measurement rather than an anecdote.
+
+### The drill refused to run, and that was correct
+
+Between those two runs another agent wrote a user row to `staging`, and the
+drill stopped at preflight:
+
+```
+branch already holds 1 user rows.
+REFUSING: phase 5 deletes rows and phase 6 rolls the whole branch back.
+```
+
+**This is the guard doing its job and it should never be casually overridden.**
+Phase 5 deletes and phase 6 rolls the entire branch back to phase 2, so anything
+written to the branch by anyone else in between is gone. `PULLFM_DRILL_NONEMPTY=1`
+exists for the case where that is genuinely acceptable, and it is deliberately
+not set in `/etc/pullfm/backup.env`.
+
+The consequence for the monthly schedule: **once staging holds anything worth
+keeping, the timer will start failing on this check rather than destroying it.**
+That is the right default, and the right response at that point is to point the
+drill at a scratch branch created from staging (`--branch`, plus
+`PULLFM_BACKUP_DSN` for that branch), which is how the reproducibility run above
+was done and which proves exactly as much.
