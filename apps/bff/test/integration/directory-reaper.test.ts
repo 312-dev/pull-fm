@@ -12,7 +12,7 @@
  * invented one.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
@@ -206,17 +206,24 @@ describe("a sweep", () => {
     // the record well past the window, and confirm the sweep leaves it alone.
     // This is the property a user actually depends on.
     const email = `signedin.${randomUUID().slice(0, 10)}@example.test`;
+    // The IP must be randomised per run, not fixed. The magic-auth per-IP
+    // budget lives in the quota Redis, which resetTestDatabase does not clear,
+    // so a hardcoded address accumulates across suite runs until it exhausts
+    // its verify budget and this test 400s for the rest of the window. The
+    // email was already randomised; the address has to be too, for the same
+    // reason and against the same counter.
+    const ip = `10.${randomInt(256)}.${randomInt(256)}.${randomInt(1, 255)}`;
     await ctx.app.inject({
       method: "POST",
       url: "/v1/auth/start",
-      headers: { "x-forwarded-for": "10.9.9.9" },
+      headers: { "x-forwarded-for": ip },
       payload: { email },
     });
     const code = ctx.workos.codeFor(email) ?? "";
     const verified = await ctx.app.inject({
       method: "POST",
       url: "/v1/auth/verify",
-      headers: { "x-forwarded-for": "10.9.9.9" },
+      headers: { "x-forwarded-for": ip },
       payload: { email, code },
     });
     expect(verified.statusCode).toBe(200);
