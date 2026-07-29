@@ -3,8 +3,12 @@
 # Ephemeral staging: bring the environment up for a gate run, tear it down after.
 #
 # Staging exists to run gates, not to serve traffic. Hetzner bills by the hour,
-# so a standing environment costs about EUR 35 a month to sit idle, while a
-# three hour gate session costs around EUR 0.15. Rebuilding from IaC is already
+# so the current one-node shape costs USD 23.59 a month to sit idle while a
+# three hour gate session costs about USD 0.10. (Dollars, not euros: this
+# account's /v1/pricing reports currency USD and vat_rate 0, and every "EUR"
+# figure written in this repository before 2026-07-29 was a dollar figure
+# wearing the wrong symbol. `cost` reads the currency now rather than assuming
+# it.) Rebuilding from IaC is already
 # a Gate 4 requirement, so tearing down exercises the thing we have to prove
 # anyway rather than avoiding it.
 #
@@ -599,26 +603,72 @@ for x in srv:
 PY
 }
 
+# THE CURRENCY IS READ, NOT ASSUMED. This printed "EUR" against an account that
+# Hetzner bills in USD, so every cost figure this repository quoted was a dollar
+# figure wearing the wrong symbol, and the two are far enough apart to matter in
+# a budget. /v1/pricing states the currency and the VAT rate; the gross price
+# already includes any VAT, so no arithmetic is done here.
+#
+# The primary IPv4 is counted too. It is only 0.60 a month, but it is billed
+# separately from the server, and an unassigned address left behind by a
+# teardown still costs while this report called the environment free.
+#
+# Prices are taken at each resource's OWN location rather than from the first
+# entry in the list, which happened to be right only because every price in the
+# eu-central locations is currently identical.
 cmd_cost() {
   load_credentials
-  local servers lbs
+  local servers lbs ips pricing
   servers="$(curl -sS -H "Authorization: Bearer ${HCLOUD_TOKEN}" https://api.hetzner.cloud/v1/servers)"
   lbs="$(curl -sS -H "Authorization: Bearer ${HCLOUD_TOKEN}" https://api.hetzner.cloud/v1/load_balancers)"
-  python3 - "$servers" "$lbs" <<'PY'
+  ips="$(curl -sS -H "Authorization: Bearer ${HCLOUD_TOKEN}" https://api.hetzner.cloud/v1/primary_ips)"
+  pricing="$(curl -sS -H "Authorization: Bearer ${HCLOUD_TOKEN}" https://api.hetzner.cloud/v1/pricing)"
+  python3 - "$servers" "$lbs" "$ips" "$pricing" <<'PYEOF'
 import json, sys
+
 srv = json.loads(sys.argv[1]).get("servers", [])
 lbs = json.loads(sys.argv[2]).get("load_balancers", [])
+ips = json.loads(sys.argv[3]).get("primary_ips", [])
+pricing = json.loads(sys.argv[4]).get("pricing", {})
+
+cur = pricing.get("currency", "???")
+ipprice = {
+    p["type"]: {x["location"]: float(x["price_monthly"]["gross"]) for x in p["prices"]}
+    for p in pricing.get("primary_ips", [])
+}
+
+
+def at(prices, loc):
+    """The price in this resource's own location, not whichever came first."""
+    match = [p for p in prices if p.get("location") == loc]
+    return float((match or prices)[0]["price_monthly"]["gross"])
+
+
 total = 0.0
 for x in srv:
-    p = float(x["server_type"]["prices"][0]["price_monthly"]["gross"]); total += p
-    print(f"  {x['name']:26s} EUR {p:6.2f}/mo")
+    loc = x.get("datacenter", {}).get("location", {}).get("name", "")
+    p = at(x["server_type"]["prices"], loc)
+    total += p
+    print(f"  {x['name']:26s} {cur} {p:7.2f}/mo  {x['server_type']['name']}")
 for l in lbs:
-    p = float(l["load_balancer_type"]["prices"][0]["price_monthly"]["gross"]); total += p
-    print(f"  {l['name']:26s} EUR {p:6.2f}/mo")
-print(f"  {'TOTAL':26s} EUR {total:6.2f}/mo  (about EUR {total/730:.4f}/hour)")
+    loc = l.get("location", {}).get("name", "")
+    p = at(l["load_balancer_type"]["prices"], loc)
+    total += p
+    print(f"  {l['name']:26s} {cur} {p:7.2f}/mo")
+for i in ips:
+    # A primary IP reports `location` as a bare string and carries no
+    # `datacenter`, unlike every other resource here. Reading it the same way as
+    # a server silently priced every address at zero.
+    loc = i.get("location") or ""
+    if isinstance(loc, dict):
+        loc = loc.get("name", "")
+    p = ipprice.get(i["type"], {}).get(loc, 0.0)
+    total += p
+    print(f"  {i['name'][:26]:26s} {cur} {p:7.2f}/mo  {i['type']}")
+print(f"  {'TOTAL':26s} {cur} {total:7.2f}/mo  ({cur} {total/730:.4f}/hour, {cur} {total/730*24:.2f}/day)")
 if total == 0:
     print("  staging is fully torn down; only free-tier resources remain")
-PY
+PYEOF
 }
 
 case "${1:-}" in
