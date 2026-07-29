@@ -1,0 +1,25 @@
+[Unit]
+Description=Take the nightly database dump
+
+[Timer]
+# 03:23 UTC. Three choices, same reasoning as the application jobs:
+#
+#   DAILY, because this layer's RPO IS the interval. A weekly dump would mean
+#   that a loss of the Neon account costs up to a week of data, and no wording
+#   in legal/privacy-policy.md would make that acceptable.
+#
+#   03:23 UTC, which is 22:23 in the operator's timezone and well clear of
+#   06:17, where pullfm-purge-audit runs. A dump taken AFTER the retention purge
+#   would contain rows the purge had already removed, which is not wrong but
+#   makes the two records disagree for no reason.
+#
+#   :23, to stay off the :05/:35 and :10/:40 minutes the existing timers use.
+OnCalendar=*-*-* 03:23:00 UTC
+AccuracySec=1s
+
+# TRUE. A missed night is a night with no off-Neon copy, and the whole point of
+# this layer is the failure where Neon is not available to ask.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

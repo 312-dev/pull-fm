@@ -1,0 +1,30 @@
+[Unit]
+Description=Nightly logical dump of the Neon database to R2
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-DR.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/pullfm/backup.env
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/pullfm/backup.env
+ExecStart=/opt/pullfm/infra/backup/pullfm-backup.sh dump --kind scheduled
+
+# No SuccessExitStatus. Unlike the four application jobs, this one has no
+# "ran, with something worth a look" outcome: either a verified encrypted dump
+# is in R2 or the only copy of this database outside Neon is a day older than
+# anybody thinks. Every non-zero exit is alert-worthy.
+OnFailure=pullfm-job-alert@%n.service
+
+# The dump itself takes about 25 seconds against a 43 KB database, and pg_dump
+# time grows with the data. Ten minutes is far beyond any plausible size on a
+# 0.5 GB storage cap and still bounded, so a hung TLS connection to Neon cannot
+# hold the unit open until the next firing.
+RuntimeMaxSec=600
+
+# The plaintext dump exists on disk for a few seconds inside mktemp -d. These
+# make that directory private to this unit rather than to the whole filesystem.
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true

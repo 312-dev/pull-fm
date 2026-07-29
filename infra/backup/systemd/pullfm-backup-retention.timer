@@ -1,0 +1,14 @@
+[Unit]
+Description=Weekly backup-retention conformance check
+
+[Timer]
+# Weekly, Mondays 07:11 UTC. Weekly rather than daily because a lifecycle rule
+# does not drift on its own: it changes when a person changes it, and a person
+# who changes it will find out within the week. Monday morning so the answer
+# arrives at the start of a working week rather than the end of one.
+OnCalendar=Mon *-*-* 07:11:00 UTC
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

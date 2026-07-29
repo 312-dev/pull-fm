@@ -1,0 +1,24 @@
+[Unit]
+Description=Export deletion_log to the append-only R2 erasure ledger
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-DR.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/pullfm/backup.env
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/pullfm/backup.env
+ExecStart=/opt/pullfm/infra/backup/pullfm-backup.sh ledger-export
+
+# THE ONE THAT MATTERS LEGALLY. The 2026-07-29 drill proved that a restore to a
+# point before an erasure brings the erased account back AND rolls back the
+# deletion_log row that was supposed to be the replay list. This job is the only
+# thing that keeps a copy of that list outside the database, so a failure here
+# means the next restore silently un-deletes people.
+OnFailure=pullfm-job-alert@%n.service
+
+RuntimeMaxSec=300
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true

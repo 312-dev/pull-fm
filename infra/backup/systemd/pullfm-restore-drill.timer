@@ -1,0 +1,21 @@
+[Unit]
+Description=Run the restore drill monthly
+
+[Timer]
+# The first of the month at 04:47 UTC. Monthly is what Gate 4 asks for.
+#
+# 04:47 puts it after the 03:23 nightly dump has finished, so the drill's own
+# dump is not competing with it for the same Neon compute, and before 06:17,
+# where pullfm-purge-audit runs, so a drill that overruns does not collide with
+# a job that writes to the same database.
+OnCalendar=*-*-01 04:47:00 UTC
+AccuracySec=1s
+
+# TRUE, and this one matters more than the others. A node that was down on the
+# first of the month must still run the drill, because the alternative is a
+# month in which nobody checked that the restore path works, which is
+# indistinguishable from the state Gate 4 exists to end.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

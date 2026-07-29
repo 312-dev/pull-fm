@@ -1,0 +1,25 @@
+[Unit]
+Description=Keep the out-of-band erasure ledger current
+
+[Timer]
+# EVERY TEN MINUTES, and this interval is a published number rather than a
+# tuning choice: it IS the erasure-durability RPO. An account erased less than
+# ten minutes before a restore may not be in the ledger yet, and would come back
+# with nothing recording that it asked to be gone.
+#
+# Ten rather than sixty because the job is one indexed query plus a HEAD per
+# already-exported row, so it costs almost nothing; and rather than one because
+# a minute would put 1440 control-plane wakeups a day against a compute that
+# scales to zero after five minutes of idle and would therefore never sleep.
+#
+# THE REAL FIX IS NOT A SHORTER INTERVAL. It is for the deletion cascade in
+# apps/bff to write the ledger object in the same handler that writes the
+# deletion_log row, which makes the durability synchronous with the request and
+# reduces this job to a reconciler. Until then, ten minutes is the honest number
+# to state in legal/privacy-policy.md.
+OnCalendar=*:0/10
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,31 @@
+[Unit]
+Description=Monthly restore drill against the staging branch
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-DR.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/pullfm/backup.env
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/pullfm/backup.env
+ExecStart=/opt/pullfm/infra/backup/restore-drill.sh
+
+# THIS UNIT DESTROYS DATA ON THE STAGING BRANCH AND THEN RESTORES IT. That is
+# the point; a drill that does not destroy anything proves nothing. It refuses
+# to run against main, and it refuses to run against a branch that already holds
+# user rows unless PULLFM_DRILL_NONEMPTY=1 is set, which is deliberately not set
+# in the environment file.
+#
+# Gate 4 requires the drill to run monthly AND to alert on failure. The exit
+# code is the alert: the script exits non-zero only when the restored data does
+# not match what was seeded, so a finding about the deletion-replay claim is
+# reported without waking anybody, and a failed restore is not.
+OnFailure=pullfm-job-alert@%n.service
+
+# The 2026-07-29 run took 2m35s wall clock. Twenty minutes leaves room for a
+# slow control plane and still fails rather than hanging.
+RuntimeMaxSec=1200
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true

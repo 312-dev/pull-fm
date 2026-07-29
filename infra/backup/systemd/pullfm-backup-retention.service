@@ -1,0 +1,26 @@
+[Unit]
+Description=Assert the R2 backup retention rules still match the published policy
+Documentation=https://github.com/312-dev/pull-fm/blob/main/docs/RUNBOOK-DR.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/pullfm/backup.env
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/pullfm/backup.env
+ExecStart=/opt/pullfm/infra/backup/pullfm-backup.sh retention-check
+
+# A CHECK, NOT AN APPLY. This unit deliberately does not run retention-apply:
+# a job that silently re-imposes an expiry rule would also silently delete
+# objects somebody had removed the rule to protect. It fails, loudly, and a
+# human decides whether the bucket or the policy is the thing that is wrong.
+#
+# legal/privacy-policy.md section 7 states a bounded retention to users. This
+# unit is the only thing that notices when that stops being true.
+OnFailure=pullfm-job-alert@%n.service
+
+RuntimeMaxSec=120
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
