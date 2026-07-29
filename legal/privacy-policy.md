@@ -84,15 +84,20 @@ data in the United States**. See section 9 for the transfer mechanism and what
 WorkOS is and is not permitted to do with it.
 
 You sign in with an **emailed one-time code** (WorkOS Magic Auth). Social
-sign-in with Google or Apple, passkeys, and passwords are **not enabled**; the
-reasoning is in
-[`../docs/runbooks/workos-setup.md`](../docs/runbooks/workos-setup.md).
+sign-in with Google or Apple, passkeys, and passwords are **not enabled**. This
+is the whole sign-in surface: there is no other way to sign in, so this is the
+only account identity we ever receive. The reasoning is in
+[`../docs/PLAN.md`](../docs/PLAN.md) section 4a, and the configuration steps are
+in [`../docs/runbooks/workos-setup.md`](../docs/runbooks/workos-setup.md).
 
-`[CONFIRM]` This sentence must match the launch configuration on the day of
-publication. `docs/PLAN.md` section 4 still records the earlier
-"social plus magic link" plan, and if social sign-in is turned on, this section
-must change, because the provider then also tells us which third-party account
-you used.
+The earlier `[CONFIRM]` on this paragraph is resolved: `docs/PLAN.md` section 4
+recorded a "social plus magic link" plan, and section 4a now supersedes it with
+magic link only. The decision is enforced rather than documented, by a test that
+fails if any password, social, passkey or SSO route is ever registered and by a
+database constraint on `users.auth_method`, so this paragraph cannot quietly
+stop matching the deployed configuration. If social sign-in were ever turned on,
+this section would have to change, because the provider would then also tell us
+which third-party account you used.
 
 | What                                                                       | Where it is stored   | Source |
 | -------------------------------------------------------------------------- | -------------------- | ------ |

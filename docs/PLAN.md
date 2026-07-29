@@ -82,7 +82,7 @@ remains in force**; Gate S is retired and replaced by Gate R (§11.6).
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | **Playback**               | 30s previews (iTunes hotlinkable; **Deezer URLs are signed and expire, never cache them**)                             | **[R]** caching rule |
 | **Data layer**             | **Neon serverless Postgres 18** (`aws-eu-central-1`), branch per environment, Neon's built-in pooler                   | **[R]** see 1c       |
-| **Auth**                   | **WorkOS AuthKit, social + magic-link only. No passwords, ever.**                                                      | **[R]** see §4       |
+| **Auth**                   | **WorkOS Magic Auth. MAGIC LINK ONLY: no passwords, no social, no passkeys, no SSO.**                                  | **[R]** see §4       |
 | **Per-user token storage** | **AES-256-GCM envelope encryption, ciphertext in Postgres.** Infisical removed entirely.                               | **[R]** see §5       |
 | **App secrets**            | 1Password -> Nomad variables. No standing secrets service.                                                             | **[R]**              |
 | **Compute**                | **Hetzner CAX (ARM64)**, project `pull-fm`. One BFF tier plus one small shared-Redis node                              | **[R]** cost         |
@@ -229,16 +229,19 @@ v1 had no dollar figure. At the sizes it named, it would have cost **~$350-550/m
 | -------------------------------------- | ---------------- | ---------------- |
 | Compute: 2x CAX21 BFF + 1x CAX11 cache | €40              | €75              |
 | Load balancer LB11                     | €7.49            | €7.49            |
-| Auth (WorkOS, social-only)             | $0               | $0               |
-| Auth custom domain (recommended)       | $99              | $99              |
+| Auth (WorkOS Magic Auth)               | $0               | $0               |
+| Auth custom domain (**not purchased**) | $99              | $99              |
 | Bot protection (WorkOS Radar)          | ~$0-100          | ~$300            |
 | Token encryption (envelope, app-key)   | $0               | $0               |
 | R2 backups                             | ~$0              | ~$5              |
 | **Database (Neon)** [R]                | $0 (free plan)   | **see 1c**       |
 | **Total**                              | **~$148-248/mo** | **~$393-493/mo** |
 
-Without the custom domain and Radar, the floor is **~$60/mo at 10k**. Radar is the honest line
-item v1 omitted: a consumer signup form _will_ be attacked.
+Without the custom domain and Radar, the floor is **~$60/mo at 10k**, and that floor is the one
+that applies: section 4a settles on magic link only, so there is **no hosted AuthKit page to
+unbrand** and the $99 custom-domain line is not bought. It is left in the table rather than
+deleted because it is the price of reversing 4a, and a decision is easier to hold when its cost is
+visible. Radar is the honest line item v1 omitted: a consumer signup form _will_ be attacked.
 
 **[R] The database line is not honestly $0 at either size.** Section 1c shows the
 Neon free plan cannot serve production: 100 CU-hours a month is 400 hours of
@@ -297,21 +300,62 @@ IPs, **cold-cache resolution against iTunes is arithmetically impossible.**
 
 ---
 
-## 4. Auth: WorkOS, social-only [R]
+## 4. Auth: WorkOS Magic Auth, magic link ONLY [R]
 
 The audit confirmed WorkOS is genuinely free at our scale with no per-org or per-connection fee
 for B2C. It also found that **WorkOS does not export password hashes** and provides no path out,
 while shipping polished tooling to import _in_.
 
-**Resolution: never issue a password.** Google + Apple OAuth and magic-link only.
-
-This is the rare fix that is strictly better on every axis:
+**Resolution: never issue a password.** That half is unchanged and still load-bearing:
 
 - **No hashes exist**, so there is nothing to be held hostage. Lock-in structurally evaporates:
   users re-link by email address at any future provider.
-- **Better consumer UX** - social sign-in is what a music app's users expect.
 - **Removes an entire vulnerability class**: no password storage, reset flow, or stuffing surface.
 - **Preserves the existing WorkOS setup and credentials** already in 1Password.
+
+### 4a. The sign-in set is MAGIC LINK ONLY. Do not re-add social login or passkeys.
+
+This section previously read "Google + Apple OAuth and magic-link only", with "social sign-in is
+what a music app's users expect" as a supporting argument. **That is superseded.** The decision is
+**WorkOS Magic Auth and nothing else**, and it is load-bearing rather than a preference, so the
+reasoning is written out here to stop it being re-added as a helpful improvement.
+
+**Social login costs the property the whole client design is built on.** Magic Auth is a plain
+server-to-server call: we collect an email address on a screen we render, WorkOS emails a code,
+the user types it into a screen we render, and we exchange it. The user never leaves the
+application and never sees a hostname that is not ours. Social login cannot work that way. It
+requires a browser redirect to a **WorkOS-hosted AuthKit page**, which means:
+
+- a **third-party domain in the iOS consent dialog** and in browser chrome during sign-in, which
+  is precisely the shape users have been trained to recognise as phishing; and
+- **99 USD/month** for a WorkOS custom domain to unbrand it, which a non-commercial project with
+  no revenue (section 1a) does not have.
+
+"Better consumer UX" was the argument for social login. A redirect to somebody else's domain
+during sign-in is not better UX, and paying 99 USD/month to hide it is not available.
+
+**Passkeys are bound to the domain, and we do not own our final one yet.** A passkey is bound to
+its Relying Party ID, which is a domain name. WorkOS documentation states outright that adding a
+domain later **"would prevent the usage of passkeys that were registered on the old domain"**.
+Enrolling passkeys before the project owns a settled custom domain would therefore invalidate
+**every existing passkey** on any later move, with no migration path and nothing to offer users
+but re-enrolment of the entire base. Deferring costs nothing and keeps the option open.
+
+**Both are DEFERRED, not rejected.** What would have to become true to revisit: social login needs
+the custom domain to be affordable, or the third-party redirect to become acceptable; passkeys
+need the domain to be settled first.
+
+**This is enforced, not merely documented**, by three independent controls, so the doc and the
+code point at each other:
+
+| Control                                                                                                                                                          | What it forbids                                                                                                    |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `there is no password, social, or passkey route` in [`apps/bff/test/integration/magic-auth.test.ts`](../apps/bff/test/integration/magic-auth.test.ts)            | Any registered route whose path contains `password`, `signup`, `register`, `oauth`, `passkey`, `webauthn` or `sso` |
+| `users_auth_method_chk` in [`packages/db/migrations/0005_magic_auth_identity.sql`](../packages/db/migrations/0005_magic_auth_identity.sql)                       | Any `users.auth_method` value but magic auth, so widening the set is a schema change and therefore a review        |
+| The headers of [`apps/bff/src/routes/v1/auth.ts`](../apps/bff/src/routes/v1/auth.ts) and [`apps/bff/src/services/workos.ts`](../apps/bff/src/services/workos.ts) | The full argument, at the place someone would edit to add a provider                                               |
+
+Anyone adding a sign-in method has to change this section, a test, and a migration. That is the
+intended cost.
 
 Two additions v1 lacked: a **scheduled export of the WorkOS user list into our own backups** (so a
 vendor suspension cannot make us unable to identify our own users), and a **WorkOS webhook
