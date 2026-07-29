@@ -26,7 +26,7 @@
     "format:check": "prettier --check .",
     "scan:secrets": "gitleaks git --config .gitleaks.toml --redact --verbose",
     "scan:sast": "semgrep scan --config=p/default --config=p/typescript --config=p/owasp-top-ten --config=.semgrep/ --severity=ERROR --metrics=off",
-    "scan:deps": "trivy fs . --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed",
+    "scan:deps": "trivy fs . --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed --include-dev-deps --ignorefile .trivyignore.yaml",
     "scan:all": "pnpm scan:secrets && pnpm scan:sast && pnpm scan:deps",
     "stack:up": "docker compose -f docker-compose.dev.yml up -d",
     "stack:down": "docker compose -f docker-compose.dev.yml down",
@@ -51,5 +51,18 @@
     "*.{json,md,yml,yaml}": [
       "prettier --write"
     ]
+  },
+  "//pnpm.overrides": [
+    "minimatch@3 -> ^10.2.6 closes CVE-2026-14257 (HIGH, ReDoS in brace-expansion below 5.0.8).",
+    "The only path to the vulnerable brace-expansion in this repository is minimatch@3.1.5, pulled by eslint 9, @eslint/eslintrc and @eslint/config-array. Nothing here asks for it directly.",
+    "Overriding brace-expansion itself does NOT work, and was tried rather than assumed: its 5.x CommonJS build exports { expand } instead of the bare function that minimatch@3 requires, so eslint dies with 'expand is not a function' on the first glob it matches.",
+    "Overriding the minimatch layer is what eslint 10 does anyway - @eslint/config-array 0.23.5 depends on minimatch ^10.2.4 for this exact matching - and all three consumers here already use the named minimatch.Minimatch export that 10.x still provides.",
+    "Verified equivalent rather than asserted: `eslint . -f json` lints the same 214 files before and after the override, so no files/ignores pattern changed meaning.",
+    "Delete this override when eslint moves to 10.x, which drops @eslint/eslintrc and the minimatch 3 chain with it. See security/AUDIT-2026-07-29.md F1."
+  ],
+  "pnpm": {
+    "overrides": {
+      "minimatch@3": "^10.2.6"
+    }
   }
 }
