@@ -78,14 +78,26 @@ env:
         # last name only). Verify this list after any ZAP major upgrade; an
         # unrecognised name is ignored rather than rejected, so a typo here
         # fails silently and quietly re-enables the rules it was meant to skip.
+        #
+        # AUDIT 2026-07-29. That warning was describing this file. The first
+        # execution of this plan reported "Unrecognised technology" twice:
+        # "C" is not a ZAP tech tag at all (the Language set is ASP, Java,
+        # Spring, JavaScript, JSP/Servlet, PHP, Python, Ruby, XML) and the DB2
+        # tag is named "IBM DB2", not "Db2", and the SQL Server tag is named
+        # "Microsoft SQL Server" ("MsSQL" is the Java field name, not the tech
+        # name). All three were silently ignored, so the rules they were meant
+        # to disable had been running all along. Names below were bisected one
+        # at a time against org.zaproxy.zap.model.Tech in the pinned 2.17.0
+        # image rather than read off the website, because the image is what
+        # runs and the website lists display names inconsistently.
         exclude:
           - "ASP"
-          - "C"
-          - "Db2"
+          - "CouchDB"
+          - "IBM DB2"
           - "Firebird"
           - "IIS"
           - "MacOS"
-          - "MsSQL"
+          - "Microsoft SQL Server"
           - "MySQL"
           - "Oracle"
           - "PHP"
@@ -313,12 +325,33 @@ jobs:
   # `tokenProcessing: false` because the value is a plain JWT with no {{...}}
   # token syntax that ZAP should try to expand.
   # ---------------------------------------------------------------------------
+  # AUDIT 2026-07-29. `url` was "${PULLFM_ZAP_TARGET}.*", and on the very first
+  # execution of this plan ZAP answered `Job: replacer Invalid URL:
+  # ${PULLFM_ZAP_TARGET}.*` and, with `failOnError: true`, aborted the whole run
+  # BEFORE authenticating, before the OpenAPI import, and before a single alert.
+  # The Automation Framework substitutes ${...} into a job's `parameters`, but
+  # not into this job's `rules` list, so the rule was never valid. Verified in
+  # the pinned 2.17.0 image: an `env.vars`-declared variable fails identically,
+  # and a literal value is accepted.
+  #
+  # Replaced with a static allowlist of the hosts this plan is allowed to hand a
+  # credential to. That is STRONGER than the variable it replaces, not merely a
+  # workaround: the variable form would have injected the bearer token into
+  # requests to wherever PULLFM_ZAP_TARGET happened to point, whereas this
+  # cannot leak the token to a host nobody wrote down. `replacementString` is
+  # still a variable because it is a `rules` field ZAP does not validate as a
+  # URL, and it is supplied by the environment so no credential is in this file.
+  #
+  # A NEW TARGET MUST BE ADDED HERE. If it is not, the token is not injected,
+  # the auth sanity check below returns 401 instead of 200, and the plan fails
+  # loudly. That is the desired failure: a scan against an unlisted host stops
+  # rather than silently running unauthenticated and reporting clean.
   - type: replacer
     parameters:
       deleteAllRules: true
     rules:
       - description: "Inject the DAST subject's bearer token"
-        url: "${PULLFM_ZAP_TARGET}.*"
+        url: "(?i)^https?://(api-staging\\.pull\\.fm|api\\.pull\\.fm|host\\.docker\\.internal(:[0-9]+)?|localhost(:[0-9]+)?|127\\.0\\.0\\.1(:[0-9]+)?)(/.*)?$"
         matchType: "req_header"
         matchString: "Authorization"
         matchRegex: false
@@ -337,6 +370,26 @@ jobs:
   # The `url` test additionally proves we are talking to the API rather than to
   # a Cloudflare error page or a maintenance-mode 503 body.
   # ---------------------------------------------------------------------------
+  # AUDIT 2026-07-29. The `responseCode: 200` assertion on the request is the
+  # control that works, and it is the one that matters: with the token missing
+  # this job reports `Expected : 200 Received : 401` and, with
+  # `failOnError: true`, stops the plan before the import. That is exactly the
+  # fail-loud behaviour the comment above promises, and it was verified by
+  # running the plan with a broken credential and watching it stop.
+  #
+  # The `url` test that used to sit here asserted the content type and a JSON
+  # body. It could never have passed. In the pinned 2.17.0 image a `url` test
+  # can assert PRESENCE of a URL in the sites tree, but every response-content
+  # regex against a requestor-issued message fails, including a deliberately
+  # trivial `(?s).*"id".*`: the requestor does not persist a response the test
+  # can read. Four variants were tried. So the content assertion has moved to
+  # security/scripts/run-dast.sh, which fetches GET /v1/me itself, parses the
+  # JSON and reads a field out of it. That is a stronger check than a regex over
+  # a header block, and it runs before ZAP starts, so a dead credential costs
+  # seconds instead of a scan.
+  #
+  # The presence test below is kept because it DOES work, and it distinguishes
+  # "the request was made and recorded" from "the job silently did nothing".
   - type: requestor
     requests:
       - name: "auth sanity check"
@@ -344,12 +397,10 @@ jobs:
         method: "GET"
         responseCode: 200
     tests:
-      - name: "GET /v1/me returns a JSON subject, so the token is live"
+      - name: "GET /v1/me was actually requested and recorded"
         type: "url"
         url: "${PULLFM_ZAP_TARGET}/v1/me"
         operator: "and"
-        responseHeaderRegex: "(?i)content-type:\\s*application/json"
-        responseBodyRegex: "\"id\"\\s*:"
         onFail: "error"
 
   # ---------------------------------------------------------------------------
@@ -381,7 +432,7 @@ jobs:
     parameters:
       template: "sarif-json"
       reportDir: "/zap/wrk/reports"
-      reportFile: "zap-baseline.sarif"
+      reportFile: "zap-baseline.sarif.json"
       reportTitle: "Pull.fm ZAP baseline"
       reportDescription: "Passive DAST against the Pull.fm platform API."
     risks: ["high", "medium", "low", "info"]

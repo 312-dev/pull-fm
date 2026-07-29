@@ -72,14 +72,26 @@ env:
         # last name only). Verify this list after any ZAP major upgrade; an
         # unrecognised name is ignored rather than rejected, so a typo here
         # fails silently and quietly re-enables the rules it was meant to skip.
+        #
+        # AUDIT 2026-07-29. That warning was describing this file. The first
+        # execution of this plan reported "Unrecognised technology" twice:
+        # "C" is not a ZAP tech tag at all (the Language set is ASP, Java,
+        # Spring, JavaScript, JSP/Servlet, PHP, Python, Ruby, XML) and the DB2
+        # tag is named "IBM DB2", not "Db2", and the SQL Server tag is named
+        # "Microsoft SQL Server" ("MsSQL" is the Java field name, not the tech
+        # name). All three were silently ignored, so the rules they were meant
+        # to disable had been running all along. Names below were bisected one
+        # at a time against org.zaproxy.zap.model.Tech in the pinned 2.17.0
+        # image rather than read off the website, because the image is what
+        # runs and the website lists display names inconsistently.
         exclude:
           - "ASP"
-          - "C"
-          - "Db2"
+          - "CouchDB"
+          - "IBM DB2"
           - "Firebird"
           - "IIS"
           - "MacOS"
-          - "MsSQL"
+          - "Microsoft SQL Server"
           - "MySQL"
           - "Oracle"
           - "PHP"

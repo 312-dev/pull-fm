@@ -274,6 +274,41 @@ export async function buildServer(
   // traceable without asking them to reproduce it.
   app.addHook("onSend", async (req, reply) => {
     void reply.header("x-request-id", req.id);
+
+    /**
+     * Cacheability, defaulting to "not cacheable".
+     *
+     * AUDIT 2026-07-29, first ZAP baseline ever run against staging. Rule 10015
+     * fired on GET /v1/me, GET /v1/connections, GET /v1/config, /healthz and
+     * /readyz: every one answered 200 with per-subject data and NO
+     * `Cache-Control` at all. security/zap/rules/alert-filters.yaml already
+     * called this out as a true positive rather than noise -- "every
+     * authenticated response is per-user data and must be Cache-Control:
+     * no-store. A shared cache holding a /v1/feed or /v1/me body is a
+     * cross-subject disclosure" -- and security/zap/rules/baseline-rules.tsv
+     * grades it FAIL. The intent was written down; only product.ts implemented
+     * it, via its local `personalised()` helper, so the catalogue routes were
+     * covered and the account routes were not.
+     *
+     * Fixed here rather than by copying `personalised()` into four more route
+     * files, because a per-handler opt-in is a control that a new route silently
+     * misses. THREAT-MODEL T12 is a shared cache serving one subject's body to
+     * another, and the safe direction of the default is the whole point: a route
+     * is uncacheable unless it says otherwise.
+     *
+     * Handlers that HAVE said otherwise keep their value. product.ts sets
+     * `public, max-age=300` on catalogue reads, which is correct and deliberate
+     * (that data is not per-subject), so this only fills the gap rather than
+     * overriding a decision.
+     *
+     * `private` as well as `no-store` is belt and braces: `no-store` alone is
+     * the modern directive, but `private` is what an older intermediary
+     * understands, and this response may pass through Cloudflare and an
+     * arbitrary corporate proxy on the way to a phone.
+     */
+    if (reply.getHeader("cache-control") === undefined) {
+      void reply.header("cache-control", "private, no-store");
+    }
   });
 
   app.setNotFoundHandler((req, reply) => {
