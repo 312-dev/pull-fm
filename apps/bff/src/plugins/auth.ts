@@ -91,11 +91,67 @@ export interface Subject {
   readonly authenticatedAt: number;
 }
 
+/**
+ * Why a route refuses a personal API token, as a route CLASS.
+ *
+ * The 403 used to be one sentence for every session-only route: "This operation
+ * requires an interactive session. Personal API tokens are read-only." On a
+ * mutating route that is exactly right. On `GET /v1/search` and
+ * `GET /v1/artists/{mbid}` it is self-contradictory - both are reads - and the
+ * first thing a developer concludes is that they minted their token wrong.
+ *
+ * VERIFIED RATHER THAN ASSUMED, because the obvious inference is wrong. The
+ * catalogue routes are NOT session-only because they reach a provider:
+ * `security/zap/upstream-scope.tsv` classifies `GET /v1/search`,
+ * `GET /v1/artists/{mbid}`, `GET /v1/tracks/{mbid}` and `GET /v1/albums/{mbid}`
+ * as `none`, meaning no input can make them call a third party, and
+ * services/discovery.ts confirms it: those paths are `CachedUpstream.peek` and
+ * a Postgres trigram search. Only `/similar`, `/preview` and `/events` are
+ * classified `egress`.
+ *
+ * The reason that IS true of the whole catalogue class is the licence one this
+ * API already publishes in plugins/docs.ts: upstream providers licence their
+ * data for use rather than redistribution, and a personal token is a long-lived
+ * script-facing credential whose consumer we cannot see. That is the same
+ * argument that keeps SeatGeek events session-only under their clause 7.13.
+ *
+ * The message is derived from this value alone, never from the request, so it
+ * cannot become a discovery oracle: an MBID that exists, one that is merely
+ * uncached, and one that was never real all produce the identical 403.
+ */
+export type SessionOnlyReason = "mutating" | "catalogue" | "catalogue-upstream";
+
+const SESSION_ONLY_DETAIL: Readonly<Record<SessionOnlyReason, string>> = {
+  mutating:
+    "This operation requires an interactive session. Personal API tokens are read-only, " +
+    "so a leaked token cannot mint another credential, change a connection, or delete the account.",
+  catalogue:
+    "This is a catalogue route and it requires an interactive session. Not because your token is " +
+    "read-only - this is a read - but because the catalogue is third-party data licensed to Pull.fm " +
+    "for use rather than redistribution, and a personal API token is a long-lived credential whose " +
+    "consumer we cannot see. Your token works on your own data: /v1/feed, /v1/recommendations, " +
+    "/v1/stations, /v1/me and /v1/wishlist.",
+  "catalogue-upstream":
+    "This is a catalogue route and it requires an interactive session, for two reasons and neither " +
+    "is that your token is read-only. The catalogue is third-party data licensed to Pull.fm for use " +
+    "rather than redistribution, and this route can make a request to a provider on your behalf out " +
+    "of an allowance shared by every user. Your token works on your own data: /v1/feed, " +
+    "/v1/recommendations, /v1/stations, /v1/me and /v1/wishlist.",
+};
+
 export interface RequireAuthOptions {
   /** Credential types accepted. Defaults to session only. */
   readonly allow?: readonly AuthMethod[];
   /** Scope a personal token must hold. Ignored for session auth. */
   readonly scope?: string;
+  /**
+   * Which explanation a personal token gets when this route refuses it.
+   *
+   * Defaults to `mutating`, which is the accurate answer for every platform
+   * route and preserves the existing wording where it was already true. It
+   * changes NO route's authorization: `allow` alone decides that.
+   */
+  readonly sessionOnlyReason?: SessionOnlyReason;
 }
 
 declare module "fastify" {
@@ -453,8 +509,10 @@ async function authPlugin(
 
       if (looksLikeApiToken) {
         if (!allow.includes("token")) {
+          // Constant per route. Nothing about the request, the subject, or the
+          // state of the catalogue reaches this string; see SessionOnlyReason.
           throw errors.forbidden(
-            "This operation requires an interactive session. Personal API tokens are read-only.",
+            SESSION_ONLY_DETAIL[options.sessionOnlyReason ?? "mutating"],
           );
         }
         const subject = await fromToken(credential, reply, request);

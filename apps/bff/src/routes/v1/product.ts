@@ -303,7 +303,10 @@ export function registerProductRoutes(
   app.get<{ Querystring: { q: string; limit?: number } }>(
     "/search",
     {
-      preValidation: app.requireAuth({ allow: ["session"] }),
+      preValidation: app.requireAuth({
+        allow: ["session"],
+        sessionOnlyReason: "catalogue",
+      }),
       schema: {
         operationId: "search",
         summary: "Search the catalogue",
@@ -339,7 +342,10 @@ export function registerProductRoutes(
   app.get<{ Params: { mbid: string } }>(
     "/artists/:mbid",
     {
-      preValidation: app.requireAuth({ allow: ["session"] }),
+      preValidation: app.requireAuth({
+        allow: ["session"],
+        sessionOnlyReason: "catalogue",
+      }),
       schema: {
         operationId: "getArtist",
         summary: "One artist",
@@ -365,7 +371,10 @@ export function registerProductRoutes(
   app.get<{ Params: { mbid: string }; Querystring: { limit?: number } }>(
     "/artists/:mbid/similar",
     {
-      preValidation: app.requireAuth({ allow: ["session"] }),
+      preValidation: app.requireAuth({
+        allow: ["session"],
+        sessionOnlyReason: "catalogue-upstream",
+      }),
       schema: {
         operationId: "getSimilarArtists",
         summary: "Artists similar to one artist",
@@ -397,7 +406,10 @@ export function registerProductRoutes(
   app.get<{ Params: { mbid: string } }>(
     "/tracks/:mbid",
     {
-      preValidation: app.requireAuth({ allow: ["session"] }),
+      preValidation: app.requireAuth({
+        allow: ["session"],
+        sessionOnlyReason: "catalogue",
+      }),
       schema: {
         operationId: "getTrack",
         summary: "One recording",
@@ -421,7 +433,10 @@ export function registerProductRoutes(
   app.get<{ Params: { mbid: string } }>(
     "/tracks/:mbid/preview",
     {
-      preValidation: app.requireAuth({ allow: ["session"] }),
+      preValidation: app.requireAuth({
+        allow: ["session"],
+        sessionOnlyReason: "catalogue-upstream",
+      }),
       schema: {
         operationId: "getTrackPreview",
         summary: "A 30 second preview URL",
@@ -452,7 +467,10 @@ export function registerProductRoutes(
   app.get<{ Params: { mbid: string } }>(
     "/albums/:mbid",
     {
-      preValidation: app.requireAuth({ allow: ["session"] }),
+      preValidation: app.requireAuth({
+        allow: ["session"],
+        sessionOnlyReason: "catalogue",
+      }),
       schema: {
         operationId: "getAlbum",
         summary: "One release",
@@ -508,7 +526,10 @@ export function registerProductRoutes(
   }>(
     "/artists/:mbid/events",
     {
-      preValidation: app.requireAuth({ allow: ["session"] }),
+      preValidation: app.requireAuth({
+        allow: ["session"],
+        sessionOnlyReason: "catalogue-upstream",
+      }),
       schema: {
         operationId: "getArtistEvents",
         summary: "Live events for an artist",
