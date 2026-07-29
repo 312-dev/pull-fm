@@ -15,7 +15,8 @@
 > unhealthy. Measured by doing it. See
 > [`../staging/README.md`](../staging/README.md).
 >
-> **`envs/staging` state lives in R2** (`pull-fm-tfstate`) since 2026-07-29.
+> **`envs/staging` and `infra/neon` state lives in R2** (`pull-fm-tfstate`)
+> since 2026-07-29.
 > Backend wiring is per-root `backend.hcl` (gitignored); the credentials come
 > from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
 >
@@ -34,8 +35,16 @@
 > [`docs/RUNBOOK-COST.md`](../../docs/RUNBOOK-COST.md).
 
 Terraform for the Pull.fm backend: Hetzner Cloud compute and networking,
-Cloudflare DNS and TLS posture, and the Cloudflare R2 bucket that holds the
-pgBackRest repository.
+Cloudflare DNS and TLS posture, and the Cloudflare R2 bucket that holds
+out-of-band database dumps.
+
+> **THE DATABASE IS NOT HERE ANY MORE.** Postgres moved to Neon on 2026-07-29
+> and is managed by a fourth root at [`infra/neon/`](../neon/), because one Neon
+> project holds both environments (`main` for production, a `staging` branch
+> under it) and therefore needs exactly one Terraform owner. What is left on
+> Hetzner is the BFF tier and a small shared-Redis node. See
+> [`docs/PLAN.md` section 1c](../../docs/PLAN.md) and
+> [`docs/runbooks/neon-migration.md`](../../docs/runbooks/neon-migration.md).
 
 ---
 
@@ -45,15 +54,18 @@ pgBackRest repository.
 infra/terraform/
 ├── modules/                  reusable, environment-agnostic
 │   ├── network/              private network + node subnet
-│   ├── firewall/             hcloud_firewall for BFF and Postgres roles
-│   ├── compute/              SSH keys, servers, volume, placement group, LB
+│   ├── firewall/             hcloud_firewall for BFF and cache roles
+│   ├── compute/              SSH keys, servers, placement group, LB
 │   ├── dns/                  Cloudflare A/AAAA records
-│   ├── backup-storage/       R2 bucket for pgBackRest
+│   ├── backup-storage/       R2 bucket for out-of-band database dumps
 │   └── zone-settings/        zone-wide Cloudflare TLS posture
 └── envs/                     thin composition roots, one state file each
     ├── shared/               zone-wide settings (owns them for BOTH envs)
     ├── staging/              built in Phase 0
     └── prod/                 written now, applied in Phase 6
+
+infra/neon/                   the database. A fourth root, one Neon project,
+                              BOTH environments as branches of it.
 ```
 
 `envs/staging` and `envs/prod` call an **identical module graph**. The only
@@ -80,6 +92,7 @@ records stay in the environment roots.
 | Hetzner Cloud project `pull-fm` | Created by hand. A **separate project** from the personal fleet, so a compromised token has a bounded blast radius. |
 | Cloudflare zone `pull.fm`       | Already on the account. See the open decision in `docs/PLAN.md` section 10 about the shared Cloudflare account.     |
 | An R2 state bucket              | Created once by hand; see [Remote state](#remote-state).                                                            |
+| A Neon project                  | `steep-frost-83698289`, created by hand in the console and adopted by [`infra/neon`](../neon/) via import blocks.   |
 | Tailscale tailnet               | The only path to SSH. See [Ingress posture](#ingress-posture).                                                      |
 | Billing alerts                  | Gate $. Cloudflare armed, Hetzner manual. [`docs/RUNBOOK-COST.md`](../../docs/RUNBOOK-COST.md).                     |
 
@@ -241,8 +254,10 @@ Regenerate with `terraform providers lock -platform=...` after a version bump.
 
 Hetzner raised **CPX/CCX pricing by 150-210 percent on 2026-06-15** while CAX
 rose about 30 percent (`docs/PLAN.md` section 2; the US CPX41 went from EUR 38.99
-to EUR 120.49). The sizing here is 2x `cax21` for BFF and 1x `cax31` for
-Postgres, about EUR 47/mo. The same shape on CPX would be roughly 6x that.
+to EUR 120.49). The sizing here is 2x `cax21` for BFF and 1x `cax11` for
+the shared Redis node, about EUR 40/mo. The Postgres node it replaced was a
+`cax31`; the workload is now two Redis instances capped at 256 MB and 128 MB, not
+a database page cache. The same shape on CPX would be roughly 6x that.
 
 `modules/compute` rejects any `server_type` that does not start with `cax`. That
 is a deliberate guardrail, not a typo check: switching families is a cost
@@ -310,19 +325,26 @@ certificates require the hostname to resolve to the LB, and it resolves to
 Cloudflare instead. TLS is terminated at the origin with a Cloudflare Origin CA
 certificate, which is what permits SSL mode `strict` end to end.
 
-### Postgres is not publicly reachable, by construction
+### Redis is not publicly reachable, by construction
 
-Three independent mechanisms, because a firewall rule alone is one careless edit
-from being wrong:
+The same three mechanisms that used to protect Postgres, unchanged, because none
+of them depended on which daemon was listening:
 
-1. The DB server has **no public IPv4 at all** (`db_public_ipv4_enabled = false`).
-   Public IPv6 stays on purely for egress - apt mirrors and the R2 endpoint are
-   both dual-stack - which avoids standing up a NAT hop for one machine.
-2. The firewall has **no inbound rule for 5432**, and adding one would be
+1. The cache node has **no public IPv4 at all**
+   (`cache_public_ipv4_enabled = false`). Public IPv6 stays on purely for egress
+   - apt mirrors and the Tailscale coordination server are both dual-stack -
+     which avoids standing up a NAT hop for one machine.
+2. The firewall has **no inbound rule for 6379 or 6380**, and adding one would be
    meaningless anyway: Hetzner Cloud Firewalls filter the public interface only
    and never inspect private-network traffic.
-3. `listen_addresses` and `pg_hba.conf` restrict Postgres to the private subnet.
-   That is config management's job, not Terraform's, and is asserted by Gate 3.
+3. The compose port bindings publish to the private address only, and both
+   instances set `requirepass`. That is config management's job, not
+   Terraform's.
+
+**The database no longer benefits from any of this.** Neon endpoints are on the
+public internet, guarded by a credential. That is the security cost of the
+migration and it is recorded in `docs/PLAN.md` section 1c rather than left for a
+reviewer to notice.
 
 ### Egress is allowlisted
 
@@ -334,29 +356,30 @@ ports chosen by the far side, and a narrow rule silently degrades every session
 to DERP relay. Set `restrict_egress = false` as the first step when debugging a
 suspected egress block, and the first thing to set back.
 
-### `prevent_destroy` on stateful resources
+### `prevent_destroy`, and where it went
 
-Applied to:
+It used to guard `hcloud_server.db`, `hcloud_volume.db_data` and
+`cloudflare_r2_bucket.backups`. The first two are gone with the database, and so
+is the three-step teardown ceremony they imposed on staging.
 
-- **`hcloud_server.db`** - the single most expensive mistake available in this
-  repo. Gate 4 proves a restore works; it does not make one free (30 minutes of
-  downtime plus up to 5 minutes of RPO loss).
-- **`hcloud_volume.db_data`** - the Postgres data volume, where enabled.
-- **`cloudflare_r2_bucket.backups`** - if compute is destroyed the service is
-  down; if this is destroyed the service is _gone_.
+**It moved rather than disappearing.** `infra/neon` applies `prevent_destroy` to
+`neon_project.pullfm`, `neon_database.main`, `neon_role.owner` and
+`neon_endpoint.main`, which is where the unrecoverable loss now lives. One thing
+got weaker in the move and is worth knowing: the Hetzner nodes carried a
+**second, vendor-side lock** (`delete_protection`, enforced by the Hetzner API,
+so it also caught a console click or a stale state file). Neon has no equivalent,
+and protected branches are a paid-plan feature, so `prevent_destroy` is the only
+lock on the database today.
 
-The DB server and volume carry a **second, independent lock**: Hetzner-side
-`delete_protection` / `rebuild_protection`. The two fail differently and that is
-the point. `prevent_destroy` catches a bad plan locally, before anything is
-sent. `delete_protection` is enforced by the Hetzner API and catches anything
-that bypasses this codebase entirely - the console, the CLI, a stale state file,
-a `terraform state rm` followed by an apply.
+`cloudflare_r2_bucket.backups` keeps its `prevent_destroy`. pgBackRest no longer
+writes to it, but a bucket outside the database vendor is exactly where the
+out-of-band logical dumps belong.
 
-**Consequence:** `terraform destroy` on staging will fail, by design. Tearing
-down staging is a three-step, deliberate act: set `db_delete_protection = false`
-and apply, remove the `prevent_destroy` blocks in a reviewed commit, then
-destroy. If that feels like too much friction for a staging environment, that is
-the friction working.
+What remains on Hetzner is `lb_delete_protection` and
+`network_delete_protection`, both variable-driven, both true in prod and false in
+staging. `cache_delete_protection` defaults to **false** even in the module,
+because destroying the cache node costs a cold cache and a reset rate-limit
+window rather than data.
 
 ### `ignore_changes = [image]`
 
@@ -370,30 +393,38 @@ change is routine and replacing the database to do the same never is.
 
 ### Backups
 
-Two layers, and they are not redundant:
+The database's backups are Neon's now: instant restore from a copy-on-write
+history, with the window set by `history_retention_seconds` in `infra/neon` (6
+hours on the current plan, which is the Free ceiling). That replaces pgBackRest
+entirely and is dramatically faster than the 30 minutes Gate 4 budgets.
 
-- **pgBackRest to R2** is the actual backup strategy: full backups plus WAL
-  archive, which is what delivers the RPO <= 5 min and restore <= 30 min that
-  Gate 4 measures.
-- **Hetzner automatic backups** are enabled on the **DB node only**
-  (`enable_db_backups = true`, about 20 percent of the server price, roughly EUR
-  3.20/mo on a `cax31`). This is not a database backup; it is the cheapest
-  available whole-machine rollback when a config change bricks the node. BFF
-  nodes have it off: they hold no state and are rebuilt from config management,
-  so a snapshot of one is a snapshot of nothing.
+Two things this repository still owns:
 
-**No R2 lifecycle expiry rule is configured, deliberately.** Retention belongs to
-pgBackRest (`repo1-retention-full` / `repo1-retention-archive`). An object expiry
-rule running underneath it deletes WAL segments the manifest still references and
-turns a working repository into an unrestorable one - silently, until the Gate 4
-drill.
+- **The R2 bucket**, which now holds out-of-band logical dumps rather than a
+  pgBackRest repository. It exists because a backup inside the database vendor is
+  not a backup against the database vendor, and because a mistake noticed after
+  the 6 hour restore window has no other recovery path. The runbook requires a
+  dump before any destructive operation for exactly that reason.
+- **Hetzner automatic backups are now off everywhere** (`enable_cache_backups`
+  and `enable_app_backups` both false). They were on for the DB node because a
+  whole-machine snapshot was the cheap rollback for state that could not be
+  rebuilt. Neither remaining node holds such state.
+
+**No R2 lifecycle expiry rule is configured, deliberately.** It was previously
+because an object expiry rule running underneath pgBackRest deletes WAL segments
+the manifest still references. The reason is now simpler and still binding: a
+dump taken before a destructive operation must outlive the operation, and an
+expiry rule is a good way to discover that it did not.
 
 ### Deterministic private addressing
 
-Private IPs are derived from the subnet CIDR (`.5` LB, `.11`+ BFF, `.21` DB)
-rather than assigned by DHCP. `pg_hba.conf`, PgBouncer's host list and Nomad's
-`retry_join` all reference these addresses; DHCP would turn every node rebuild
-into a config change across three other files.
+Private IPs are derived from the subnet CIDR (`.5` LB, `.11`+ BFF, `.21` cache)
+rather than assigned by DHCP. The BFF's `REDIS_URL` and `REDIS_QUOTA_URL` and
+Nomad's `retry_join` all reference these addresses; DHCP would turn every node
+rebuild into a config change across three other files. The `.21` slot kept its
+address across the Neon migration even though its role changed, because
+renumbering would have invalidated every runbook quoting it while changing
+nothing about what is reachable.
 
 ### Live Cloudflare IP ranges
 
@@ -410,14 +441,15 @@ fresh checkout, and this drift is real and should be applied. The
 
 Deliberate omissions, each for a reason:
 
-| Not managed                                | Why                                                                                                                                                                                                        | Where it lives                                                     |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| **R2 access key pair** for pgBackRest      | The Cloudflare provider can mint an account API token, but the resulting secret is written to state in plaintext. A backup credential is the one credential that must survive the loss of everything else. | Created by hand, stored in 1Password, injected as a Nomad variable |
-| **R2 access key pair** for Terraform state | Same reason, plus circularity.                                                                                                                                                                             | 1Password, exported as `AWS_*` before `init`                       |
-| **KEK** for the per-user token vault       | 256-bit app key, escrowed in two places (`docs/PLAN.md` section 5). Losing it makes every user's tokens permanent ciphertext.                                                                              | 1Password + offline escrow, injected as a Nomad variable           |
-| **WorkOS credentials**                     | Application secrets, not infrastructure.                                                                                                                                                                   | 1Password -> Nomad variables                                       |
-| **Cloudflare Origin CA certificates**      | Issuing them through Terraform puts the private key in state.                                                                                                                                              | Generated per node, delivered by config management                 |
-| **TXT records** for domain verification    | Issued out of band by whoever runs the verification; the `dns` module rejects them so the two never fight.                                                                                                 | Cloudflare dashboard                                               |
+| Not managed                                | Why                                                                                                                                                                                                                                     | Where it lives                                                     |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| **R2 access key pair** for database dumps  | The Cloudflare provider can mint an account API token, but the resulting secret is written to state in plaintext. A backup credential is the one credential that must survive the loss of everything else.                              | Created by hand, stored in 1Password, injected as a Nomad variable |
+| **Neon connection strings**                | Terraform PRODUCES these (as sensitive outputs of `infra/neon`) but does not distribute them. Note that Neon returns role passwords through its API, so they are in that root's state in plaintext and no provider setting prevents it. | Copied from `terraform output` into 1Password by the runbook       |
+| **R2 access key pair** for Terraform state | Same reason, plus circularity.                                                                                                                                                                                                          | 1Password, exported as `AWS_*` before `init`                       |
+| **KEK** for the per-user token vault       | 256-bit app key, escrowed in two places (`docs/PLAN.md` section 5). Losing it makes every user's tokens permanent ciphertext.                                                                                                           | 1Password + offline escrow, injected as a Nomad variable           |
+| **WorkOS credentials**                     | Application secrets, not infrastructure.                                                                                                                                                                                                | 1Password -> Nomad variables                                       |
+| **Cloudflare Origin CA certificates**      | Issuing them through Terraform puts the private key in state.                                                                                                                                                                           | Generated per node, delivered by config management                 |
+| **TXT records** for domain verification    | Issued out of band by whoever runs the verification; the `dns` module rejects them so the two never fight.                                                                                                                              | Cloudflare dashboard                                               |
 
 ---
 
@@ -425,9 +457,14 @@ Deliberate omissions, each for a reason:
 
 Not gaps to fill silently - other tracks own them:
 
-- **Nomad, Postgres, PgBouncer, Redis and the application** are config
-  management, not Terraform. Terraform stops at "a booted node with a stable
-  private address, an attached firewall, and a mounted volume".
+- **Nomad, Redis and the application** are config management, not Terraform.
+  Terraform stops at "a booted node with a stable private address and an attached
+  firewall".
+- **Postgres** is not config management either any more. It is Neon, and it is
+  Terraform, but in [`infra/neon`](../neon/) rather than here.
+- **PgBouncer** is neither, in a cloud environment: Neon's pooled endpoint is a
+  transaction-mode pooler already. It survives in `docker-compose.dev.yml` so
+  local development meets the same connection semantics.
 - **Cloudflare WAF rules, rate limiting and the maintenance worker** belong with
   the security track (`security/`).
 - **Load-test infrastructure** belongs with the load track (`load/`).
@@ -440,21 +477,24 @@ Not gaps to fill silently - other tracks own them:
 
 Run from a clean checkout on `darwin_arm64`, Terraform v1.15.8:
 
-| Check                                             | Result                                                                                   |
-| ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `terraform fmt -recursive -check`                 | pass                                                                                     |
-| `terraform validate` (`envs/staging`)             | pass                                                                                     |
-| `terraform validate` (`envs/prod`)                | pass                                                                                     |
-| `terraform validate` (`envs/shared`)              | pass                                                                                     |
-| `trivy config --severity HIGH,CRITICAL`           | 0 misconfigurations across all three roots                                               |
-| `semgrep --config=p/terraform --config=p/secrets` | 0 findings                                                                               |
-| `gitleaks dir --config .gitleaks.toml`            | no leaks found                                                                           |
-| `terraform plan` (`envs/staging`)                 | **exit 0, no changes** (2026-07-29), with the global API key absent from the environment |
-| `terraform plan` (`envs/shared`)                  | **exit 0, no changes** (2026-07-29), same                                                |
-| `terraform destroy` (staging, keep-list)          | **19 destroyed, run rate EUR 0.00/mo** (2026-07-29)                                      |
-| `terraform apply` (staging, from nothing)         | **19 created in 45 seconds** (2026-07-29)                                                |
-| staging serving after that rebuild                | **NO.** HTTP 525, both LB targets unhealthy. See `../staging/README.md`.                 |
-| `terraform apply` (`envs/prod`)                   | **NOT RUN.** Phase 6.                                                                    |
+| Check                                               | Result                                                                                   |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `terraform fmt -recursive -check`                   | pass                                                                                     |
+| `terraform validate` (`envs/staging`)               | pass                                                                                     |
+| `terraform validate` (`envs/prod`)                  | pass                                                                                     |
+| `terraform validate` (`envs/shared`)                | pass                                                                                     |
+| `terraform validate` (`infra/neon`)                 | pass                                                                                     |
+| `terraform plan` (`infra/neon`, live control plane) | **4 to import, 2 to add, 1 to change, 0 to destroy** (2026-07-29)                        |
+| `terraform apply` (`infra/neon`)                    | **NOT RUN.** Gated on operator sign-off.                                                 |
+| `trivy config --severity HIGH,CRITICAL`             | 0 misconfigurations across all three roots                                               |
+| `semgrep --config=p/terraform --config=p/secrets`   | 0 findings                                                                               |
+| `gitleaks dir --config .gitleaks.toml`              | no leaks found                                                                           |
+| `terraform plan` (`envs/staging`)                   | **exit 0, no changes** (2026-07-29), with the global API key absent from the environment |
+| `terraform plan` (`envs/shared`)                    | **exit 0, no changes** (2026-07-29), same                                                |
+| `terraform destroy` (staging, keep-list)            | **19 destroyed, run rate EUR 0.00/mo** (2026-07-29)                                      |
+| `terraform apply` (staging, from nothing)           | **19 created in 45 seconds** (2026-07-29)                                                |
+| staging serving after that rebuild                  | **NO.** HTTP 525, both LB targets unhealthy. See `../staging/README.md`.                 |
+| `terraform apply` (`envs/prod`)                     | **NOT RUN.** Phase 6.                                                                    |
 
 What the first real applies settled, none of which `validate` could have:
 

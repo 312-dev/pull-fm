@@ -46,16 +46,17 @@ Measured live by `make cost`, not transcribed. As of 2026-07-29 **staging is
 torn down and the Hetzner run rate is EUR 0.00/mo.** The per-resource figures
 below were measured while it was up, and are what a gate run costs.
 
-| Vendor        | Line                                          | Cost                            |
-| ------------- | --------------------------------------------- | ------------------------------- |
-| Hetzner       | `pullfm-staging-db-1` (cpx12 + backups)       | EUR 16.19/mo                    |
-| Hetzner       | `pullfm-staging-app-1` (cpx12)                | EUR 13.49/mo                    |
-| Hetzner       | `pullfm-staging-lb` (lb11)                    | EUR 8.49/mo                     |
-| **Hetzner**   | **total while staging is UP**                 | **EUR 38.17/mo**                |
-| **Hetzner**   | **total while staging is DOWN**               | **EUR 0.00/mo**                 |
-| Cloudflare    | zone `pull.fm`, Universal SSL, proxied DNS    | $0 (free plan)                  |
-| Cloudflare R2 | `pull-fm-tfstate` + `pull-fm-backups-staging` | ~$0 (under the 10 GB free tier) |
-| WorkOS        | AuthKit, social + magic-link                  | $0 to 1M MAU                    |
+| Vendor        | Line                                          | Cost                                                 |
+| ------------- | --------------------------------------------- | ---------------------------------------------------- |
+| Hetzner       | `pullfm-staging-cache-1` (cpx11, no backups)  | EUR 4.35/mo (was EUR 16.19 as the Postgres node)     |
+| Hetzner       | `pullfm-staging-app-1` (cpx12)                | EUR 13.49/mo                                         |
+| Hetzner       | `pullfm-staging-lb` (lb11)                    | EUR 8.49/mo                                          |
+| **Hetzner**   | **total while staging is UP**                 | **EUR 26.33/mo** (was EUR 38.17)                     |
+| **Hetzner**   | **total while staging is DOWN**               | **EUR 0.00/mo**                                      |
+| Cloudflare    | zone `pull.fm`, Universal SSL, proxied DNS    | $0 (free plan)                                       |
+| Cloudflare R2 | `pull-fm-tfstate` + `pull-fm-backups-staging` | ~$0 (under the 10 GB free tier)                      |
+| Neon          | project `pull-fm`, free plan                  | $0. **Cannot serve production**; see PLAN section 1c |
+| WorkOS        | AuthKit, social + magic-link                  | $0 to 1M MAU                                         |
 
 Staging is ephemeral (`docs/PLAN.md` section 10c). Hetzner bills hourly, so the
 figure that matters is **EUR 0.0523/hour while up**: a three hour gate session

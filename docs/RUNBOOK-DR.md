@@ -8,12 +8,14 @@
 > **Status: FAILING, and measured.** See section 2. This is not "not started".
 > The drill was run, and it did not come back healthy.
 >
-> **pgBackRest is not deployed.** `wal_level` and `archive_mode` are set so
-> enabling it is a config reload rather than a restart, but `archive_command` is
-> currently a no-op and no retention values are configured. **Sections 3 to 5
-> describe an intended procedure that has never been executed**, and they are
-> written now so that the first execution is a rehearsal rather than an
-> improvisation.
+> **pgBackRest is not deployed and will not be.** The database moved to Neon on
+> 2026-07-29 (`PLAN.md` section 1c), which takes its own point-in-time backups,
+> so `wal_level`, `archive_command` and a pgBackRest stanza no longer describe
+> anything that exists. **Section 5 is superseded** by
+> [`runbooks/neon-migration.md`](runbooks/neon-migration.md) and is left in place
+> only until it is rewritten against Neon; do not follow it. Sections 6 and 7,
+> which are about the application node, are unaffected and are still the parts
+> that are failing.
 
 ---
 
@@ -129,6 +131,23 @@ The same escrow requirement now extends to the **release signing key**
 ---
 
 ## 5. Restoring Postgres
+
+> **SUPERSEDED, 2026-07-29. DO NOT FOLLOW THIS SECTION.**
+>
+> Everything below assumes a self-managed Postgres node with a pgBackRest
+> repository in R2. The database is Neon now. The replacement for a
+> point-in-time restore is Neon instant restore, which is a control-plane
+> operation measured in seconds rather than the 30 minutes budgeted here, and
+> its window is `history_retention_seconds` in `infra/neon` (6 hours on the
+> current plan). The replacement for "restore into a fresh node" is a branch
+> reset. Both are in
+> [`runbooks/neon-migration.md`](runbooks/neon-migration.md) sections 7 and 8.
+>
+> **The 6 hour window is narrower than the retention this section assumed**,
+> which is the one respect in which the new position is worse and the reason the
+> runbook requires an out-of-band logical dump to R2 before any destructive
+> operation. This section is kept unedited rather than deleted so the rewrite is
+> a diff against something rather than a blank page.
 
 **This procedure has never been executed and pgBackRest is not deployed.** It is
 the intended shape, written from the configuration that exists.

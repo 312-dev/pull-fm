@@ -6,10 +6,10 @@ after that: TLS termination, the data plane, and the deploy loop.
 
 Two nodes, both `cpx12` (2 vCPU / 2 GB) in `hel1`:
 
-| Node                   | Private IP | Runs                                                  |
-| ---------------------- | ---------- | ----------------------------------------------------- |
-| `pullfm-staging-app-1` | 10.20.1.11 | nginx (TLS origin), BFF container, deploy agent       |
-| `pullfm-staging-db-1`  | 10.20.1.21 | Postgres 17, Redis cache, Redis quota. No public IPv4 |
+| Node                     | Private IP | Runs                                                                           |
+| ------------------------ | ---------- | ------------------------------------------------------------------------------ |
+| `pullfm-staging-app-1`   | 10.20.1.11 | nginx (TLS origin), BFF container, deploy agent                                |
+| `pullfm-staging-cache-1` | 10.20.1.21 | Redis cache, Redis quota. No public IPv4. **The database is Neon, not a node** |
 
 ---
 
@@ -24,7 +24,7 @@ updates across nodes, service discovery, failover. Staging is one application
 node. A single-node Nomad cluster is a server and a client agent on the same
 box, consuming 200-300 MB of a 2 GB machine to schedule exactly one task onto
 exactly one place it could possibly go. It buys no capability that is exercised
-here, and every megabyte it takes comes out of Postgres' page cache or the
+here, and every megabyte it takes comes out of Redis' memory budget or the
 BFF's heap.
 
 **What is lost.** Nomad variables as a secret store, and per-task resource
@@ -127,9 +127,9 @@ if the secret files they depend on are missing.
 
 ```bash
 # Database node (reached through the app node; it has no public IPv4)
-scp -J pullfm@<app-ip> db.env pullfm@10.20.1.21:/tmp/
+scp -J pullfm@<app-ip> cache.env pullfm@10.20.1.21:/tmp/
 ssh -J pullfm@<app-ip> pullfm@10.20.1.21
-sudo install -d -m 0751 /etc/pullfm && sudo install -m 0600 /tmp/db.env /etc/pullfm/db.env
+sudo install -d -m 0751 /etc/pullfm && sudo install -m 0600 /tmp/cache.env /etc/pullfm/cache.env
 sudo bash bootstrap.sh
 
 # Application node
@@ -147,7 +147,7 @@ the procedure.
 | Path                                   | Contents                                        | Source                                            |
 | -------------------------------------- | ----------------------------------------------- | ------------------------------------------------- |
 | `/etc/pullfm/bff.env`                  | DATABASE_URL, REDIS urls, KEK, WorkOS key       | 1Password `pull-fm/staging/*`                     |
-| `/etc/pullfm/db.env`                   | Postgres and Redis passwords                    | 1Password `pull-fm/staging/*`                     |
+| `/etc/pullfm/cache.env`                | Redis passwords                                 | 1Password `pull-fm/staging/*`                     |
 | `/etc/pullfm/redis/{cache,quota}.conf` | Rendered by `db/bootstrap.sh`; carry a password | generated                                         |
 | `/etc/ssl/pullfm/origin.{pem,key}`     | Cloudflare Origin CA certificate and key        | 1Password `pull-fm/staging/ORIGIN_CA_PRIVATE_KEY` |
 | `/etc/pullfm/deploy.env`               | The running image digest                        | written by `pullfm-deploy`                        |
@@ -187,11 +187,11 @@ verify                   poll https://api-staging.pull.fm/healthz for HEAD
 
 The split is by **secrecy**, not by convenience.
 
-| Stage          | Carries                                             | Why there                                                                                                                                                              |
-| -------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **cloud-init** | packages, docker, nginx, the tailnet, `/etc/pullfm` | `user_data` is persisted in Terraform state and readable from the Hetzner API for the life of the server. Everything here is a public fact and none of it is a secret. |
-| **converge**   | `bff.env`, `db.env`, the origin certificate and key | Secrets. Shipped over SSH after the node exists, straight from 1Password, installed root-owned `0600`. Never in git, never in state, never in an image.                |
-| **verify**     | nothing                                             | Reads the public URL. It cannot pass by reporting its own success.                                                                                                     |
+| Stage          | Carries                                                | Why there                                                                                                                                                              |
+| -------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **cloud-init** | packages, docker, nginx, the tailnet, `/etc/pullfm`    | `user_data` is persisted in Terraform state and readable from the Hetzner API for the life of the server. Everything here is a public fact and none of it is a secret. |
+| **converge**   | `bff.env`, `cache.env`, the origin certificate and key | Secrets. Shipped over SSH after the node exists, straight from 1Password, installed root-owned `0600`. Never in git, never in state, never in an image.                |
+| **verify**     | nothing                                                | Reads the public URL. It cannot pass by reporting its own success.                                                                                                     |
 
 The one secret in `user_data` is a Tailscale auth key, and it is minted fresh
 per apply, **single use**, pre-authorised, and **ephemeral**. It is spent the
@@ -252,7 +252,7 @@ not come back:
 | Hetzner load balancer target health        | **unhealthy on both 80 and 443**                                                        |
 
 Terraform's job ended at a booted node. nginx, the origin certificate, the BFF
-container, the deploy timer, Postgres and Redis had all been applied **by a
+container, the deploy timer and Redis had all been applied **by a
 human over SSH** during Gate 0 and existed nowhere else. And there was no way
 in: the firewall carries no rule for port 22 and Tailscale was never installed,
 because `tailscale_auth_key` was empty in every committed configuration.
@@ -276,8 +276,16 @@ every committed configuration. It is now a fallback rather than the procedure.
 
 Deliberate omissions, each owned by a later phase:
 
-- **PgBouncer** (Phase 1, Gate 1). Postgres is sized for one BFF node with a
-  pool of 10 in the meantime.
-- **pgBackRest to R2** (Phase 1, Gate 4). `wal_level` and `archive_mode` are
-  already set so enabling it is a config reload rather than a restart.
+- ~~**PgBouncer**~~ **CANCELLED for cloud environments.** Neon's pooled endpoint
+  is PgBouncer in transaction mode already, so deploying our own in front of it
+  would be a second pooler and a second failure mode for no new capability.
+  PgBouncer stays in `docker-compose.dev.yml` so a laptop meets the same
+  connection semantics; the reasoning is written there and in
+  `docs/runbooks/neon-migration.md`.
+- ~~**pgBackRest to R2**~~ **CANCELLED.** Neon takes its own point-in-time
+  backups, with the window set by `history_retention_seconds` in `infra/neon`.
+  The R2 bucket survives and now holds out-of-band logical dumps, because a
+  backup inside the database vendor is not a backup against the database vendor,
+  and because a mistake noticed after the restore window has no other recovery
+  path.
 - **Second application node**, which is what Gate 6's rolling deploy needs.

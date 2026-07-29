@@ -81,13 +81,13 @@ remains in force**; Gate S is retired and replaced by Gate R (§11.6).
 | Area                       | Decision                                                                                                               | Changed?             |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | **Playback**               | 30s previews (iTunes hotlinkable; **Deezer URLs are signed and expire, never cache them**)                             | **[R]** caching rule |
-| **Data layer**             | Postgres 17 + PgBouncer (transaction mode) from day one                                                                | **[R]** added pooler |
+| **Data layer**             | **Neon serverless Postgres 18** (`aws-eu-central-1`), branch per environment, Neon's built-in pooler                   | **[R]** see 1c       |
 | **Auth**                   | **WorkOS AuthKit, social + magic-link only. No passwords, ever.**                                                      | **[R]** see §4       |
 | **Per-user token storage** | **AES-256-GCM envelope encryption, ciphertext in Postgres.** Infisical removed entirely.                               | **[R]** see §5       |
 | **App secrets**            | 1Password -> Nomad variables. No standing secrets service.                                                             | **[R]**              |
-| **Compute**                | **Hetzner CAX (ARM64)**, project `pull-fm`                                                                             | **[R]** cost         |
+| **Compute**                | **Hetzner CAX (ARM64)**, project `pull-fm`. One BFF tier plus one small shared-Redis node                              | **[R]** cost         |
 | **Orchestration**          | Nomad v2.0.4 (BSL permits running our own commercial app)                                                              | confirmed            |
-| **Backups**                | Cloudflare R2 + pgBackRest (R2 pricing confirmed unchanged)                                                            | confirmed            |
+| **Backups**                | **Neon instant restore** for the database; R2 keeps the out-of-band logical dumps                                      | **[R]** see 1c       |
 | **Discovery**              | **ListenBrainz primary.** Last.fm _contingent_ on commercial terms. MusicBrainz for connections.                       | **[R]**              |
 | **Audio features**         | Local Postgres table; AcousticBrainz dumps offline; ReccoBeats cached-on-fetch. **Never a hot-path third-party call.** | **[R]**              |
 | **Events**                 | **Client built (SeatGeek), route still 501.** Blocked on Gate L, not on code. See §10e and §11.7.                      | **[R]** see §11.7    |
@@ -120,26 +120,144 @@ balancer, nginx and the container. Gate D should be written the same way.
 
 ---
 
+## 1c. Database topology: Neon, not a Hetzner Postgres node (planned 2026-07-29)
+
+**Status: planned and verified, NOT applied.** `terraform plan` is clean against
+the live Neon control plane (4 to import, 2 to add, 1 to change, **0 to
+destroy**); `terraform apply` is gated on operator sign-off. Full procedure:
+[`runbooks/neon-migration.md`](runbooks/neon-migration.md).
+
+The database moves off a self-managed Hetzner node onto **Neon serverless
+Postgres 18** in `aws-eu-central-1` (Frankfurt), managed by a fourth Terraform
+root at `infra/neon/` with its state in the same R2 bucket as the others.
+
+| Was                                             | Is                                                            |
+| ----------------------------------------------- | ------------------------------------------------------------- |
+| Postgres 17 on a Hetzner node                   | Neon Postgres 18, one project, branch per environment         |
+| PgBouncer planned for that node (never shipped) | Neon's pooled endpoint, which _is_ PgBouncer transaction mode |
+| pgBackRest to R2 for PITR                       | Neon instant restore; R2 keeps logical dumps                  |
+| Staging DB destroyed per gate run               | Staging DB is a branch, reset in seconds                      |
+| DB unreachable from the internet by topology    | DB reachable from the internet, guarded by a credential       |
+
+**One Neon project holds both environments.** `main` is the default branch and
+serves production; `staging` is a child of it. That is why `infra/neon` is a root
+of its own rather than something `envs/staging` and `envs/prod` each own a slice
+of: the same reasoning that created `envs/shared` for zone-wide TLS settings.
+
+**The Hetzner data node did not disappear, it shrank.** Postgres left; the two
+Redis instances stayed, and the node is now `role=cache` on a smaller type with
+no data volume, no whole-machine backups and no delete protection. Folding Redis
+into the BFF nodes would have deleted a whole server, and it is not possible:
+the quota and rate-limit counters must be counted **once** across every BFF node,
+and section 3's MusicBrainz ceiling is the sharp edge. Gate 1 asserts `<=1.0
+req/s` egress **for the whole service**, and the token bucket that holds us to it
+lives in Redis. Two BFF nodes with private buckets would each honour 1 req/s and
+the service would emit 2.
+
+**PgBouncer survives in `docker-compose.dev.yml` and only there.** In the cloud
+it would be a second pooler in front of Neon's, for no new capability. Locally it
+is the only thing providing transaction-pooling semantics, and those semantics
+are not transparent: session advisory locks do not survive `COMMIT`, `SET`
+outside a transaction does not persist, `LISTEN`/`NOTIFY` does not work. All of
+them fail **silently**, so a laptop on port 5432 passes tests production cannot.
+Local dev publishes both ports under the same two variable names the Neon
+outputs use, `DATABASE_URL` (pooled) and `DATABASE_URL_DIRECT` (direct).
+
+**The migration runner must use the direct endpoint**, and this is correctness
+rather than tuning. `packages/db/scripts/migrate.mjs` takes a session-scoped
+`pg_advisory_lock` so two nodes cannot both decide zero migrations are applied.
+A transaction pooler hands the connection away at `COMMIT`, so the lock stops
+serialising without erroring, and the damage appears only as two concurrent
+`CREATE TABLE`s during a deploy.
+
+### Two things this makes worse, stated rather than absorbed
+
+1. **The database is now on the public internet.** The Hetzner node had no public
+   IPv4 at all, plus a private network, plus a firewall with no inbound 5432
+   rule: three mechanisms, none of which was a credential. A Neon endpoint is
+   reachable by anyone holding the connection string. `allowed_ips` is the fix
+   and needs a Scale plan; until then the credential is the only control. This
+   belongs in `security/accepted-risks.md` with an owner and an expiry.
+2. **Role passwords land in Terraform state in plaintext.** Neon returns them
+   through its API, so the provider stores them and no setting prevents it. The
+   R2 state bucket becomes the trust boundary for the production database
+   credential.
+
+### The free plan does not reach production, and the arithmetic says so
+
+`org-tiny-leaf-89756764` is on `free_v3`: 0.5 GB storage per project, **100
+CU-hours per project per month**, 10 branches, a 6 hour restore window, and
+scale-to-zero after 5 minutes that cannot be disabled.
+
+Staging-as-a-branch fits comfortably: two branches of ten, a child branch stores
+only its diff, and a three-hour gate session at 0.25 CU costs 0.75 CU-hours.
+**Production does not fit.** 100 CU-hours at the 0.25 CU floor is 400 hours of
+activity; a month is 730. A compute actually serving users exhausts the monthly
+allowance in about 17 days, before the 0.5 GB cap meets an architecture whose
+premise is that every MBID-keyed fact is stored forever (section 3).
+
+**A paid plan is therefore a Phase 6 prerequisite, not an optimisation.** It is
+also what unlocks `allowed_ips`, a PITR window longer than 6 hours, and protected
+branches, all three of which are wanted.
+
+### What this does not fix
+
+**Section 10d still stands. Gate 4 still cannot pass.** The database half of a
+restore drill gets dramatically better - instant restore is seconds against the
+30 minutes pgBackRest was budgeted - but the finding in 10d was about the
+application node, whose config management is still a manual SSH runbook of
+unmeasured length. Replacing the database does not make an unrebuildable node
+rebuildable, and claiming otherwise is exactly the kind of adjacent-win
+accounting the scorecard rule exists to catch.
+
+### Provider note
+
+**Neon publishes no official Terraform provider.** Their documentation says they
+sponsor the community `kislerdm/neon` provider and that it "is not maintained or
+officially supported by Neon"; the registry 404s for `neondatabase/neon` and
+`neondatabase-labs/neon` (checked 2026-07-29). v0.14.0 is pinned and lock-filed.
+The residual single-maintainer risk is bounded: nothing in the data path depends
+on the provider, and every resource is importable by a stable Neon identifier.
+
+---
+
 ## 2. Corrected cost model
 
 v1 had no dollar figure. At the sizes it named, it would have cost **~$350-550/mo pre-launch**.
 
-| Line item                            | 10k users        | 50k users        |
-| ------------------------------------ | ---------------- | ---------------- |
-| Compute: 2x CAX21 BFF + 1x CAX31 DB  | €47              | €82              |
-| Load balancer LB11                   | €7.49            | €7.49            |
-| Auth (WorkOS, social-only)           | $0               | $0               |
-| Auth custom domain (recommended)     | $99              | $99              |
-| Bot protection (WorkOS Radar)        | ~$0-100          | ~$300            |
-| Token encryption (envelope, app-key) | $0               | $0               |
-| R2 backups                           | ~$0              | ~$5              |
-| **Total**                            | **~$155-255/mo** | **~$400-500/mo** |
+| Line item                              | 10k users        | 50k users        |
+| -------------------------------------- | ---------------- | ---------------- |
+| Compute: 2x CAX21 BFF + 1x CAX11 cache | €40              | €75              |
+| Load balancer LB11                     | €7.49            | €7.49            |
+| Auth (WorkOS, social-only)             | $0               | $0               |
+| Auth custom domain (recommended)       | $99              | $99              |
+| Bot protection (WorkOS Radar)          | ~$0-100          | ~$300            |
+| Token encryption (envelope, app-key)   | $0               | $0               |
+| R2 backups                             | ~$0              | ~$5              |
+| **Database (Neon)** [R]                | $0 (free plan)   | **see 1c**       |
+| **Total**                              | **~$148-248/mo** | **~$393-493/mo** |
 
 Without the custom domain and Radar, the floor is **~$60/mo at 10k**. Radar is the honest line
 item v1 omitted: a consumer signup form _will_ be attacked.
 
+**[R] The database line is not honestly $0 at either size.** Section 1c shows the
+Neon free plan cannot serve production: 100 CU-hours a month is 400 hours of
+activity at the 0.25 CU floor, against 730 hours in a month. The table keeps $0
+for the 10k column because nothing is serving users yet, and refuses to invent a
+figure for 50k rather than guessing at a plan tier. Costing it is a Phase 6 task
+with a real traffic shape, and it is tracked as a prerequisite rather than a
+surprise.
+
 **Billing alerts are mandatory on every vendor that offers them** before provisioning anything.
 Solo operator plus attached card plus no cap is a failure mode. -> **Gate $**
+
+**[R] Neon has the spend cap Hetzner does not.** Gate $ is recorded below as "one
+vendor armed, one vendor limitation": Hetzner publishes no budget API and the
+console offers no option the operator could find. Neon enforces a per-project
+consumption quota server-side, suspending every compute in the project when it is
+exceeded, and it is declarable in Terraform (`quota` in `infra/neon`). It is left
+unset while the plan is free, because an allowance that simply stops is already a
+cap; it should be set in the same change that moves to a paid plan.
 
 **[R] Two of the four vendors have nothing to arm.** Cloudflare's alerts are set and
 machine-verified through their API. **Hetzner offers no spend-cap or budget feature reachable by
@@ -321,8 +439,8 @@ TRACK L (parallel, day 0)          -> Gate L, Gate R, Gate $
   Billing alerts on all vendors
 
 Phase 0  Foundations + real CI/CD. Staging only.        -> Gate 0, Gate D
-Phase 1  Data plane: Postgres + PgBouncer + migrations
-         + Redis + pgBackRest/WAL from first byte.      -> Gate 1, Gate 4
+Phase 1  Data plane: Neon project + branches + migrations
+         + shared Redis. PITR is Neon's, not pgBackRest. -> Gate 1, Gate 4
 Phase 2  Platform API + auth + envelope vault
          + deletion/export + rate limiting.             -> Gate 3
 Phase 3  Upstream layer: MB queue, crosswalk, preview
@@ -345,7 +463,7 @@ and met." Every gate below is machine-checkable.
 | Gate      | Assertion                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **0**     | `terraform plan` exits 0 with zero drift on clean checkout; `curl -sf https://api-staging.pull.fm/healthz` returns 200 with valid cert (hostname changed, see section 1b); testssl.sh >= A; commit to `main` auto-deploys to staging in <10 min with no human step                                                                                                                                                                            |
-| **1**     | Migrations apply up **and down** cleanly in CI; a 10,000-request burst to the MB queue measures **<=1.0 req/s egress at the network layer** over 10 min with zero dropped jobs; PgBouncer serves >=200 client conns on <=25 server conns                                                                                                                                                                                                      |
+| **1**     | Migrations apply up **and down** cleanly in CI; a 10,000-request burst to the MB queue measures **<=1.0 req/s egress at the network layer** over 10 min with zero dropped jobs; the transaction pooler serves >=200 client conns on <=25 server conns (Neon's pooled endpoint in the cloud, PgBouncer locally)                                                                                                                                |
 | **2**     | OpenAPI 3.1 spec is source of truth; 100% of documented endpoints have contract tests; every endpoint has defined+tested behaviour for upstream 429/500/timeout; **warm cache hit >=90%**, cold-cache p95 <2s over a 1,000-request replay                                                                                                                                                                                                     |
 | **3**     | E2E signup -> connect -> non-empty feed passes in CI; **BOLA suite enumerates every user-scoped route from the OpenAPI spec** and asserts 403/404 for a foreign subject on 100% of them, failing CI if any route lacks a test; `pg_dump \| grep <known-test-token>` returns 0; 24h of logs grep to 0                                                                                                                                          |
 | **4**     | Restore from R2 into a fresh node completes **<30 min wall clock, timed**; row-count+checksum matches primary; RPO <=5 min verified by killing the primary mid-write; drill re-runs monthly and alerts on failure                                                                                                                                                                                                                             |
@@ -496,8 +614,21 @@ staging permanently running was the unusual choice, not destroying it.
 the Gate 4 restore drill meaningless), Terraform state, and out-of-band DNS
 records that Terraform does not manage.
 **Does not survive:** servers, load balancer, private network, **the four
-Terraform-managed DNS records**, and all staging Postgres data. If a teardown
-loses something that mattered, it belonged in R2.
+Terraform-managed DNS records**, and the contents of the staging Redis
+instances. If a teardown loses something that mattered, it belonged in R2.
+
+**Correction, 2026-07-29: "all staging Postgres data" used to be on the second
+list and is no longer on either.** The staging database is a Neon branch
+(section 1c). `staging-env.sh` does not create it and does not destroy it,
+because the argument for destroying it does not survive the move: a Hetzner node
+costs EUR 35/mo to sit idle, while a branch costs the storage of its diff from
+its parent and suspends its compute after five minutes. **Continuing to tear it
+down would be keeping the mechanism after its justification had gone.** When
+staging data does need discarding the operation is a branch reset from `main`,
+which takes seconds and returns a copy-on-write clone of production rather than
+an empty database, so it is both faster and a better test than the rebuild it
+replaces. The Hetzner half of `down` is unchanged and still correct: that
+compute is still billed by the hour.
 
 **Correction, 2026-07-29: DNS used to be on the survives list and that was
 wrong.** A targeted `terraform destroy` destroys the targets **and everything
