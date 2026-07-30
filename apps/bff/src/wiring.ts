@@ -19,6 +19,7 @@ import {
   CONSENT_DOCUMENTS,
   type LegalDocument,
 } from "./lib/legal-documents.js";
+import { fileSystemLegalSource } from "./lib/legal-source.js";
 import { SigningKeys } from "./lib/keys.js";
 import { createMaintenanceGate } from "./lib/maintenance.js";
 import { Registry } from "./lib/metrics.js";
@@ -174,9 +175,34 @@ export function buildServices(
 
   const users = new UserService(db);
 
+  /**
+   * The consent registry, plus where the canonical bytes of each document come
+   * from.
+   *
+   * The source is reported LOUDLY when it cannot produce a document, and that is
+   * the only reason it takes a callback. Without it the failure mode is an image
+   * that boots green, publishes revisions carrying a digest and no text, and then
+   * answers 503 on the consent screen of the first person who ever tries to sign
+   * up - by which point nobody is looking at startup logs. A missing `legal/`
+   * directory in the runtime image is a build mistake and it should read like one.
+   *
+   * It is a warning rather than a refusal to boot. The gate still works without
+   * the text (it enforces the EPOCH, which comes from the compiled registry), and
+   * refusing to start would turn "the documents cannot be displayed" into "the
+   * whole API is down", which is strictly worse for the users who have already
+   * accepted.
+   */
   const legal = new LegalConsentService(
     db,
     overrides.legalDocuments ?? CONSENT_DOCUMENTS,
+    fileSystemLegalSource({
+      onUnavailable: (documentId, reason) => {
+        log.warn(
+          { documentId, reason },
+          "legal document text unavailable: it cannot be published or served",
+        );
+      },
+    }),
   );
 
   /**

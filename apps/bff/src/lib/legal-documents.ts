@@ -71,12 +71,90 @@ export interface LegalDocument {
   readonly material: boolean;
   /** sha256 of `normalizeLegalText(source)`, lowercase hex. */
   readonly contentSha256: string;
-  /** Where a client fetches the canonical bytes the digest above covers. */
+  /**
+   * The canonical, absolute, VERSIONED location of the bytes the digest covers.
+   *
+   * Derived by `consentDocument` from `id` and `version`, never written by hand.
+   * Served by routes/v1/legal.ts.
+   */
   readonly url: string;
   /** Recorded and shown to the user. Never consulted by the gate. */
   readonly effectiveAt: string | null;
   /** Why this version exists. Ends up in `legal_document_revisions.notes`. */
   readonly notes: string;
+}
+
+/**
+ * The ONE media type the digest covers.
+ *
+ * WHY THERE IS EXACTLY ONE REPRESENTATION AND NOT TWO
+ *
+ * `POST /v1/me/consent` refuses an acceptance whose digest does not match the
+ * published one. So a second representation is not a nicety that might be
+ * inconsistent, it is a representation NOBODY CAN ACCEPT: a client that fetched
+ * a prettified HTML rendering, hashed what it displayed, and posted the result
+ * would get a 409 forever, with no way to tell that from a genuine mismatch.
+ *
+ * The canonical artefact is therefore the markdown source and only the markdown
+ * source. A client that wants a rendered document renders it locally, from bytes
+ * it has already verified. Rendering here would also mean running a markdown
+ * engine over hand-edited text and returning HTML from an unauthenticated
+ * endpoint whose CSP is `default-src 'none'` precisely because this API returns
+ * no markup.
+ */
+export const LEGAL_CONTENT_TYPE = "text/markdown; charset=utf-8";
+
+/**
+ * The origin the canonical document URLs are published under.
+ *
+ * A CONSTANT RATHER THAN `PUBLIC_BASE_URL`, and the reason is what `url` is for.
+ * It is written into `legal_document_revisions.url` at first publish and that row
+ * is immutable, so the value has to be the location a third party can still
+ * resolve years later when reading a consent record. A deployment-derived origin
+ * would put `http://127.0.0.1:3000` in the evidence of a local run and the
+ * staging hostname in the evidence of a staging run.
+ *
+ * A CLIENT SHOULD NOT FOLLOW `url` BLINDLY for that same reason: a client talking
+ * to a staging deployment must fetch from the origin it is already talking to.
+ * The path is fully determined by `documentId` and `version`, both of which the
+ * client already holds, so `legalVersionPath` is the thing to build against and
+ * `url` is the citation. docs/api/legal-agreements.md states this to clients.
+ */
+const CANONICAL_ORIGIN = "https://api.pull.fm";
+
+/** Where a SPECIFIC version's canonical bytes live. Immutable once published. */
+export function legalVersionPath(documentId: string, version: string): string {
+  return `/v1/legal/${documentId}/versions/${version}`;
+}
+
+/** Where whatever is CURRENT lives. Moves when a new version is published. */
+export function legalCurrentPath(documentId: string): string {
+  return `/v1/legal/${documentId}`;
+}
+
+/** The absolute, citable form of `legalVersionPath`. */
+export function legalVersionUrl(documentId: string, version: string): string {
+  return `${CANONICAL_ORIGIN}${legalVersionPath(documentId, version)}`;
+}
+
+/**
+ * Fills in `url` from `id` and `version` so the three cannot disagree.
+ *
+ * Written as a factory rather than three string literals because the failure it
+ * removes is silent and expensive: bumping `version` while leaving a hand-written
+ * `url` pointing at the previous one would hand every client a link to superseded
+ * text alongside the digest of the current text, so every acceptance would 409
+ * and the only clue would be a URL nobody looked at twice.
+ *
+ * `url` NAMES THE VERSION rather than the document. That is deliberate. If it
+ * named the moving current-document endpoint, then a version published between a
+ * client reading `GET /v1/me/consent` and fetching the text would produce a
+ * digest mismatch, so the handshake would have a race in it. A versioned URL is
+ * also immutable, which is what lets it be cached forever and what makes it a
+ * usable citation on an evidence row.
+ */
+function consentDocument(entry: Omit<LegalDocument, "url">): LegalDocument {
+  return { ...entry, url: legalVersionUrl(entry.id, entry.version) };
 }
 
 /**
@@ -91,9 +169,20 @@ export interface LegalDocument {
  * The digests are of the NORMALIZED text (see `normalizeLegalText`), so a
  * prettier run or a line-ending change cannot look like a revision. Everything
  * else can, which is the point.
+ *
+ * `url` AND `notes` ARE RECORDED AT FIRST PUBLISH AND NEVER RE-COMPARED.
+ * `ensureRevisions` refuses a build that disagrees with a published row about the
+ * digest, the epoch or materiality, because those three decide what an
+ * acceptance MEANS. It deliberately does not compare `url` or `notes`, because
+ * those are descriptive and refusing to boot over an improved sentence would be
+ * a self-inflicted outage. The consequence, stated so nobody is surprised by it:
+ * a database that published a version BEFORE this file changed its `url` keeps
+ * the old string on that row forever. Nothing reads it (the routes resolve from
+ * the registry and from `content`), and on a fresh database the two agree from
+ * the start.
  */
 export const CONSENT_DOCUMENTS: readonly LegalDocument[] = [
-  {
+  consentDocument({
     id: "terms-of-service",
     path: "legal/terms-of-service.md",
     version: "DRAFT-0",
@@ -101,12 +190,11 @@ export const CONSENT_DOCUMENTS: readonly LegalDocument[] = [
     material: true,
     contentSha256:
       "cead3bec4b7fa6a8b2044cb83d50a00699f51935b3eda90c6aeccf8d02f0abeb",
-    url: "https://pull.fm/legal/terms-of-service.md",
     effectiveAt: null,
     notes:
-      "First recorded revision. Epoch 1 is the baseline: every user must accept it and no earlier acceptance exists to carry over. The document is still DRAFT-0 and NOT YET EFFECTIVE (it has not been reviewed by a lawyer and is not published at a stable URL), which is why effectiveAt is null.",
-  },
-  {
+      "First recorded revision. Epoch 1 is the baseline: every user must accept it and no earlier acceptance exists to carry over. The document is still DRAFT-0 and NOT YET EFFECTIVE (it has not been reviewed by a lawyer), which is why effectiveAt is null.",
+  }),
+  consentDocument({
     id: "privacy-policy",
     path: "legal/privacy-policy.md",
     version: "DRAFT-0",
@@ -114,11 +202,10 @@ export const CONSENT_DOCUMENTS: readonly LegalDocument[] = [
     material: true,
     contentSha256:
       "32a9f74702261aa661391106407850ce62f06c3cf5b87788856d8e7ced122fc7",
-    url: "https://pull.fm/legal/privacy-policy.md",
     effectiveAt: null,
     notes:
       "First recorded revision. Presented alongside the Terms because section 18 makes the two the entire agreement, so accepting one without the other would leave the agreement incomplete on its own terms.",
-  },
+  }),
 ];
 
 /**

@@ -21,6 +21,7 @@ existing. Both directions are asserted by `apps/bff/test/integration/openapi.tes
 
 | File                                                 | Subject                                                                     |
 | ---------------------------------------------------- | --------------------------------------------------------------------------- |
+| [`legal-agreements.md`](legal-agreements.md)         | Fetching the Terms and Privacy Policy, verifying them, and recording assent |
 | [`personal-api-tokens.md`](personal-api-tokens.md)   | The token design, its security properties, and how to use one               |
 | [`data-portability.md`](data-portability.md)         | What the API will and will not serve, and the upstream terms behind that    |
 | [`deletion-and-backups.md`](deletion-and-backups.md) | The `DELETE /v1/me` cascade and the documented position on backup retention |
@@ -89,14 +90,16 @@ curl -sS https://api.pull.fm/v1/recommendations \
 
 ## Conventions
 
-| Concern             | Rule                                                                                                                                                                                      |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Errors              | RFC 9457 `application/problem+json`, always. `instance` is the request id, which is also in `X-Request-Id`.                                                                               |
-| Not found vs denied | An object belonging to another account returns **404, not 403**, so identifiers cannot be enumerated by observing which ones exist.                                                       |
-| Pagination          | Opaque keyset cursors. A cursor is bound to the subject it was issued to; replaying another subject's cursor is a 400.                                                                    |
-| Mutations           | `Idempotency-Key` is required. A retry returns the ORIGINAL response; the same key with a different body is a 409.                                                                        |
-| Rate limits         | `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` on token-authenticated responses; `Retry-After` on a 429. Read the headers rather than hard-coding a number.                  |
-| Product surface     | `/v1/feed`, `/v1/recommendations`, `/v1/stations` return the stable `sections` envelope. They currently answer **501**: the contract is fixed, the ranking implementation is not written. |
+| Concern             | Rule                                                                                                                                                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Errors              | RFC 9457 `application/problem+json`, always. `instance` is the request id, which is also in `X-Request-Id`.                                                                                                                           |
+| Not found vs denied | An object belonging to another account returns **404, not 403**, so identifiers cannot be enumerated by observing which ones exist.                                                                                                   |
+| Pagination          | Opaque keyset cursors. A cursor is bound to the subject it was issued to; replaying another subject's cursor is a 400.                                                                                                                |
+| Mutations           | `Idempotency-Key` is required. A retry returns the ORIGINAL response; the same key with a different body is a 409.                                                                                                                    |
+| Rate limits         | `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` on token-authenticated responses; `Retry-After` on a 429. Read the headers rather than hard-coding a number.                                                              |
+| Legal agreements    | Almost every route is refused with `403` and `type: .../consent-required` until the account has accepted the current Terms and Privacy Policy. Implement the flow before anything else: [`legal-agreements.md`](legal-agreements.md). |
+| Caching             | `private, no-store` everywhere except the published legal documents, which are public and carry the content digest as their `ETag`.                                                                                                   |
+| Product surface     | `/v1/feed`, `/v1/recommendations`, `/v1/stations` return the stable `sections` envelope. They currently answer **501**: the contract is fixed, the ranking implementation is not written.                                             |
 
 Provider availability is visible on `GET /v1/config`, coarsely: `ok`, `degraded`, or `disabled`.
 Render from that rather than inferring health from a failed request.

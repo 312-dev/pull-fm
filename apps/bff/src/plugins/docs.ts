@@ -91,6 +91,11 @@ export async function registerOpenApi(
           name: "catalogue",
           description: "Shared catalogue data, owned by nobody.",
         },
+        {
+          name: "legal",
+          description:
+            "The published agreements, served as the exact bytes their digests cover. Public: a person has to be able to read the Terms before they have an account. See docs/api/legal-agreements.md for the full acceptance procedure.",
+        },
         { name: "webhooks", description: "Signed inbound events." },
       ],
       components: {

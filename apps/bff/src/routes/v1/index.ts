@@ -18,6 +18,7 @@ import type { Services } from "../deps.js";
 import { registerAuthRoutes } from "./auth.js";
 import { registerConnectionRoutes } from "./connections.js";
 import { registerConsentRoutes } from "./consent.js";
+import { registerLegalRoutes } from "./legal.js";
 import { registerMeRoutes } from "./me.js";
 import { registerProductRoutes } from "./product.js";
 import { registerTokenRoutes } from "./tokens.js";
@@ -108,11 +109,28 @@ export async function registerV1Routes(
 
   registerAuthRoutes(app, services);
   registerMeRoutes(app, services);
-  // Registered next to the account surface rather than under a /legal prefix
-  // because both routes are about a SUBJECT's standing, not about the documents:
-  // there is no unauthenticated "fetch the terms" route here, and the documents
-  // are not in the deployed image to serve. See consent.ts.
+  // Under /v1/me rather than /v1/legal, because both routes are about a
+  // SUBJECT's standing rather than about the documents. See consent.ts.
   registerConsentRoutes(app, services);
+  /**
+   * The documents themselves.
+   *
+   * A SEPARATE PREFIX, AND A SEPARATE AUTHORIZATION CLASS, which is the whole
+   * reason this is not folded into consent.ts. `/v1/me/consent` is user-scoped and
+   * says what one person owes; these say what Pull.fm publishes and are reachable
+   * with no credential at all, because a person has to be able to read the Terms
+   * before they have an account to read them with.
+   *
+   * This comment used to record the opposite conclusion - that there was no
+   * unauthenticated document route "and the documents are not in the deployed
+   * image to serve". The second half was true and was the cause of the first:
+   * `pnpm deploy --prod` ships JavaScript only, so `legal/` was absent from the
+   * runtime image. That is fixed in apps/bff/Dockerfile, and the canonical text is
+   * now stored in `legal_document_revisions` at publish time as well, so a
+   * superseded version survives the file being edited. See legal.ts and migration
+   * 0009.
+   */
+  registerLegalRoutes(app, services);
   registerTokenRoutes(app, services);
   registerConnectionRoutes(app, services);
   registerWishlistRoutes(app, services);

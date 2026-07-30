@@ -65,6 +65,22 @@ COPY --from=build --chown=node:node /out /app
 COPY --chown=node:node packages/db/scripts/migrate.mjs /app/migrate.mjs
 COPY --chown=node:node packages/db/migrations /app/migrations
 
+# The legal documents, for the same reason and with a sharper edge.
+#
+# `pnpm deploy --prod` above produces a JavaScript tree and nothing else, so
+# `legal/` was ABSENT from the runtime image. The consequence was not cosmetic:
+# GET /v1/legal/... serves the canonical bytes a client must hash before
+# POST /v1/me/consent will record an acceptance, and lib/legal-source.ts reads
+# those bytes from here to seed `legal_document_revisions.content`. Without this
+# line the image boots, the consent gate refuses every new user, and nothing can
+# show them what they are being asked to accept - which is the exact failure the
+# gate was built to fix, moved one step later.
+#
+# The digest of every file here is checked against the compiled registry on read
+# (lib/legal-source.ts) and again by the database (migration 0009), so a stale or
+# mismatched copy is refused rather than served.
+COPY --chown=node:node legal /app/legal
+
 # Build metadata. BUILD_SHA is read by src/config.ts and reported on /healthz,
 # which is how the deploy pipeline verifies from outside that the new commit is
 # the one actually serving traffic.

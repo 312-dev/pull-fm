@@ -69,9 +69,9 @@ GET /v1/config	none	-	Reads the in-memory provider status snapshot (services/ups
 # It is not in docs/UPSTREAM-TERMS.md and has no per-IP request ceiling we can
 # breach. Every one of these is `x-pullfm-dast: exclude` anyway, so none reaches
 # the scanner; classified here only because the register must be total.
-POST /v1/auth/start	none	workos	Calls WorkOS magic-auth. Not a metered music provider. Already dast:exclude. The call is now additionally gated by the EEA/UK/CH registration refusal (lib/registration-geo.ts), which runs at onRequest, so a refused region produces zero egress rather than a created directory record.
-POST /v1/auth/verify	none	workos	As above, and behind the same registration-region gate.
-GET /v1/auth/callback	none	workos	As above, and behind the same registration-region gate.
+POST /v1/auth/start	none	workos	Calls WorkOS magic-auth. Not a metered music provider. Already dast:exclude. Two gates now sit in front of that call and both produce ZERO EGRESS rather than a created directory record: the EEA/UK/CH registration refusal (lib/registration-geo.ts) at onRequest, and the closed-beta allowlist (lib/registration-allowlist.ts) at preHandler. The allowlist cannot be onRequest because the address is in the body; preHandler is still ahead of every WorkOS call and of both send budgets, which live in the handler.
+POST /v1/auth/verify	none	workos	As above, and behind the same region gate and the same preHandler allowlist.
+GET /v1/auth/callback	none	workos	As above, and behind the same region gate. The allowlist is enforced here IN THE HANDLER rather than in a hook, because the hosted flow sends only a code and the address is knowable only from the provider's answer, so this is the one auth route where the allowlist refusal comes after an outbound call. Still `none`: the egress is to WorkOS, is unmetered, and is unchanged by the gate.
 POST /v1/auth/refresh	none	workos	As above.
 POST /v1/auth/logout	none	workos	As above.
 
@@ -83,6 +83,20 @@ GET /v1/me/export	none	-	Local export job. Already dast:exclude and in the ZAP c
 GET /v1/me/export/download	none	-	Serves a local artefact. Already dast:exclude.
 GET /v1/me/consent	none	-	Reads legal_document_revisions and legal_consents plus an in-memory document registry. No provider client exists on this path and no input can put one there.
 POST /v1/me/consent	none	-	Inserts a consent row after comparing the supplied version and content digest to the registry. No provider client on the path; dast:exclude anyway, because a scanner cannot produce a valid digest and so could only exercise the refusal branches, while a fuzzer that DID get through would be writing rows into the table whose value is that every row corresponds to a real human act.
+
+# --- Published legal documents. Unauthenticated, and none of them can egress.
+# The bytes come from `legal_document_revisions.content` or from the `legal/`
+# directory inside the image (lib/legal-source.ts). No provider client is
+# constructed on any of these paths and no input can put one there: the only
+# caller-supplied values are a document slug and a version string, both
+# pattern-constrained by the route schema and both used as bind parameters
+# against one table. These are deliberately `dast: include` - they are the one
+# part of the consent flow a scanner CAN meaningfully drive, being public,
+# read-only, and side-effect-free apart from the memoized idempotent publish that
+# GET /v1/me/consent already performs.
+GET /v1/legal	none	-	Reads the compiled document registry plus published_at from legal_document_revisions. No provider client on the path.
+GET /v1/legal/{documentId}	none	-	One indexed SELECT against legal_document_revisions, or a digest-verified read of a file inside the image. A garbage slug is refused by the route schema or answered 422 from the in-memory registry; neither branch touches a provider.
+GET /v1/legal/{documentId}/versions/{version}	none	-	As above. Immutable per version and cached for a year, so even a scanner sending many distinct versions produces one bounded SELECT each and no outbound call.
 
 # --- Personal API tokens. Entirely local. -------------------------------------
 GET /v1/tokens	none	-	Postgres only.

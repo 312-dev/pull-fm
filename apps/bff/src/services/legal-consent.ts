@@ -17,7 +17,11 @@
  *   1. THE OPERATOR ASKED FOR REVISIONS TO BE STORED. A consent record that
  *      references a version is only as good as our ability to say what that
  *      version WAS. "Check out the commit that was deployed in March" is not an
- *      answer anybody can rely on years later.
+ *      answer anybody can rely on years later, and it is not an answer available
+ *      at all from a container image with no `.git` in it. Since migration 0009
+ *      the row carries the TEXT as well as the digest, which is what turns
+ *      `textFor` below into a real answer instead of a lookup that can only ever
+ *      succeed for whatever version happens to be current.
  *   2. IT CATCHES A DEPLOY THAT DISAGREES WITH HISTORY. If the deployed code
  *      declares a different digest or a different epoch for a version this
  *      database has already published, `ensureRevisions` REFUSES rather than
@@ -43,10 +47,15 @@ import { errors } from "../lib/errors.js";
 import {
   consentGap,
   findLegalDocument,
+  legalDigest,
   type AcceptedEpochs,
   type ConsentGap,
   type LegalDocument,
 } from "../lib/legal-documents.js";
+import {
+  noLegalTextSource,
+  type LegalTextSource,
+} from "../lib/legal-source.js";
 
 /** One recorded acceptance, as it appears on the wire and in the receipt. */
 export interface ConsentRecord {
@@ -91,16 +100,51 @@ interface RevisionRow {
   is_material: boolean;
   published_at: Date;
   effective_at: Date | null;
+  content: string | null;
 }
+
+/**
+ * The canonical text of one published revision, and where it came from.
+ *
+ * A discriminated result rather than `string | null`, because the three outcomes
+ * are answered with three different status codes and collapsing them would make
+ * "we have never published that version" indistinguishable from "we published it
+ * and cannot produce it", which are a 422 and a 503.
+ */
+export type RevisionText =
+  | { readonly status: "ok"; readonly text: string; readonly digest: string }
+  /** No such document, or no such version of it. Nothing was ever published. */
+  | { readonly status: "unknown" }
+  /**
+   * The revision exists and this deployment cannot produce its bytes. Only
+   * reachable for a version published by a build that predates migration 0009 and
+   * whose text is no longer on disk. See the migration for why it cannot be
+   * healed automatically from inside the database.
+   */
+  | { readonly status: "unavailable"; readonly reason: string };
 
 export class LegalConsentService {
   readonly #db: Database;
   readonly #documents: readonly LegalDocument[];
+  readonly #source: LegalTextSource;
   #published: Promise<void> | null = null;
 
-  constructor(db: Database, documents: readonly LegalDocument[]) {
+  constructor(
+    db: Database,
+    documents: readonly LegalDocument[],
+    /**
+     * Where the canonical bytes come from at publish time.
+     *
+     * Defaults to producing nothing, so a test registry of synthetic documents
+     * that point at files which do not exist publishes exactly as it did before
+     * this parameter existed. A deployment passes the filesystem source; see
+     * wiring.ts.
+     */
+    source: LegalTextSource = noLegalTextSource,
+  ) {
     this.#db = db;
     this.#documents = documents;
+    this.#source = source;
   }
 
   /** The documents this deployment requires. Read by the routes and the gate. */
@@ -126,6 +170,13 @@ export class LegalConsentService {
 
   async #publish(): Promise<void> {
     for (const doc of this.#documents) {
+      // The canonical bytes, if this deployment can produce them. Null is not a
+      // failure: the digest is what the gate enforces and it comes from the
+      // registry, so a deployment with no `legal/` directory still refuses
+      // un-accepted subjects correctly. What it cannot do is SERVE the document,
+      // which routes/v1/legal.ts reports as a 503 rather than hiding.
+      const text = this.#source(doc);
+
       // Insert first, then read back, rather than read-then-insert. Two
       // processes starting together would both see "absent" and both insert;
       // ON CONFLICT DO NOTHING makes the loser a no-op instead of a 500, and
@@ -133,8 +184,8 @@ export class LegalConsentService {
       await this.#db.query(
         `INSERT INTO legal_document_revisions
            (document_id, version, consent_epoch, content_sha256, is_material,
-            url, effective_at, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            url, effective_at, notes, content)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (document_id, version) DO NOTHING`,
         [
           doc.id,
@@ -145,11 +196,13 @@ export class LegalConsentService {
           doc.url,
           doc.effectiveAt,
           doc.notes,
+          text,
         ],
       );
 
       const { rows } = await this.#db.query<RevisionRow>(
-        `SELECT consent_epoch, content_sha256, is_material, published_at, effective_at
+        `SELECT consent_epoch, content_sha256, is_material, published_at,
+                effective_at, content
            FROM legal_document_revisions
           WHERE document_id = $1 AND version = $2`,
         [doc.id, doc.version],
@@ -158,6 +211,30 @@ export class LegalConsentService {
       /* c8 ignore next 3 -- the INSERT above guarantees a row */
       if (stored === undefined) {
         throw new Error(`legal revision ${doc.id}@${doc.version} vanished`);
+      }
+
+      // THE BACKFILL, and it is the only UPDATE this table permits.
+      //
+      // Reachable in one situation: this version was published by a build from
+      // before migration 0009, so the row carries a digest and no text. Without
+      // this the text of that version would be irrecoverable for the lifetime of
+      // the database, even on a deployment that is holding it in memory right
+      // now, because `ON CONFLICT DO NOTHING` above declines to touch an existing
+      // row and there is no other write path.
+      //
+      // Safe because the trigger in migration 0009 permits ONLY null -> non-null
+      // on `content` with every other column compared for equality, and the CHECK
+      // on the same row permits only text whose sha256 equals the digest that was
+      // fixed at insert. Supplying the wrong text is a preimage collision, not a
+      // mistake. Not conditional on the digest matching in JavaScript first: the
+      // source already verified it and the database verifies it again, and a
+      // belt-and-braces check in between would only add a branch nothing tests.
+      if (stored.content === null && text !== null) {
+        await this.#db.query(
+          `UPDATE legal_document_revisions SET content = $3
+            WHERE document_id = $1 AND version = $2 AND content IS NULL`,
+          [doc.id, doc.version, text],
+        );
       }
 
       // THE DISAGREEMENT CHECK. Loud, and deliberately not self-healing: an
@@ -205,6 +282,74 @@ export class LegalConsentService {
       out[`${row.document_id}@${row.version}`] = row.published_at.toISOString();
     }
     return out;
+  }
+
+  /**
+   * The canonical text of one published version.
+   *
+   * THE READ IS DIGEST-VERIFIED EVEN THOUGH TWO WRITE-SIDE CONTROLS ALREADY ARE.
+   * The CHECK constraint in migration 0009 and the source's own verification both
+   * run before a byte is stored, so this comparison should be impossible to fail.
+   * It is here because of what a failure would cost if it ever were possible: the
+   * bytes this method returns are hashed by a client and echoed to
+   * `POST /v1/me/consent`, which refuses a mismatch. So bytes that do not hash to
+   * the recorded digest are not "slightly wrong output", they are output that
+   * makes acceptance permanently impossible while looking completely normal, and
+   * the 409 surfaces two calls away from the cause. One comparison converts that
+   * into one specific refusal at the source.
+   *
+   * The database is asked first and the filesystem second, deliberately in that
+   * order. `legal_document_revisions` is what this system PUBLISHED; the working
+   * tree is what somebody is currently editing. For the current version the two
+   * agree or the build is already failing; for a superseded version only the
+   * database has it, and preferring the file would mean a mounted revision of
+   * `legal/` could answer for a version it is not.
+   */
+  async textFor(documentId: string, version: string): Promise<RevisionText> {
+    await this.ensureRevisions();
+
+    const { rows } = await this.#db.query<{
+      content: string | null;
+      content_sha256: string;
+    }>(
+      `SELECT content, content_sha256 FROM legal_document_revisions
+        WHERE document_id = $1 AND version = $2`,
+      [documentId, version],
+    );
+    const row = rows[0];
+    if (row === undefined) return { status: "unknown" };
+
+    // Not published with its text, so fall back to the working tree, but ONLY for
+    // the version the registry currently declares: the file holds one revision and
+    // it is that one. `fileSystemLegalSource` compares its digest to the
+    // registry's before returning anything, so this cannot serve a mounted copy of
+    // `legal/` in place of a version it is not.
+    const current = findLegalDocument(this.#documents, documentId);
+    const text =
+      row.content ??
+      (current?.version === version ? this.#source(current) : null);
+
+    if (text === null) {
+      return {
+        status: "unavailable",
+        reason:
+          `${documentId} ${version} was published with digest ${row.content_sha256} ` +
+          `but its text is not stored on this deployment and is not the version on disk`,
+      };
+    }
+
+    const digest = legalDigest(text);
+    if (digest !== row.content_sha256) {
+      /* c8 ignore next 5 -- excluded by the CHECK constraint and by the source */
+      return {
+        status: "unavailable",
+        reason:
+          `${documentId} ${version} resolved to text hashing to ${digest}, but the ` +
+          `published revision records ${row.content_sha256}`,
+      };
+    }
+
+    return { status: "ok", text, digest };
   }
 
   /** The highest epoch this subject has accepted, per document. */
