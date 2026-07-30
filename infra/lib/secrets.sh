@@ -139,20 +139,26 @@ readonly PULLFM_REGISTRATION_ALLOWLIST="${PULLFM_REGISTRATION_ALLOWLIST:-ope@312
 #
 # THIS TOKEN IS BUCKET-SCOPED AND THAT IS THE WHOLE REASON THE NODE MAY HOLD IT.
 # It reaches `pull-fm-backups-staging-us` and nothing else.
-# `pull-fm/staging/R2_LEDGER_CREDENTIALS_US` is a DIFFERENT token for a
+# `pull-fm/staging/R2_LEDGER_CREDENTIALS` is a DIFFERENT token for a
 # DIFFERENT bucket (`pull-fm-ledger-staging-us`) and the two are never
 # interchangeable: the backup token cannot see the ledger bucket at all, and a
 # ledger command run with it reports an EMPTY LEDGER rather than a permission
 # error, which is the shape of a check that reports success while checking
 # nothing. See the header of infra/lib/backup-common.sh.
 #
-# THE `_US` SUFFIX IS THE RESIDENCY CUTOVER AND IT IS DELIBERATELY A NEW ITEM
-# RATHER THAN AN EDITED ONE. An R2 jurisdiction is fixed when the bucket is
-# created, so moving residency means new buckets and new bucket-scoped tokens.
-# The EU items (`pull-fm/staging/R2_CREDENTIALS`, `..._LEDGER_CREDENTIALS`) are
-# left exactly as they were, because they are the rollback and because a
-# rollback that requires restoring a vault item from history is not a rollback.
-readonly PULLFM_BACKUP_OP_ITEM="${PULLFM_BACKUP_OP_ITEM:-pull-fm/staging/R2_CREDENTIALS_US}"
+# THE `_US` SUFFIX IS RETIRED. An R2 jurisdiction is fixed when the bucket is
+# created, so moving residency meant new buckets and new bucket-scoped tokens,
+# and for the length of the cutover the new tokens carried `_US` so they could
+# not be confused with the live EU ones. The EU estate was deleted on 2026-07-29
+# and its vault items are ARCHIVED as the audit trail, so on 2026-07-30 the
+# suffix came off every item and every consumer in one change. The plain titles
+# now name the US credentials and nothing else.
+#
+# There is no vault-item rollback behind these titles any more, and pretending
+# otherwise would be worse than saying so: the archived EU items address buckets
+# that no longer exist, and `op item get` will not return an archived item
+# without `--include-archive` in any case.
+readonly PULLFM_BACKUP_OP_ITEM="${PULLFM_BACKUP_OP_ITEM:-pull-fm/staging/R2_CREDENTIALS}"
 readonly PULLFM_CIPHER_OP_ITEM="${PULLFM_CIPHER_OP_ITEM:-pull-fm/infra/BACKUP_DUMP_KEY}"
 
 _pullfm_secret_die() { printf '\033[31m%s\033[0m\n' "$*" >&2; return 1; }
@@ -248,16 +254,25 @@ pullfm_render_staging_secrets() {
   # uses, because it takes a session-level advisory lock and a transaction
   # pooler silently breaks session-scoped locks rather than failing loudly.
   #
-  # `_US` NAMES THE US NEON PROJECT, NOT A NEW KIND OF SECRET. A Neon region is
-  # immutable, so the move out of the EU is a NEW PROJECT with new endpoints and
-  # therefore new connection strings. The EU items are still populated, still
-  # point at a live project, and are the rollback: converge with
-  # PULLFM_STAGING_DB_SUFFIX-style overrides is deliberately NOT offered here,
-  # because a node that can be pointed at either database by an environment
-  # variable is a node whose residency posture is whatever the last person
-  # exported. Rolling back is an edit to these two lines and a converge.
-  database_url="$(_pullfm_field 'pull-fm/staging/DATABASE_URL_US' 'credential')" || return 1
-  database_url_direct="$(_pullfm_field 'pull-fm/staging/DATABASE_URL_DIRECT_US' 'credential')" || return 1
+  # THESE TWO TITLES CARRIED A `_US` SUFFIX UNTIL 2026-07-30, AND THE SUFFIX WAS
+  # LOAD-BEARING WHILE IT LASTED. A Neon region is immutable, so the move out of
+  # the EU was a NEW PROJECT with new endpoints and therefore new connection
+  # strings, and for the length of the cutover the plain titles still resolved to
+  # the LIVE EU project. Measured 2026-07-29: the two sets pointed at endpoints in
+  # different regions, `eu-central-1` for the plain title and `us-east-1` for the
+  # `_US` one. Anything that "helpfully preferred the plain name" in that window
+  # converged the node onto the database it had just been migrated off.
+  #
+  # That window is closed. The EU project was deleted, the plain-titled items were
+  # archived, and the suffix came off the US items, so the plain titles are now
+  # the only ones that resolve and they resolve to `us-east-1`. Verified before the
+  # rename and again after it, by comparing the sha256 of every field.
+  #
+  # NO ENVIRONMENT OVERRIDE IS OFFERED FOR EITHER, deliberately: a node that can
+  # be pointed at a different database by an environment variable is a node whose
+  # residency posture is whatever the last person exported.
+  database_url="$(_pullfm_field 'pull-fm/staging/DATABASE_URL' 'credential')" || return 1
+  database_url_direct="$(_pullfm_field 'pull-fm/staging/DATABASE_URL_DIRECT' 'credential')" || return 1
   redis_cache_pw="$(_pullfm_field 'pull-fm/staging/REDIS_CACHE_PASSWORD' 'password')" || return 1
   redis_quota_pw="$(_pullfm_field 'pull-fm/staging/REDIS_QUOTA_PASSWORD' 'password')" || return 1
   kek="$(_pullfm_field 'pull-fm/staging/CREDENTIAL_KEK' 'password')" || return 1
@@ -300,10 +315,10 @@ pullfm_render_staging_secrets() {
   # beyond the item title. The vault item is the record of which bucket a
   # credential opens; a bucket name written in this file would be a second
   # source of truth that a token rotation could silently contradict.
-  ledger_key="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS_US' 'access key id')" || return 1
-  ledger_secret="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS_US' 'secret access key')" || return 1
-  ledger_endpoint="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS_US' 's3 endpoint')" || return 1
-  ledger_bucket="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS_US' 'bucket')" || return 1
+  ledger_key="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 'access key id')" || return 1
+  ledger_secret="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 'secret access key')" || return 1
+  ledger_endpoint="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 's3 endpoint')" || return 1
+  ledger_bucket="$(_pullfm_field 'pull-fm/staging/R2_LEDGER_CREDENTIALS' 'bucket')" || return 1
 
   # The SeatGeek client id lives in the item's NOTES ("client id = <35 chars>")
   # and the secret is the password. Optional: without the id the events route
@@ -508,16 +523,17 @@ EOF
   # reason, as backup.env.
   #
   # IT IS THE SAME `database_url_direct` bff.env GETS, DELIBERATELY, AND THE
-  # ITEM TITLE IS READ IN EXACTLY ONE PLACE ABOVE. The `_US` residency items are
-  # being renamed to their plain names while this is being written, and the plain
-  # `pull-fm/staging/DATABASE_URL_DIRECT` STILL POINTS AT THE EU ROLLBACK
-  # PROJECT. That was measured on 2026-07-29 rather than assumed: the two items
-  # resolve to endpoints in DIFFERENT REGIONS - `eu-central-1` for the plain
-  # title, `us-east-1` for the `_US` one - so "prefer the plain name" would have
-  # loaded a fortnight of catalogue into the database staging was moved off.
-  # Reading the title a second time here would mean two lines to flip on the day
-  # of the rename and one of them silently wrong. There is one read, at the top
-  # of this function, and this block consumes it.
+  # ITEM TITLE IS READ IN EXACTLY ONE PLACE ABOVE.
+  #
+  # THAT SINGLE READ IS WHY THE RENAME WAS A ONE-LINE CHANGE AND NOT A TRAP. When
+  # this was written the `_US` items were mid-rename and the plain
+  # `pull-fm/staging/DATABASE_URL_DIRECT` still pointed at the LIVE EU project;
+  # measured on 2026-07-29, the two titles resolved to endpoints in different
+  # regions. A second read of the title here would have meant two lines to flip on
+  # the day of the rename, and one of them silently loading a fortnight of
+  # catalogue into the database staging had just been moved off. The rename landed
+  # on 2026-07-30 and touched exactly one line, at the top of this function. This
+  # block consumes it and names no item.
   #
   # DIRECT, NEVER POOLED, and for a stronger reason than the backup's. The swap
   # takes ACCESS EXCLUSIVE and a session advisory lock, and the loader spans

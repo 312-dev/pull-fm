@@ -76,36 +76,57 @@ readonly PULLFM_BACKUP_OP_VAULT="${PULLFM_BACKUP_OP_VAULT:-MCP}"
 #
 # WHY THIS SHAPE. `op item get` takes a title or an id interchangeably, and the
 # titles here are unambiguous, so nothing is lost by using the readable half.
-# It also makes the US cutover legible: `..._US` at the end of a title says
-# which side of the migration a credential belongs to, where one opaque string
-# replacing another says nothing at all. The EU items keep their old titles and
-# are the rollback, so both sets exist and neither can be reached by accident.
 #
-# The Neon API key is the exception and stays an id: its title contains
-# parentheses, which are not legal in an op:// reference, and it is the same key
-# for both projects so there is no US twin of it.
-readonly PULLFM_BACKUP_OP_R2="${PULLFM_BACKUP_OP_R2:-pull-fm/staging/R2_CREDENTIALS_US}"
-readonly PULLFM_LEDGER_OP_R2="${PULLFM_LEDGER_OP_R2:-pull-fm/staging/R2_LEDGER_CREDENTIALS_US}"
-readonly PULLFM_BACKUP_OP_NEON="${PULLFM_BACKUP_OP_NEON:-5ccxlg635x37rybelz53yeaqf4}"   # Neon API key
-readonly PULLFM_BACKUP_OP_DSN="${PULLFM_BACKUP_OP_DSN:-pull-fm/staging/DATABASE_URL_DIRECT_US}"
+# THE `_US` SUFFIX IS GONE, AND ITS REMOVAL IS WHY THESE TITLES ARE SAFE AGAIN.
+# During the residency cutover these read `..._US`, because the plain-titled EU
+# originals were still live and a rename would have been ambiguous. The EU estate
+# was deleted on 2026-07-29 and those items are ARCHIVED as the audit trail, so
+# the plain titles now name the US credentials and nothing else. An archived item
+# is not returned by `op item get` without `--include-archive`, and the API
+# refuses it outright with "item is not in an active state", so the retired EU
+# names cannot be reached by accident from here.
+#
+# The suffix was retired on 2026-07-30 in one change with every consumer, because
+# renaming the items alone would have broken the backup path and the restore
+# drill, and editing the consumers alone would have pointed them at titles that
+# did not exist yet.
+readonly PULLFM_BACKUP_OP_R2="${PULLFM_BACKUP_OP_R2:-pull-fm/staging/R2_CREDENTIALS}"
+readonly PULLFM_LEDGER_OP_R2="${PULLFM_LEDGER_OP_R2:-pull-fm/staging/R2_LEDGER_CREDENTIALS}"
+
+# The Neon API key. ALSO A TITLE, AND IT USED TO BE THE ONE EXCEPTION HERE.
+#
+# This line was an item id, justified in the block above by saying the title
+# contains parentheses which are not legal in an op:// reference. That was true
+# of the REFERENCE SYNTAX only; `op item get` has no such restriction, so the
+# exception was an artifact of `pullfm_backup_load_neon` using `op read`. It uses
+# `pullfm_op_field` now and the id is gone. See infra/lib/credentials.sh, which
+# carried the same id for the same reason and records the measurement.
+readonly PULLFM_BACKUP_OP_NEON="${PULLFM_BACKUP_OP_NEON:-Neon API Key (pull.fm)}"
+readonly PULLFM_BACKUP_OP_DSN="${PULLFM_BACKUP_OP_DSN:-pull-fm/staging/DATABASE_URL_DIRECT}"
 readonly PULLFM_BACKUP_OP_CIPHER="${PULLFM_BACKUP_OP_CIPHER:-pull-fm/infra/BACKUP_DUMP_KEY}"
 
 # ---------------------------------------------------------------------------
-# THE US BUCKETS AND THE US PROJECT. THE EU ONES STILL EXIST AND ARE THE
-# ROLLBACK.
+# THE US BUCKETS AND THE US PROJECT. THE EU ESTATE IS DELETED AND THERE IS NO
+# LONGER A ROLLBACK BEHIND THESE VALUES.
 # ---------------------------------------------------------------------------
 #
 # Residency moved from the EU to the US. Neither an R2 jurisdiction nor a Neon
-# region can be changed in place, so the move is expressed the only way the
-# platforms allow: NEW BUCKETS AND A NEW PROJECT, with the EU originals left
-# alive and untouched. Everything below points at the US side; nothing deletes
-# the EU side, and a rollback is an edit to these four values (or the matching
-# environment overrides) and nothing else.
+# region can be changed in place, so the move was expressed the only way the
+# platforms allow: NEW BUCKETS AND A NEW PROJECT.
+#
+# THIS BLOCK USED TO SAY THE EU ORIGINALS WERE "LEFT ALIVE AND UNTOUCHED" AND
+# THAT A ROLLBACK WAS AN EDIT TO THESE FOUR VALUES. That stopped being true on
+# 2026-07-29, when the EU project and all three EU buckets were deleted. Pointing
+# any of these constants back at an EU name now names nothing, and the failure
+# arrives as `NoSuchBucket` or a dead Neon project rather than as a rollback. The
+# recovery path from here is a restore out of the US backups, not a repoint; see
+# docs/RUNBOOK-DR.md.
 #
 # The US buckets are DEFAULT jurisdiction with an ENAM location hint, not
 # `us`-jurisdiction, because R2 has no US jurisdiction to pin to. That is why
-# they answer on the account's default S3 host and the EU ones do not; see
-# `pullfm_backup_r2_endpoint` below, which probes rather than trusting either.
+# they answer on the account's default S3 host, which the EU ones did not; see
+# `pullfm_backup_r2_endpoint` below, which probes rather than trusting a recorded
+# host at all.
 readonly PULLFM_BACKUP_BUCKET="${PULLFM_BACKUP_BUCKET:-pull-fm-backups-staging-us}"
 
 # THE LEDGER IS A SEPARATE BUCKET, AND THAT IS A SECURITY BOUNDARY RATHER THAN
@@ -124,16 +145,21 @@ readonly PULLFM_BACKUP_BUCKET="${PULLFM_BACKUP_BUCKET:-pull-fm-backups-staging-u
 # lock rules are per-bucket too. See PULLFM-RISK-009 and PULLFM-RISK-011.
 readonly PULLFM_LEDGER_BUCKET="${PULLFM_LEDGER_BUCKET:-pull-fm-ledger-staging-us}"
 
-# The US Neon project (aws-us-east-1, Postgres 18). The EU project it replaces
-# is still live, still serving, and is NOT to be deleted: it is the rollback for
-# the whole database half of this cutover. A Neon region is immutable, so there
-# was never an in-place move to make.
+# The US Neon project (aws-us-east-1, Postgres 18). A Neon region is immutable,
+# so there was never an in-place move to make.
 #
-# NOTE FOR ANYONE READING infra/neon: that Terraform root still ADOPTS THE EU
-# PROJECT. This constant and that root disagree on purpose during the cutover,
-# because repointing the root is a state operation (import blocks plus a
-# region-validation change) and not a variable edit. The backup and restore
-# tooling here never reads Terraform state, so it can move first.
+# THE EU PROJECT IT REPLACES IS DELETED. This comment used to say it was "still
+# live, still serving, and NOT to be deleted", and that it was the rollback for
+# the database half of the cutover. It was deleted on 2026-07-29 once the US side
+# was verified.
+#
+# `infra/neon` now adopts THIS project; the two agreed from the moment that root
+# was repointed, so the note that used to say they disagree on purpose is gone
+# rather than left to be read as current.
+#
+# Verified 2026-07-30 rather than assumed: `pull-fm/staging/DATABASE_URL` and
+# `..._DIRECT` both resolve to endpoints on `us-east-1.aws.neon.tech`, and a
+# `pullfm_neon GET /` against this id returns region_id `aws-us-east-1`.
 readonly PULLFM_NEON_PROJECT_ID="${PULLFM_NEON_PROJECT_ID:-cold-brook-02833828}"
 readonly PULLFM_NEON_API="${PULLFM_NEON_API:-https://console.neon.tech/api/v2}"
 
@@ -333,14 +359,19 @@ is jurisdiction-scoped. The other one answers NoSuchBucket."
   # No jurisdiction is hard-coded as THE answer anywhere: this list is a set of
   # guesses and the bucket decides which one is right.
   #
-  # THE `.eu.` CANDIDATE STAYS AFTER THE US CUTOVER, and it is not dead code.
-  # The US buckets are default-jurisdiction and answer on the first derived
-  # host, so it is never reached for them. It is reached the moment anyone
-  # exercises the rollback by overriding PULLFM_BACKUP_BUCKET or
-  # PULLFM_LEDGER_BUCKET back to an EU bucket, which is exactly the situation in
-  # which nobody wants to be debugging a NoSuchBucket. Deleting it would save
-  # one HEAD on a path that is already the fast one and would break the only
-  # path that matters when it matters.
+  # THE `.eu.` CANDIDATE STAYS, AND ITS JUSTIFICATION HAS CHANGED. It used to be
+  # kept "for the moment anyone exercises the rollback by overriding
+  # PULLFM_BACKUP_BUCKET back to an EU bucket". There are no EU buckets any more,
+  # so that reason is dead and saying it would be a false claim about why a line
+  # exists.
+  #
+  # What it is now: this function's contract is that a RECORDED HOST IS A GUESS,
+  # and the guess it most often gets wrong is a jurisdiction-scoped bucket
+  # answering NoSuchBucket on the default host. `.eu.` is the only jurisdiction
+  # host this account has ever used, so it is the one worth spending a HEAD on if
+  # a jurisdiction-pinned bucket is ever created again. The US buckets are
+  # default-jurisdiction and answer on the first derived host, so on every path
+  # that runs today this candidate is never reached.
   candidates="${recorded}
 https://${host}.r2.cloudflarestorage.com
 https://${host}.eu.r2.cloudflarestorage.com"
@@ -379,9 +410,10 @@ pullfm_backup_load_neon() {
   pullfm_need curl python3
   if [[ -z "${NEON_API_KEY:-}" ]]; then
     pullfm_need op
-    NEON_API_KEY="$(op read "op://${PULLFM_BACKUP_OP_VAULT}/${PULLFM_BACKUP_OP_NEON}/password" 2>/dev/null)" ||
-      pullfm_die "1Password: could not read the Neon API key"
-    [[ -n "${NEON_API_KEY}" ]] || pullfm_die "1Password: the Neon API key is EMPTY"
+    # `pullfm_op_field`, not `op read`: PULLFM_BACKUP_OP_NEON is a TITLE now and
+    # the parenthesis in it is illegal in an op:// reference. The helper also
+    # rejects an empty field, which `op` returns at exit 0 when a label is wrong.
+    NEON_API_KEY="$(pullfm_op_field "${PULLFM_BACKUP_OP_NEON}" 'password')"
   fi
   export NEON_API_KEY
 }

@@ -37,16 +37,6 @@
       "file": "infra/scripts/check-origin-config.sh"
     },
     {
-      "fingerprint": "d60f-46ec-5999-d63a",
-      "detector": "password-manager-item-id",
-      "file": "infra/lib/backup-common.sh"
-    },
-    {
-      "fingerprint": "25e9-8edf-7a8f-4dad",
-      "detector": "password-manager-item-id",
-      "file": "infra/lib/credentials.sh"
-    },
-    {
       "fingerprint": "990c-500a-0c4d-3d9b",
       "detector": "password-manager-item-id",
       "file": "infra/lib/secrets.sh"

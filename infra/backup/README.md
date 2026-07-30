@@ -104,7 +104,7 @@ credentials from the environment when it already has them and only reach for
 ```
 PULLFM_BACKUP_DSN=            # DIRECT endpoint, not the pooler (pg_dump opens >1 connection)
 PULLFM_BACKUP_ENDPOINT=       # copied from the vault's 's3 endpoint'; a probe SEED, see the trap below
-AWS_ACCESS_KEY_ID=            # 1Password pull-fm/staging/R2_CREDENTIALS_US, BUCKET-SCOPED
+AWS_ACCESS_KEY_ID=            # 1Password pull-fm/staging/R2_CREDENTIALS, BUCKET-SCOPED
 AWS_SECRET_ACCESS_KEY=
 PULLFM_BACKUP_CIPHER_PASS=    # 1Password pull-fm/infra/BACKUP_DUMP_KEY, 'cipher passphrase'
 PULLFM_BACKUP_HMAC_KEY=       # same item, 'hmac key'

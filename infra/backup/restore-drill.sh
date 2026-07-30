@@ -94,10 +94,14 @@ done
 # ADDRESSED BY TITLE, AND IT USED TO BE AN ITEM ID. The id here was a live
 # finding in `tools/check-public-identifiers.mjs`: a vault item id is a direct
 # object reference, so publishing one in a public repository turns any vault
-# access from a search problem into a fetch. `op item get` takes either form,
-# the title is unambiguous, and the `_US` suffix says which side of the
-# residency cutover this credential belongs to.
-readonly PULLFM_DRILL_LEDGER_OP_ITEM="${PULLFM_DRILL_LEDGER_OP_ITEM:-pull-fm/staging/R2_DRILL_LEDGER_CREDENTIALS_US}"
+# access from a search problem into a fetch. `op item get` takes either form and
+# the title is unambiguous.
+#
+# THE TITLE CARRIED A `_US` SUFFIX UNTIL 2026-07-30. It said which side of the
+# residency cutover the credential belonged to, which mattered only while both
+# sides existed. The EU estate was deleted on 2026-07-29 and its items archived,
+# so the suffix was retired along with every other consumer in one change.
+readonly PULLFM_DRILL_LEDGER_OP_ITEM="${PULLFM_DRILL_LEDGER_OP_ITEM:-pull-fm/staging/R2_DRILL_LEDGER_CREDENTIALS}"
 if [[ -z "${PULLFM_LEDGER_ACCESS_KEY_ID:-}" ]]; then
   PULLFM_LEDGER_ACCESS_KEY_ID="$(pullfm_op_field "${PULLFM_DRILL_LEDGER_OP_ITEM}" 'access key id')"
   PULLFM_LEDGER_SECRET_ACCESS_KEY="$(pullfm_op_field "${PULLFM_DRILL_LEDGER_OP_ITEM}" 'secret access key')"

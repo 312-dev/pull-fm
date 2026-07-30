@@ -307,6 +307,12 @@ named next to each so that a reader can check the claim rather than take it.
    day of the rename, and one of them quietly loading a fortnight of catalogue
    into the wrong database.
 
+   **The rename landed on 2026-07-30 and it changed one line**, which is the
+   whole return on that decision. The `_US` suffix is retired: the EU project was
+   deleted on 2026-07-29, its vault items are archived as the audit trail, and
+   `pull-fm/staging/DATABASE_URL_DIRECT` is now the `us-east-1` owner DSN. This
+   file names no vault item, so nothing here had to change with it.
+
 3. ~~`infra/mb-loader/` synced to `/opt/pullfm/infra/mb-loader/` and the units
    enabled.~~ **Done.** `cmd_converge` sends `mb-loader` in the same tar as
    `observability backup lib`; the `if [ -d mb-loader ]` block in `bootstrap.sh`

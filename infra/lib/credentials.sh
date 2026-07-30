@@ -83,12 +83,29 @@ readonly PULLFM_NEON_ORG_ID="${PULLFM_NEON_ORG_ID:-org-tiny-leaf-89756764}"
 # every terraform command in infra/neon stops.
 readonly PULLFM_NEON_PROJECTS="${PULLFM_NEON_PROJECTS:-pull-fm-us}"
 
-# 1Password item holding the Neon API key, addressed BY ITEM ID.
+# 1Password item holding the Neon API key, addressed BY TITLE.
 #
-# The human-readable title contains parentheses, which are not legal in an
-# op:// secret reference, so the id form is the only one that resolves. Item ids
-# are stable across renames, which is a second reason to prefer them.
-readonly PULLFM_NEON_OP_ITEM="${PULLFM_NEON_OP_ITEM:-5ccxlg635x37rybelz53yeaqf4}"
+# THIS LINE WAS AN ITEM ID, JUSTIFIED BY A CLAIM THAT WAS HALF TRUE. The old
+# comment said the title contains parentheses, which are not legal in an op://
+# secret reference, "so the id form is the only one that resolves". The first
+# half is correct and the conclusion is not: only the op:// REFERENCE SYNTAX
+# rejects the parenthesis. `op item get` takes a title or an id interchangeably
+# and has no such restriction, which is why the read below moved from `op read`
+# to `_pullfm_op_field` in the same change. Measured 2026-07-30:
+#
+#   op read "op://MCP/Neon API Key (pull.fm)/password"
+#     -> invalid secret reference: invalid character in secret reference: '('
+#   op item get "Neon API Key (pull.fm)" --vault MCP --fields label=password --reveal
+#     -> the same value; sha256 of both outputs matched
+#
+# It matters because this repository is PUBLIC and
+# `tools/check-public-identifiers.mjs` carries a detector whose stated reason is
+# that "a vault item id is a direct object reference to a specific credential;
+# it turns any vault access from a search problem into a fetch". An id here was a
+# standing entry in that check's baseline. The title is what belongs in the open,
+# and every other read in this file already addresses items that way, including
+# `Hetzner pull.fm API Token` below.
+readonly PULLFM_NEON_OP_ITEM="${PULLFM_NEON_OP_ITEM:-Neon API Key (pull.fm)}"
 
 _pullfm_die() { printf '\033[31m%s\033[0m\n' "$*" >&2; return 1; }
 
@@ -245,10 +262,11 @@ pullfm_load_credentials() {
       # Neon API key plus the R2 state pair, and neither a Hetzner nor a
       # Cloudflare token. Loading credentials a root cannot use is not
       # harmless; it widens what a mistake in that root can reach.
-      NEON_API_KEY="$(op read "op://${PULLFM_OP_VAULT}/${PULLFM_NEON_OP_ITEM}/password")" ||
-        _pullfm_die "1Password: could not read the Neon API key" || return 1
-      [[ -n "${NEON_API_KEY}" ]] ||
-        _pullfm_die "1Password: the Neon API key is empty" || return 1
+      # `_pullfm_op_field`, not `op read`: the item is addressed by title now
+      # (see PULLFM_NEON_OP_ITEM above) and an op:// reference cannot carry the
+      # parenthesis in that title. The helper also rejects an EMPTY field, which
+      # `op` returns at exit 0 for a field that does not exist.
+      NEON_API_KEY="$(_pullfm_op_field "${PULLFM_NEON_OP_ITEM}" 'password')" || return 1
 
       AWS_ACCESS_KEY_ID="$(_pullfm_op_field 'pull-fm/infra/R2_TFSTATE' 'access key id')" || return 1
       AWS_SECRET_ACCESS_KEY="$(_pullfm_op_field 'pull-fm/infra/R2_TFSTATE' 'secret access key')" || return 1

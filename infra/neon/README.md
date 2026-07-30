@@ -76,23 +76,30 @@
 > state surgery touched them. They were applied with `sql/*.sql` per branch and
 > verified; see below.
 >
-> **THE LIVE 1PASSWORD ITEMS STILL CARRY A `_US` SUFFIX, AND THAT IS AN OPEN
-> ITEM RATHER THAN A DECISION.** The connection strings the application, the
-> backup tooling and the verifiers actually use are
-> `pull-fm/{staging,prod}/DATABASE_URL_US` and `..._DIRECT_US`, plus
-> `pull-fm/staging/R2_CREDENTIALS_US`, `..._LEDGER_CREDENTIALS_US` and
-> `..._DRILL_LEDGER_CREDENTIALS_US`. The plain-named EU originals were **archived
-> and retitled `(RETIRED 2026-07-29)`** when the EU estate was retired, so the
-> plain titles no longer resolve.
+> **THE `_US` SUFFIX ON THE 1PASSWORD ITEMS IS RETIRED, AS OF 2026-07-30.** The
+> connection strings the application, the backup tooling and the verifiers use
+> are `pull-fm/{staging,prod}/DATABASE_URL` and `..._DIRECT`, plus
+> `pull-fm/staging/R2_CREDENTIALS`, `..._LEDGER_CREDENTIALS` and
+> `..._DRILL_LEDGER_CREDENTIALS`. There is no `_US` item left in the vault.
 >
-> The suffix is a migration artifact and should be dropped, but dropping it is a
-> two-sided change: the titles are referenced by `infra/lib/secrets.sh`,
+> The suffix existed because a Neon region and an R2 jurisdiction are both
+> immutable, so the residency move created new items alongside live EU ones that
+> already held the plain titles. Once the EU estate was deleted on 2026-07-29 and
+> its items **archived as the audit trail**, the suffix was a migration artifact
+> that would have read as a distinction to whoever found it next.
+>
+> **The rename and its consumers landed in one change**, because either half
+> alone is a broken backup path: the titles are read by `infra/lib/secrets.sh`,
 > `infra/lib/backup-common.sh`, `infra/backup/restore-drill.sh`,
 > `infra/backup/README.md`, `infra/mb-loader/systemd/README.md` and
-> `packages/db/scripts/verify-query-ceilings.mjs`. Renaming the items without
-> those edits breaks the backup path and the restore drill, so the rename and the
-> edits go in one change. Every `PGURL_ITEM=` example below therefore names the
-> `_US` item, because that is the one that resolves today.
+> `packages/db/scripts/verify-query-ceilings.mjs`.
+>
+> **The archived EU items stay archived and are not deleted.** No title collision
+> had to be resolved: 1Password returned all seven renames without one, the vault
+> holds exactly one active item per title, and an archived item is unreachable
+> from `op item get` without `--include-archive` (the API refuses it outright with
+> "item is not in an active state"). So the retired EU names cannot be read by
+> accident, which is the property the suffix was standing in for.
 
 The full migration procedure, the free-plan analysis and the rollback paths live
 in [`docs/runbooks/neon-migration.md`](../../docs/runbooks/neon-migration.md).
@@ -151,12 +158,11 @@ argument is rendered into the plan file even when it comes from a `sensitive`
 variable, plan files get attached to pull requests, and this repository is
 public.
 
-**OPEN ITEM: the key is fetched from 1Password by ITEM ID, and it does not have
-to be.** `pullfm_load_credentials neon` runs
-`op read "op://MCP/<item-id>/password"`, and this file used to justify that by
-saying the item's title contains parentheses so an `op://` reference cannot
-address it by title. **The first half is true and the conclusion is not.**
-Measured 2026-07-30:
+**CLOSED, 2026-07-30: the key is fetched BY TITLE.** `pullfm_load_credentials
+neon` used to run `op read "op://MCP/<item-id>/password"`, and this file used to
+justify that by saying the item's title contains parentheses so an `op://`
+reference cannot address it by title. **The first half is true and the conclusion
+was not.** Measured 2026-07-30:
 
 ```
 $ op read "op://MCP/Neon API Key (pull.fm)/password"
@@ -168,13 +174,17 @@ $ op item get "Neon API Key (pull.fm)" --vault MCP --fields label=password --rev
 
 So only the `op://` _reference syntax_ rejects the parenthesis. `op item get`
 addresses the same item **by title** and returns the identical secret, and
-`credentials.sh` already uses `op item get` elsewhere in the same file. That
+`credentials.sh` already used `op item get` elsewhere in the same file. That
 matters because `tools/check-public-identifiers.mjs` carries a detector for vault
 item ids whose stated reason is that "a vault item id is a direct object
 reference to a specific credential; it turns any vault access from a search
-problem into a fetch" - and one is currently hardcoded in a tracked file in a
-public repository. The fix belongs in `infra/lib/credentials.sh`, which this root
-does not own; the diff is written up rather than applied.
+problem into a fetch" - and one was hardcoded in a tracked file in a public
+repository.
+
+`infra/lib/credentials.sh` now sets `PULLFM_NEON_OP_ITEM` to the title and reads
+it with `_pullfm_op_field`, and `infra/lib/backup-common.sh` carried the SAME id
+for the same reason and was fixed in the same change. Two entries came off the
+`tools/public-identifiers-baseline.json` list, which only shrinks.
 
 ## Usage
 
@@ -393,7 +403,7 @@ psql -v ON_ERROR_STOP=1 -f sql/set-role-timeouts.sql "$OWNER_DIRECT_URL"
 
 # Proves. Over the POOLED endpoint as pullfm_app: reads the catalog, fans out
 # to defeat parked backends, then exceeds the ceiling and checks it is killed.
-PGURL_ITEM=pull-fm/<env>/DATABASE_URL_US \
+PGURL_ITEM=pull-fm/<env>/DATABASE_URL \
   node ../../packages/db/scripts/verify-query-ceilings.mjs
 ```
 
@@ -422,7 +432,7 @@ psql -v ON_ERROR_STOP=1 -f sql/verify-app-role.sql   "$OWNER"   # 40 assertions
 
 # Then, over the POOLED endpoint as pullfm_app, prove the ceilings FIRE.
 # ~110 seconds: it waits out both timeouts on purpose.
-PGURL_ITEM=pull-fm/<env>/DATABASE_URL_US \
+PGURL_ITEM=pull-fm/<env>/DATABASE_URL \
   node ../../packages/db/scripts/verify-query-ceilings.mjs
 ```
 

@@ -1,105 +1,125 @@
 #!/usr/bin/env node
 /**
- * Proves that the four background jobs are actually scheduled, on the cadence
- * their entrypoints say they need, and that a job which CANNOT RUN is treated
- * differently from one that ran.
+ * Proves what a CHECKOUT can prove about every scheduled unit in this
+ * repository, and says out loud what it cannot.
  *
  *   node infra/scripts/check-job-schedule.mjs      (or: make jobs)
  *
  * ---------------------------------------------------------------------------
- * WHY THIS EXISTS
+ * WHY THIS EXISTS, AND WHY IT WAS REWRITTEN
  *
- * The four jobs were written, tested, and shipped as pnpm commands, and for a
- * while NOTHING INVOKED THEM. That is not a small gap: three of the four are
- * what make the retention windows in legal/privacy-policy.md true statements
- * rather than intentions, and the fourth is what keeps the request path from
- * spending a global 1 req/s provider budget on a page render.
+ * The four application jobs were written, tested, and shipped as pnpm commands,
+ * and for a while NOTHING INVOKED THEM. That is what this check was written for.
  *
- * A schedule nobody verified is the same class of defect as a backup nobody
- * restored, and it fails the same way: silently, and only when it matters. So
- * every claim this repository makes about the schedule is asserted here.
+ * IT THEN BECAME AN INSTANCE OF THE SAME DEFECT. `UNIT_DIR` and a hand-written
+ * `JOBS` table pinned it to `infra/staging/app/systemd/` and to four unit names,
+ * so the four `infra/backup/` units, the `infra/mb-loader/` pair and the two
+ * `infra/observability/` units were never looked at. It printed
+ * "PASS: every job is scheduled" while asserting over 4 of the 13 timers in the
+ * tree. A check that covers a third of its subject and reports success is the
+ * defect it exists to catch, one level up.
+ *
+ * PULLFM-RISK-012 is the proof that this matters: a backup timer fully written,
+ * committed, and installed nowhere. It was found by enumerating timers on the
+ * machine, not by reading the repository, and a hardcoded list could never have
+ * found it because the unit was not on the list.
+ *
+ * So this file DISCOVERS. Every `*.timer` under any directory named `systemd`
+ * anywhere in `infra/` is in scope, and a newly added timer is covered the
+ * moment it is committed, with no edit here.
  *
  * ---------------------------------------------------------------------------
- * WHAT IS PROVABLE WITHOUT INFRASTRUCTURE, AND WHAT IS NOT
+ * WHAT A REPOSITORY CAN ANSWER, AND WHAT ONLY A NODE CAN
  *
- * Nothing is deployed. What can be proved from a checkout:
+ * This distinction is the whole design, because collapsing it is how the old
+ * version came to claim things it had not checked.
  *
- *   - the unit files exist, are installed by bootstrap.sh, and are ENABLED
- *     there rather than merely copied (a timer that is installed and not
- *     enabled is the exact shape of this bug, one layer down)
- *   - each service carries the exit-code contract: SuccessExitStatus=2 so a
- *     "ran, with something to look at" is not an alert, and OnFailure so a
- *     "could not run, changed nothing" is
- *   - each command the timers invoke resolves to a real entrypoint
- *   - the calendar expressions expand to the instants intended, checked against
- *     systemd's own parser wherever systemd exists
- *   - no run can be started before the previous one is bounded to finish
+ * PROVABLE HERE, and asserted below:
  *
- * What CANNOT be proved here, and is not claimed anywhere: that any of it has
- * ever fired. It has not. There is no compute. See docs/RUNBOOK-JOBS.md.
+ *   - a `.timer` has a `.service` beside it, and the timer is installable
+ *     (`[Install] WantedBy=timers.target`) rather than inert
+ *   - the timer declares a trigger at all
+ *   - every `OnCalendar=` is VALID, according to systemd's own parser, and
+ *     actually yields future instants
+ *   - the start-time bound is shorter than the gap between firings, so a wedged
+ *     run is killed before the next one is due
+ *   - the failure path is wired: `OnFailure=` in `[Unit]` where systemd reads it
+ *     and not in `[Service]` where it is silently ignored
+ *   - a unit that needs an environment file skips rather than fails when the
+ *     file is absent
+ *   - SOME INSTALLER IN THIS REPOSITORY ENABLES THE TIMER. This is the
+ *     RISK-012 assertion and it is the one worth having: a unit no installer
+ *     enables is a control that exists only in git.
+ *
+ * NOT PROVABLE HERE, and therefore NOT CLAIMED ANYWHERE IN THE OUTPUT:
+ *
+ *   - whether any unit is enabled on any machine right now
+ *   - whether any timer has a NEXT, or has ever fired, or what it exited
+ *   - whether the node a bootstrap ran on still matches the bootstrap
+ *
+ * A repository cannot tell an installed timer from an uninstalled one. It can
+ * only tell whether the repository ASKS for it to be installed. Those are
+ * different claims and the report keeps them apart: `make jobs` being green
+ * means "the schedule this repository describes is coherent and asks to be
+ * installed", never "the schedule is running". The second question is answered
+ * by `systemctl list-timers` on the node and by nothing else.
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, relative, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const UNIT_DIR = join(ROOT, "infra", "staging", "app", "systemd");
-const BOOTSTRAP = join(ROOT, "infra", "staging", "app", "bootstrap.sh");
-const RUNNER = join(ROOT, "infra", "staging", "app", "pullfm-job");
+const INFRA = join(ROOT, "infra");
 const RUNBOOK = join(ROOT, "docs", "RUNBOOK-JOBS.md");
 const BFF_PKG = join(ROOT, "apps", "bff", "package.json");
+const SELF = relative(ROOT, fileURLToPath(import.meta.url));
 
-/**
- * The authoritative table. Every number here is derived from the reasoning in
- * the entrypoint's own header, and the `why` field is what a reader gets when
- * this check fails.
- */
-const JOBS = [
+// The base instant every calendar expansion is measured from, so two runs of
+// this check on different days compare the same numbers.
+const BASE = "2026-01-01 00:00:00 UTC";
+const ITERATIONS = 8;
+
+// systemd's own default when a unit sets no TimeoutStartSec=. A unit without
+// one is BOUNDED BY THIS, not unbounded, and reporting it as unbounded would be
+// a false alarm.
+const DEFAULT_TIMEOUT_START_SEC = 90;
+
+// ---------------------------------------------------------------------------
+// TIMERS THIS REPOSITORY DELIBERATELY DOES NOT SCHEDULE.
+//
+// A timer that no installer enables is a FAILURE unless it is written down
+// here with a reason. That is the RISK-012 gate: the failure mode being
+// prevented is a unit committed with every directive correct that nothing ever
+// installs, which reads as done in a diff and in a file listing.
+//
+// This list may only SHRINK. An entry for a unit that some installer now
+// enables is stale and fails, on the same principle as
+// tools/public-identifiers-baseline.json: an exemption that outlived its reason
+// is a standing exemption nobody reads.
+//
+// `open: true` means the gap is NOT a decision. It is reported under its own
+// heading, loudly, and it is somebody's outstanding work rather than a settled
+// trade-off.
+// ---------------------------------------------------------------------------
+const NOT_SCHEDULED = [
   {
-    job: "warm-cache",
-    unit: "pullfm-warm-cache",
-    command: "warm:cache",
-    script: "warm-cache",
-    onCalendar: "*-*-* *:10/30:00",
-    intervalSec: 30 * 60,
-    timeoutStartSec: 1320,
-    persistent: false,
-    why: "The warmer's own whole-run deadline is 20 minutes and the MusicBrainz budget is per IP and global, so two overlapping runs on one egress address would double the observed rate against a limit that does not care they are separate jobs.",
+    unit: "pullfm-backup-retention",
+    why: "Cannot work with the node's credential, measured rather than assumed: on 2026-07-29 it reported four MISSING lifecycle rules where the real answer was AccessDenied on GetBucketLifecycleConfiguration. Lifecycle is a bucket-ADMIN operation and the node holds a bucket-scoped OBJECT token, which is the point of PULLFM-RISK-013. Widening the token to satisfy a weekly check would undo the fix that risk records. Reasoning in infra/staging/app/bootstrap.sh and docs/RUNBOOK-DR.md section 6.",
   },
   {
-    job: "sweep-expired",
-    unit: "pullfm-sweep-expired",
-    command: "sweep:expired",
-    script: "sweep-expired",
-    onCalendar: "*-*-* *:05:00",
-    intervalSec: 60 * 60,
-    timeoutStartSec: 600,
-    persistent: true,
-    why: "idempotency_keys.expires_at is 24 hours and the privacy policy says so. Daily would make the worst case 48 hours against a 24-hour promise; hourly makes it 25, which is the schema's number plus the hour of clock-skew slack.",
+    unit: "pullfm-restore-drill",
+    why: "DESTROYS DATA on the staging branch and needs a Neon API key that can delete branches. Monthly drilling is a Gate 4 obligation, but arming it on a node that has never run it once unattended is how a drill becomes an incident. It stays an operator-run script.",
   },
   {
-    job: "reap-unverified",
-    unit: "pullfm-reap-unverified",
-    command: "reap:unverified",
-    script: "reap-unverified",
-    onCalendar: "*-*-* *:35:00",
-    intervalSec: 60 * 60,
-    timeoutStartSec: 900,
-    persistent: true,
-    why: "AUTH_UNVERIFIED_REAP_AFTER_S is 24 hours. Running daily would make the true upper bound on an unconsented record's life 48 hours, and the stated window would bound nothing.",
+    unit: "pullfm-deletion-ledger",
+    why: "Superseded for its original purpose: apps/bff writes the ledger object inline with the deletion cascade and refuses the delete if that write fails, so erasure durability is synchronous with the request. What is left is a reconciler, and running it here would put a SECOND R2 credential on the node to backfill rows that no longer accumulate.",
   },
   {
-    job: "purge-audit",
-    unit: "pullfm-purge-audit",
-    command: "purge:audit",
-    script: "purge-audit",
-    onCalendar: "*-*-* 06:17:00 UTC",
-    intervalSec: 24 * 60 * 60,
-    timeoutStartSec: 1800,
-    persistent: true,
-    why: "Every window this job enforces is measured in tens of days, so a day is the finest granularity that means anything. Weekly would falsify the published sentence 'normally within 24 hours'.",
+    unit: "pullfm-heartbeat",
+    open: true,
+    why: "NO REASON IS RECORDED ANYWHERE IN THIS REPOSITORY, and this is the inverse of PULLFM-RISK-012 rather than an instance of it. Enumerated on the staging node on 2026-07-30, pullfm-heartbeat.timer is ENABLED and firing every five minutes, and nothing under infra/ installs or enables it, so it was armed by hand. The consequence is the one that matters: a node rebuild drops the dead man's switch silently, and the thing that would have told somebody is the thing that went away. Owned by the alerting-decoupling work (PULLFM-RISK-014). This entry is not an exemption, it is an open finding parked where the check can see it.",
   },
 ];
 
@@ -112,6 +132,71 @@ function check(condition, message) {
 
 function read(path) {
   return readFileSync(path, "utf8");
+}
+
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+/** Every directory named `systemd` anywhere under infra/. */
+function unitDirs(dir, found = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    const abs = join(dir, entry.name);
+    if (entry.name === "systemd") found.push(abs);
+    else unitDirs(abs, found);
+  }
+  return found;
+}
+
+/**
+ * Every file under infra/ that ENABLES a systemd unit.
+ *
+ * TWO EXCLUSIONS, AND BOTH ARE FALSE POSITIVES THIS CHECK ALREADY PRODUCED.
+ *
+ * Markdown is skipped. `infra/observability/README.md` documents
+ * `systemctl enable --now pullfm-heartbeat.timer` in a fenced block, and the
+ * first version of this walk counted that as coverage - which turned the one
+ * genuine RISK-012-shaped finding in the tree into a green line. A document
+ * describing an install is the opposite of an install: it is the thing that
+ * exists when nothing automated does.
+ *
+ * Comment lines are stripped, because a shell script that explains why it does
+ * NOT enable a unit would otherwise read as enabling it.
+ *
+ * THIS FILE IS SKIPPED TOO, and that was a third false positive rather than a
+ * theoretical one: the failure message below quotes
+ * `systemctl enable --now <unit>.timer` so an operator can paste it, and the
+ * walk read its own error string as an installation. A checker that counts
+ * itself as coverage is the purest form of the bug this file exists to catch.
+ */
+const SELF_ABS = fileURLToPath(import.meta.url);
+function installerScripts(dir, found = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    const abs = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      installerScripts(abs, found);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (abs === SELF_ABS) continue;
+    if (/\.(md|markdown|txt)$/i.test(entry.name)) continue;
+    if (statSync(abs).size > 2 * 1024 * 1024) continue;
+    let raw;
+    try {
+      raw = readFileSync(abs, "utf8");
+    } catch {
+      continue;
+    }
+    const text = raw
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    if (/systemctl\s+enable/.test(text)) found.push({ path: abs, text });
+  }
+  return found;
 }
 
 /** Parses an ini-ish systemd unit into { SECTION: { Key: [values] } }. */
@@ -140,282 +225,67 @@ function one(unit, section, key) {
   return values && values.length === 1 ? values[0] : undefined;
 }
 
+function all(unit, section, key) {
+  return unit[section]?.[key] ?? [];
+}
+
+/**
+ * systemd time spans: a bare number is SECONDS, otherwise a sum of suffixed
+ * parts. Returns undefined for anything unrecognised rather than guessing,
+ * because a bound this cannot read is a bound nobody should trust either.
+ */
+function parseTimeSpan(spec) {
+  if (spec === undefined) return undefined;
+  const t = String(spec).trim();
+  if (/^\d+$/.test(t)) return Number(t);
+  const units = {
+    ms: 1e-3,
+    s: 1,
+    sec: 1,
+    second: 1,
+    seconds: 1,
+    m: 60,
+    min: 60,
+    minute: 60,
+    minutes: 60,
+    h: 3600,
+    hr: 3600,
+    hour: 3600,
+    hours: 3600,
+    d: 86400,
+    day: 86400,
+    days: 86400,
+    w: 604800,
+    week: 604800,
+    weeks: 604800,
+  };
+  let total = 0;
+  let matched = false;
+  const re = /(\d+)\s*([a-z]+)/g;
+  let m;
+  while ((m = re.exec(t)) !== null) {
+    const mult = units[m[2]];
+    if (mult === undefined) return undefined;
+    total += Number(m[1]) * mult;
+    matched = true;
+  }
+  return matched ? total : undefined;
+}
+
 // ---------------------------------------------------------------------------
-// A deliberately narrow OnCalendar expander.
+// systemd-analyze is the authority on a calendar expression.
 //
-// It supports exactly the subset used above: `*-*-* H:M:S` with each time field
-// either `*`, a two-digit number, or `n/step`, plus an optional UTC suffix.
-// Anything else throws rather than being guessed at, because a calendar
-// expression this cannot parse is one nobody should be relying on either.
+// The previous version of this file carried a hand-written OnCalendar expander
+// that supported exactly the four shapes the four hardcoded jobs used, and
+// threw on anything else. Discovery immediately produces four shapes it could
+// not parse (`Mon *-*-* 07:11:00 UTC`, `*:0/10`, `*-*-01 04:47:00 UTC`, and the
+// shorthand `daily`), so a bespoke parser would now be the thing deciding which
+// timers get checked - which is the hardcoding this rewrite removes, wearing a
+// different hat.
 //
-// Its answers are cross-checked against `systemd-analyze calendar` below
-// wherever systemd exists, which is what makes it evidence rather than a second
-// opinion from the same author.
-// ---------------------------------------------------------------------------
-function parseField(spec, max) {
-  if (spec === "*") return null; // matches everything
-  const step = spec.split("/");
-  if (step.length === 2) {
-    const start = Number(step[0]);
-    const by = Number(step[1]);
-    if (!Number.isInteger(start) || !Number.isInteger(by) || by <= 0) {
-      throw new Error(`unsupported stepped field: ${spec}`);
-    }
-    const values = [];
-    for (let v = start; v <= max; v += by) values.push(v);
-    return values;
-  }
-  const n = Number(spec);
-  if (!Number.isInteger(n) || n < 0 || n > max) {
-    throw new Error(`unsupported field: ${spec}`);
-  }
-  return [n];
-}
-
-function expand(expression, fromUtcMs, days) {
-  const parts = expression.split(/\s+/);
-  if (parts.length < 2 || parts.length > 3) {
-    throw new Error(`unsupported OnCalendar shape: ${expression}`);
-  }
-  const [date, time, zone] = parts;
-  if (date !== "*-*-*") {
-    throw new Error(`only *-*-* date specs are supported, got: ${date}`);
-  }
-  if (zone !== undefined && zone !== "UTC") {
-    throw new Error(`only a UTC timezone suffix is supported, got: ${zone}`);
-  }
-  const [h, m, s] = time.split(":");
-  const hours = parseField(h, 23);
-  const minutes = parseField(m, 59);
-  const seconds = parseField(s, 59);
-  if (seconds === null || seconds.length !== 1 || seconds[0] !== 0) {
-    throw new Error(`expected an explicit :00 seconds field, got: ${s}`);
-  }
-
-  const hits = [];
-  const end = fromUtcMs + days * 86400_000;
-  for (let t = fromUtcMs; t < end; t += 60_000) {
-    const d = new Date(t);
-    if (hours !== null && !hours.includes(d.getUTCHours())) continue;
-    if (minutes !== null && !minutes.includes(d.getUTCMinutes())) continue;
-    hits.push(t);
-  }
-  return hits;
-}
-
-// ---------------------------------------------------------------------------
-// 1. The unit files say what the table says
-// ---------------------------------------------------------------------------
-for (const j of JOBS) {
-  const servicePath = join(UNIT_DIR, `${j.unit}.service`);
-  const timerPath = join(UNIT_DIR, `${j.unit}.timer`);
-
-  if (!existsSync(servicePath) || !existsSync(timerPath)) {
-    failures.push(
-      `${j.unit}: missing a .service or .timer. The command exists and nothing runs it, which is the bug this check was written for.`,
-    );
-    continue;
-  }
-
-  const service = parseUnit(read(servicePath));
-  const timer = parseUnit(read(timerPath));
-
-  check(
-    one(service, "Service", "Type") === "oneshot",
-    `${j.unit}.service: Type must be oneshot. systemd will not start a second copy of a running oneshot, and that is one of the two things keeping runs from overlapping.`,
-  );
-
-  check(
-    one(service, "Service", "ExecStart") ===
-      `/usr/local/bin/pullfm-job ${j.job}`,
-    `${j.unit}.service: ExecStart must be "/usr/local/bin/pullfm-job ${j.job}".`,
-  );
-
-  // The exit-code contract, which is the whole point of using a scheduler that
-  // can tell 0, 1 and 2 apart.
-  check(
-    one(service, "Service", "SuccessExitStatus") === "2",
-    `${j.unit}.service: SuccessExitStatus=2 is missing. Without it, exit 2 (ran, something to look at) alerts exactly like exit 1 (could not run, nothing changed), and an operator who is paged for both stops reading either.`,
-  );
-  // [Unit], not [Service]. OnFailure= is a Unit directive; in [Service] systemd
-  // parses it, logs "Unknown key name 'OnFailure' in section 'Service',
-  // ignoring", and wires nothing. This check asserted the broken placement
-  // until 2026-07-29, so it passed for as long as the units were wrong and
-  // started failing the moment they were fixed. The section is the assertion.
-  check(
-    one(service, "Unit", "OnFailure") === "pullfm-job-alert@%n.service",
-    `${j.unit}.service: OnFailure=pullfm-job-alert@%n.service is missing from the [Unit] section. Exit 1 would then be a silent failed unit, which is indistinguishable from a healthy job that had nothing to do. In [Service] it is ignored with a log line and buys nothing.`,
-  );
-  check(
-    one(service, "Service", "OnFailure") === undefined,
-    `${j.unit}.service: OnFailure= is in [Service], where systemd ignores it. Move it to [Unit].`,
-  );
-
-  check(
-    one(service, "Unit", "ConditionPathExists") === "/etc/pullfm/deploy.env",
-    `${j.unit}.service: ConditionPathExists=/etc/pullfm/deploy.env is missing. A node in its first minute has no image pinned, and every timer would fire an alert about it.`,
-  );
-
-  // TimeoutStartSec=, not RuntimeMaxSec=, and for these units the difference is
-  // between a bound and no bound at all. RuntimeMaxSec= applies to a service
-  // that has REACHED the running state; a Type=oneshot service never does, so
-  // systemd discards it with "RuntimeMaxSec= has no effect in combination with
-  // Type=oneshot. Ignoring." on every daemon-reload. The window a oneshot
-  // actually spends in "activating" is bounded by TimeoutStartSec=.
-  //
-  // The second assertion is the one that makes this check mean something: a
-  // wedged run must be KILLED before the timer is due again, because systemd
-  // refuses to start a second copy of a oneshot that is still activating. An
-  // unbounded job does not miss one run, it suppresses every later run.
-  const timeoutStart = Number(one(service, "Service", "TimeoutStartSec"));
-  check(
-    timeoutStart === j.timeoutStartSec,
-    `${j.unit}.service: TimeoutStartSec should be ${j.timeoutStartSec}, found ${one(service, "Service", "TimeoutStartSec")}.`,
-  );
-  check(
-    one(service, "Service", "RuntimeMaxSec") === undefined,
-    `${j.unit}.service: RuntimeMaxSec= is set on a Type=oneshot unit, where systemd ignores it. The bound that works is TimeoutStartSec=.`,
-  );
-  check(
-    timeoutStart < j.intervalSec,
-    `${j.unit}.service: TimeoutStartSec (${timeoutStart}s) is not shorter than the firing interval (${j.intervalSec}s), so a wedged run can still be running when the next one is due. ${j.why}`,
-  );
-
-  check(
-    one(timer, "Timer", "OnCalendar") === j.onCalendar,
-    `${j.unit}.timer: OnCalendar should be "${j.onCalendar}", found "${one(timer, "Timer", "OnCalendar")}". ${j.why}`,
-  );
-  check(
-    one(timer, "Timer", "AccuracySec") === "1s",
-    `${j.unit}.timer: AccuracySec=1s is missing. systemd's default one-minute window lets it coalesce timers, which is exactly what puts two job containers on one 4 GB node at the same instant.`,
-  );
-  check(
-    one(timer, "Timer", "Persistent") === String(j.persistent),
-    `${j.unit}.timer: Persistent should be ${j.persistent}.`,
-  );
-  check(
-    one(timer, "Install", "WantedBy") === "timers.target",
-    `${j.unit}.timer: [Install] WantedBy=timers.target is missing, so "systemctl enable" would do nothing and the timer would never start at boot.`,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// 2. bootstrap.sh installs AND enables every one of them
-//
-// Installed-but-not-enabled is the same failure as not-scheduled-at-all, and it
-// looks like progress in a diff.
-// ---------------------------------------------------------------------------
-const bootstrap = read(BOOTSTRAP);
-for (const j of JOBS) {
-  check(
-    bootstrap.includes(`systemctl enable --now ${j.unit}.timer`),
-    `bootstrap.sh never runs "systemctl enable --now ${j.unit}.timer". The unit would be installed and dormant.`,
-  );
-  check(
-    !bootstrap.includes(`systemctl enable --now ${j.unit}.service`),
-    `bootstrap.sh enables ${j.unit}.service directly. Enabling the service rather than the timer runs the job once during bootstrap, before the first deploy has pinned an image.`,
-  );
-}
-check(
-  /install -m 0644 "systemd\/pullfm-\$\{job\}\.(service|timer)"/.test(
-    bootstrap,
-  ) || JOBS.every((j) => bootstrap.includes(`${j.unit}.service`)),
-  "bootstrap.sh does not install the job unit files.",
-);
-check(
-  bootstrap.includes("install -m 0755 pullfm-job /usr/local/bin/pullfm-job"),
-  "bootstrap.sh does not install /usr/local/bin/pullfm-job, which every unit's ExecStart points at.",
-);
-check(
-  bootstrap.includes(
-    "install -m 0755 pullfm-job-alert /usr/local/bin/pullfm-job-alert",
-  ),
-  "bootstrap.sh does not install /usr/local/bin/pullfm-job-alert, so OnFailure would point at a missing binary and the failure would fail.",
-);
-check(
-  bootstrap.includes("install -m 0644 systemd/pullfm-job-alert@.service"),
-  "bootstrap.sh does not install the pullfm-job-alert@ template unit.",
-);
-
-// ---------------------------------------------------------------------------
-// 3. Every job name the runner accepts resolves to something real
-//
-// This is the check that catches a renamed entrypoint. A timer pointing at a
-// script that no longer exists fails as exit 1 forever, which is at least loud;
-// a timer whose job name was quietly dropped from the runner's case statement
-// fails as exit 1 too. Either way the retention window stops being enforced, so
-// both ends are asserted against the package manifest.
-// ---------------------------------------------------------------------------
-const runner = read(RUNNER);
-const pkg = JSON.parse(read(BFF_PKG));
-for (const j of JOBS) {
-  check(
-    runner.includes(`${j.job}) ENTRYPOINT=dist/scripts/${j.script}.js ;;`),
-    `pullfm-job does not map "${j.job}" to dist/scripts/${j.script}.js.`,
-  );
-  check(
-    pkg.scripts?.[j.command] === `node dist/scripts/${j.script}.js`,
-    `apps/bff/package.json: "${j.command}" should be "node dist/scripts/${j.script}.js", found "${pkg.scripts?.[j.command]}". The scheduled container and the documented pnpm command must run the same file.`,
-  );
-  check(
-    existsSync(join(ROOT, "apps", "bff", "src", "scripts", `${j.script}.ts`)),
-    `apps/bff/src/scripts/${j.script}.ts does not exist, so ${j.unit}.timer schedules nothing.`,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// 4. The calendars expand to the instants intended
-// ---------------------------------------------------------------------------
-const FROM = Date.UTC(2026, 0, 1, 0, 0, 0);
-const DAYS = 8;
-const firedMinutes = new Map();
-
-for (const j of JOBS) {
-  let hits;
-  try {
-    hits = expand(j.onCalendar, FROM, DAYS);
-  } catch (err) {
-    failures.push(`${j.unit}.timer: ${err.message}`);
-    continue;
-  }
-
-  const expected = (DAYS * 86400) / j.intervalSec;
-  check(
-    hits.length === expected,
-    `${j.unit}.timer: "${j.onCalendar}" fires ${hits.length} times in ${DAYS} days, expected ${expected} for a ${j.intervalSec}s cadence.`,
-  );
-
-  const gaps = new Set();
-  for (let i = 1; i < hits.length; i += 1)
-    gaps.add((hits[i] - hits[i - 1]) / 1000);
-  check(
-    gaps.size === 1 && gaps.has(j.intervalSec),
-    `${j.unit}.timer: gaps between runs are ${[...gaps].join(", ")}s, expected a constant ${j.intervalSec}s. An uneven cadence means the shortest gap is the real bound, not the nominal one.`,
-  );
-
-  // Distinct minutes across every job. Three job containers starting in the
-  // same second on a 4 GB node that is also running the BFF, nginx and two
-  // Redis instances is a memory problem nobody would diagnose as a scheduling
-  // one.
-  for (const t of hits) {
-    const minute = new Date(t).getUTCMinutes();
-    const owner = firedMinutes.get(minute);
-    check(
-      owner === undefined || owner === j.unit,
-      `${j.unit}.timer and ${owner} both fire at minute :${String(minute).padStart(2, "0")}. Give every job its own minute.`,
-    );
-    firedMinutes.set(minute, j.unit);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 5. Cross-check against systemd's own parser, where one exists
-//
-// The expander above and the table it is checked against were written by the
-// same hand, so on its own it proves only self-consistency. systemd-analyze is
-// the authority. It is absent on macOS and present on the Linux runners, so
-// this is a hard assertion where it can be one and an explicit note where it
-// cannot.
+// systemd's own parser has no such limit and is the thing that will actually run
+// these expressions. Where it is absent (macOS) nothing is asserted about
+// calendars and the report SAYS SO rather than passing quietly.
 // ---------------------------------------------------------------------------
 let systemdAvailable = true;
 try {
@@ -424,98 +294,514 @@ try {
   systemdAvailable = false;
 }
 
-if (systemdAvailable) {
-  for (const j of JOBS) {
-    let output;
-    try {
-      output = execFileSync(
-        "systemd-analyze",
-        [
-          "calendar",
-          "--iterations=5",
-          "--base-time=2026-01-01 00:00:00 UTC",
-          j.onCalendar,
-        ],
-        { encoding: "utf8", env: { ...process.env, TZ: "UTC" } },
-      );
-    } catch (err) {
-      failures.push(
-        `${j.unit}.timer: systemd-analyze rejected "${j.onCalendar}": ${String(err.stderr ?? err.message).trim()}`,
-      );
-      continue;
-    }
+/** Future firing instants for an OnCalendar expression, in ms, ascending. */
+function elapses(expression) {
+  const output = execFileSync(
+    "systemd-analyze",
+    [
+      "calendar",
+      `--iterations=${ITERATIONS}`,
+      `--base-time=${BASE}`,
+      expression,
+    ],
+    { encoding: "utf8", env: { ...process.env, TZ: "UTC" } },
+  );
+  return [
+    ...output.matchAll(
+      /(?:Next elapse|Iteration #\d+): +[A-Za-z]{3} (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC/g,
+    ),
+  ]
+    .map((m) => Date.parse(`${m[1].replace(" ", "T")}Z`))
+    .sort((a, b) => a - b);
+}
 
-    // `Next elapse:` for the first instant and `Iteration #N:` for the rest,
-    // both as "Thu 2026-01-01 00:10:00 UTC". The UTC suffix is asserted rather
-    // than assumed: TZ is forced above, and a match that lost it would silently
-    // compare local instants against UTC ones.
-    const iso = [
-      ...output.matchAll(
-        /(?:Next elapse|Iteration #\d+): +[A-Za-z]{3} (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC/g,
-      ),
-    ]
-      .map((m) => Date.parse(`${m[1].replace(" ", "T")}Z`))
-      .sort((a, b) => a - b);
+// ---------------------------------------------------------------------------
+// Build the unit table by discovery
+// ---------------------------------------------------------------------------
+const dirs = unitDirs(INFRA).sort();
+if (dirs.length === 0) {
+  console.error(
+    "FAIL  found no systemd unit directories under infra/.\n\n" +
+      "That is not a clean tree, it is a broken scan: this repository has\n" +
+      "several. A green result from a walk that found nothing would mean nothing.",
+  );
+  process.exit(1);
+}
 
-    if (iso.length < 2) {
-      failures.push(
-        `${j.unit}.timer: could not read firing instants out of systemd-analyze. Output was:\n${output}`,
-      );
-      continue;
-    }
+const units = [];
+for (const dir of dirs) {
+  for (const file of readdirSync(dir).sort()) {
+    if (!file.endsWith(".timer")) continue;
+    const name = basename(file, ".timer");
+    const timerPath = join(dir, file);
+    const servicePath = join(dir, `${name}.service`);
+    units.push({
+      name,
+      dir: relative(ROOT, dir),
+      timerPath,
+      servicePath,
+      hasService: existsSync(servicePath),
+      timer: parseUnit(read(timerPath)),
+      service: existsSync(servicePath) ? parseUnit(read(servicePath)) : null,
+    });
+  }
+}
 
-    const mine = expand(j.onCalendar, FROM, DAYS).slice(0, iso.length);
+if (units.length === 0) {
+  console.error(
+    "FAIL  discovered no .timer units at all under infra/**/systemd/.\n\n" +
+      "This repository has several, so an empty discovery is a broken walk and\n" +
+      "not a clean tree.",
+  );
+  process.exit(1);
+}
+
+// Which timers does this repository ask to have enabled, and from where.
+const installers = installerScripts(INFRA);
+const enabledBy = new Map();
+for (const { path, text } of installers) {
+  for (const m of text.matchAll(
+    /systemctl\s+enable\s+[^\n]*?([\w@.-]+)\.timer/g,
+  )) {
+    const list = enabledBy.get(m[1]) ?? [];
+    const rel = relative(ROOT, path);
+    if (!list.includes(rel)) list.push(rel);
+    enabledBy.set(m[1], list);
+  }
+}
+// Enabling the SERVICE rather than the timer runs the job once at bootstrap,
+// before the first deploy has pinned an image. Tracked separately so it is
+// reported as the mistake it is rather than counted as coverage.
+const serviceEnabled = new Set();
+for (const { text } of installers) {
+  for (const m of text.matchAll(
+    /systemctl\s+enable\s+[^\n]*?([\w@.-]+)\.service/g,
+  )) {
+    serviceEnabled.add(m[1]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 1. Structure. Every discovered timer, no exceptions.
+// ---------------------------------------------------------------------------
+for (const u of units) {
+  check(
+    u.hasService,
+    `${u.dir}/${u.name}.timer has no ${u.name}.service beside it. A timer that activates a unit which does not exist fails on every firing.`,
+  );
+  if (!u.hasService) continue;
+
+  check(
+    one(u.timer, "Install", "WantedBy") === "timers.target",
+    `${u.dir}/${u.name}.timer: [Install] WantedBy=timers.target is missing, so "systemctl enable" would do nothing and the timer would never start at boot.`,
+  );
+
+  const onCalendar = all(u.timer, "Timer", "OnCalendar");
+  const onBoot = one(u.timer, "Timer", "OnBootSec");
+  const onActive = one(u.timer, "Timer", "OnUnitActiveSec");
+  check(
+    onCalendar.length > 0 || onBoot !== undefined || onActive !== undefined,
+    `${u.dir}/${u.name}.timer declares no trigger at all: no OnCalendar=, no OnBootSec=, no OnUnitActiveSec=. It is installable and will never fire.`,
+  );
+
+  // AccuracySec= or RandomizedDelaySec=. systemd's default accuracy is one
+  // MINUTE, and it coalesces timers inside that window, which is what puts two
+  // job containers on one small node at the same instant. Either directive makes
+  // the firing spread a decision instead of a default.
+  check(
+    one(u.timer, "Timer", "AccuracySec") !== undefined ||
+      one(u.timer, "Timer", "RandomizedDelaySec") !== undefined,
+    `${u.dir}/${u.name}.timer sets neither AccuracySec= nor RandomizedDelaySec=. systemd's default one-minute accuracy window lets it coalesce this timer with others, so the firing spread is whatever the manager decides.`,
+  );
+
+  check(
+    one(u.service, "Service", "Type") !== undefined,
+    `${u.dir}/${u.name}.service sets no Type=.`,
+  );
+  check(
+    all(u.service, "Service", "ExecStart").length > 0,
+    `${u.dir}/${u.name}.service has no ExecStart=.`,
+  );
+
+  // RuntimeMaxSec= applies to a service that has REACHED the running state. A
+  // Type=oneshot never does, so systemd discards it with "RuntimeMaxSec= has no
+  // effect in combination with Type=oneshot. Ignoring." on every reload. The
+  // window a oneshot spends in "activating" is bounded by TimeoutStartSec=.
+  if (one(u.service, "Service", "Type") === "oneshot") {
     check(
-      JSON.stringify(mine) === JSON.stringify(iso),
-      `${j.unit}.timer: this repository's expansion of "${j.onCalendar}" disagrees with systemd's.\n    systemd: ${iso.map((t) => new Date(t).toISOString()).join(", ")}\n    here:    ${mine.map((t) => new Date(t).toISOString()).join(", ")}`,
+      one(u.service, "Service", "RuntimeMaxSec") === undefined,
+      `${u.dir}/${u.name}.service: RuntimeMaxSec= is set on a Type=oneshot unit, where systemd ignores it. The bound that works is TimeoutStartSec=.`,
     );
   }
-  notes.push("calendar expressions cross-checked against systemd-analyze");
-} else {
-  notes.push(
-    "systemd-analyze is not installed, so the calendar expansions were checked against this file's own parser only. Run this on Linux (CI does) for the authoritative comparison.",
+}
+
+// ---------------------------------------------------------------------------
+// 2. The failure path, where the unit has one.
+//
+// Asserted BY SECTION rather than by presence, because that is the assertion
+// that catches the real bug: OnFailure= is a [Unit] directive, and in [Service]
+// systemd parses it, logs "Unknown key name 'OnFailure' in section 'Service',
+// ignoring", and wires nothing. This check asserted the broken placement until
+// 2026-07-29, so it passed for exactly as long as the units were wrong.
+// ---------------------------------------------------------------------------
+for (const u of units) {
+  if (!u.hasService) continue;
+
+  check(
+    one(u.service, "Service", "OnFailure") === undefined,
+    `${u.dir}/${u.name}.service: OnFailure= is in [Service], where systemd ignores it with a log line and wires nothing. Move it to [Unit].`,
+  );
+
+  const onFailure = one(u.service, "Unit", "OnFailure");
+  if (onFailure !== undefined) {
+    // The handler must exist in this repository, or the failure fails.
+    const template = `${onFailure.replace(/@.*$/, "@")}.service`.replace(
+      /\.service\.service$/,
+      ".service",
+    );
+    const found = dirs.some((d) => existsSync(join(d, template)));
+    check(
+      found,
+      `${u.dir}/${u.name}.service: OnFailure=${onFailure} names a unit (${template}) that exists nowhere under infra/**/systemd/. The failure handler would itself fail to start, so a failed run would be silent.`,
+    );
+  }
+
+  // Units that spawn a job container through the runner carry an exit-code
+  // contract, and that contract is the reason for using a scheduler which can
+  // tell 0, 1 and 2 apart. Derived from ExecStart rather than from a list, so a
+  // new job added to the runner inherits the assertion.
+  const exec = all(u.service, "Service", "ExecStart").join(" ");
+  if (/\/usr\/local\/bin\/pullfm-job\s+\S/.test(exec)) {
+    check(
+      one(u.service, "Service", "SuccessExitStatus") === "2",
+      `${u.dir}/${u.name}.service: SuccessExitStatus=2 is missing. Without it, exit 2 (ran, something to look at) alerts exactly like exit 1 (could not run, nothing changed), and an operator paged for both stops reading either.`,
+    );
+    check(
+      one(u.service, "Unit", "OnFailure") !== undefined,
+      `${u.dir}/${u.name}.service: no OnFailure= in [Unit]. Exit 1 would be a silent failed unit, indistinguishable from a healthy job that had nothing to do.`,
+    );
+  }
+
+  // A REQUIRED EnvironmentFile= without a matching ConditionPathExists= is a
+  // unit that FAILS on an unconfigured node instead of skipping, so every timer
+  // on a fresh node fires an alert about the node being fresh. The `-` prefix
+  // marks the file optional, so those are exempt by their own declaration rather
+  // than by an exception here.
+  for (const envFile of all(u.service, "Service", "EnvironmentFile")) {
+    if (envFile.startsWith("-")) continue;
+    check(
+      all(u.service, "Unit", "ConditionPathExists").includes(envFile),
+      `${u.dir}/${u.name}.service: EnvironmentFile=${envFile} is required but no ConditionPathExists=${envFile} guards it. On a node where that file is absent the unit FAILS rather than skipping, and every firing becomes an alert about an unconfigured node.`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3. The schedules are valid and the bounds are shorter than the gaps.
+//
+// THE BOUND CHECK APPLIES TO CALENDAR TIMERS ONLY, and that is systemd
+// semantics rather than laziness. OnUnitActiveSec= rearms from the moment the
+// unit goes INACTIVE, so a monotonic timer cannot overlap its own run however
+// long that run takes; OnCalendar= fires on wall-clock instants and can.
+// Asserting a bound against OnUnitActiveSec= would fail pullfm-deploy for a race
+// it is structurally incapable of having.
+// ---------------------------------------------------------------------------
+for (const u of units) {
+  if (!u.hasService) continue;
+
+  const expressions = all(u.timer, "Timer", "OnCalendar");
+  const timeoutRaw = one(u.service, "Service", "TimeoutStartSec");
+  u.timeoutSec = parseTimeSpan(timeoutRaw) ?? DEFAULT_TIMEOUT_START_SEC;
+  u.timeoutIsDefault = timeoutRaw === undefined;
+
+  if (timeoutRaw !== undefined && parseTimeSpan(timeoutRaw) === undefined) {
+    failures.push(
+      `${u.dir}/${u.name}.service: TimeoutStartSec=${timeoutRaw} is not a time span this check can read, so the bound cannot be compared against the firing interval.`,
+    );
+  }
+
+  if (expressions.length === 0) {
+    u.kind = "monotonic";
+    u.cadence = one(u.timer, "Timer", "OnUnitActiveSec") ?? "boot only";
+    u.gapSec = parseTimeSpan(one(u.timer, "Timer", "OnUnitActiveSec"));
+    continue;
+  }
+
+  u.kind = "calendar";
+  u.cadence = expressions.join(" + ");
+
+  if (!systemdAvailable) continue;
+
+  const instants = [];
+  let broke = false;
+  for (const expression of expressions) {
+    let hits;
+    try {
+      hits = elapses(expression);
+    } catch (err) {
+      failures.push(
+        `${u.dir}/${u.name}.timer: systemd-analyze rejected OnCalendar="${expression}": ${String(err.stderr ?? err.message).trim()}`,
+      );
+      broke = true;
+      continue;
+    }
+    if (hits.length < 2) {
+      failures.push(
+        `${u.dir}/${u.name}.timer: OnCalendar="${expression}" yields fewer than two future instants from ${BASE}, so it does not describe a recurring schedule.`,
+      );
+      broke = true;
+      continue;
+    }
+    instants.push(...hits);
+  }
+  if (broke) continue;
+
+  instants.sort((a, b) => a - b);
+  u.instants = instants;
+
+  let minGap = Infinity;
+  for (let i = 1; i < instants.length; i += 1) {
+    minGap = Math.min(minGap, (instants[i] - instants[i - 1]) / 1000);
+  }
+  u.gapSec = minGap;
+
+  // The assertion that makes the bound mean something: a wedged run must be
+  // KILLED before the timer is due again, because systemd refuses to start a
+  // second copy of a oneshot that is still activating. An unbounded job does not
+  // miss one run, it suppresses every later run.
+  check(
+    u.timeoutSec < minGap,
+    `${u.dir}/${u.name}: the start-time bound (${u.timeoutSec}s${u.timeoutIsDefault ? ", systemd's default since TimeoutStartSec= is unset" : ""}) is not shorter than the shortest gap between firings (${minGap}s). A wedged run can still be activating when the next firing is due, systemd will refuse to start it, and one stuck run then suppresses every later one.`,
   );
 }
 
 // ---------------------------------------------------------------------------
-// 6. The runbook and the units agree
+// 4. No two timers this repository ENABLES fire at the same instant.
 //
-// One authoritative place for the schedule is only useful if it is the same
-// schedule. A runbook that drifts is worse than no runbook: it is consulted.
+// Scoped to the enabled set on purpose. Three job containers starting in the
+// same second on a small node that is also running the BFF, nginx and two Redis
+// instances is a memory problem nobody would diagnose as a scheduling one - but
+// a unit nothing installs cannot contend for memory with anything, and failing
+// on a collision between two timers that never run together would be a false
+// alarm that teaches people to ignore this check.
 // ---------------------------------------------------------------------------
+const owners = new Map();
+for (const u of units) {
+  if (u.kind !== "calendar" || !u.instants) continue;
+  if (!enabledBy.has(u.name)) continue;
+  for (const t of u.instants) {
+    const owner = owners.get(t);
+    check(
+      owner === undefined || owner === u.name,
+      `${u.name}.timer and ${owner}.timer both fire at ${new Date(t).toISOString()}. Both are enabled by an installer in this repository, so on a node they land together. Give every enabled timer its own instant.`,
+    );
+    owners.set(t, u.name);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. THE RISK-012 GATE. Every discovered timer is either enabled by an
+//    installer in this repository, or written down above with a reason.
+// ---------------------------------------------------------------------------
+const acknowledged = new Map(NOT_SCHEDULED.map((n) => [n.unit, n]));
+
+for (const u of units) {
+  const enablers = enabledBy.get(u.name);
+  const ack = acknowledged.get(u.name);
+
+  if (enablers && enablers.length > 0) {
+    u.enabledBy = enablers;
+    check(
+      ack === undefined,
+      `${u.name}: NOT_SCHEDULED in ${SELF} claims this timer is deliberately not installed, but ${enablers.join(", ")} enables it. Remove the entry: an exemption that outlived its reason is a standing exemption nobody reads.`,
+    );
+  } else {
+    check(
+      ack !== undefined,
+      `${u.name}.timer is enabled by NOTHING in this repository. Nothing under infra/ runs "systemctl enable --now ${u.name}.timer", so the unit exists in git and is scheduled on no machine. That is PULLFM-RISK-012 exactly: a control that reads as present because the repository contains it. Either enable it from a bootstrap script, or add it to NOT_SCHEDULED in ${SELF} WITH A REASON.`,
+    );
+  }
+
+  check(
+    !serviceEnabled.has(u.name),
+    `${u.name}: an installer runs "systemctl enable" on ${u.name}.service rather than the .timer. Enabling the service runs the job once during bootstrap, before the first deploy has pinned an image.`,
+  );
+}
+
+// A NOT_SCHEDULED entry for a unit that no longer exists is also stale.
+for (const n of NOT_SCHEDULED) {
+  check(
+    units.some((u) => u.name === n.unit),
+    `NOT_SCHEDULED names "${n.unit}", which has no .timer anywhere under infra/**/systemd/. Remove the entry.`,
+  );
+  check(
+    typeof n.why === "string" && n.why.trim().length > 0,
+    `NOT_SCHEDULED entry for "${n.unit}" carries no reason. An unexplained exemption is the thing this list exists to prevent.`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 6. The job runner and the package manifest agree, for units that use it.
+//
+// Discovered from ExecStart rather than from a table, so a job added to the
+// runner is checked without editing this file. Catches a renamed entrypoint: a
+// timer whose job name was quietly dropped from the runner's case statement
+// fails as exit 1 forever, and the retention window it enforces stops being
+// enforced.
+// ---------------------------------------------------------------------------
+const RUNNER = join(ROOT, "infra", "staging", "app", "pullfm-job");
+if (existsSync(RUNNER) && existsSync(BFF_PKG)) {
+  const runner = read(RUNNER);
+  const pkg = JSON.parse(read(BFF_PKG));
+  for (const u of units) {
+    if (!u.hasService) continue;
+    const exec = all(u.service, "Service", "ExecStart").join(" ");
+    const m = exec.match(/\/usr\/local\/bin\/pullfm-job\s+(\S+)/);
+    if (!m) continue;
+    const job = m[1];
+    u.job = job;
+    const entry = runner.match(
+      new RegExp(`${job}\\)\\s*ENTRYPOINT=dist/scripts/([\\w-]+)\\.js`),
+    );
+    check(
+      entry !== null,
+      `pullfm-job does not map "${job}" to any dist/scripts entrypoint, but ${u.dir}/${u.name}.service invokes it. The unit would fail as exit 1 on every firing.`,
+    );
+    if (!entry) continue;
+    const script = entry[1];
+    check(
+      existsSync(join(ROOT, "apps", "bff", "src", "scripts", `${script}.ts`)),
+      `apps/bff/src/scripts/${script}.ts does not exist, so ${u.name}.timer schedules nothing.`,
+    );
+    const command = Object.keys(pkg.scripts ?? {}).find(
+      (k) => pkg.scripts[k] === `node dist/scripts/${script}.js`,
+    );
+    check(
+      command !== undefined,
+      `apps/bff/package.json has no script running "node dist/scripts/${script}.js". The scheduled container and the documented pnpm command must run the same file.`,
+    );
+    u.command = command;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Drift against the runbook, WHERE THE RUNBOOK ALREADY SPEAKS.
+//
+// Conditional on purpose. Requiring every discovered unit to appear in
+// docs/RUNBOOK-JOBS.md would make this check demand documentation edits, and a
+// check that fails until somebody writes prose gets silenced. What is asserted
+// is narrower and always meaningful: if the runbook quotes a unit, it must quote
+// the schedule that unit actually carries. Units the runbook does not mention
+// are REPORTED, not failed.
+// ---------------------------------------------------------------------------
+const undocumented = [];
 if (!existsSync(RUNBOOK)) {
   failures.push(
     "docs/RUNBOOK-JOBS.md is missing. The schedule has no authoritative home.",
   );
 } else {
   const runbook = read(RUNBOOK);
-  for (const j of JOBS) {
-    check(
-      runbook.includes(j.onCalendar),
-      `docs/RUNBOOK-JOBS.md does not quote "${j.onCalendar}" for ${j.unit}. The runbook and the unit have drifted.`,
-    );
-    check(
-      runbook.includes(`${j.unit}.timer`),
-      `docs/RUNBOOK-JOBS.md does not mention ${j.unit}.timer.`,
-    );
-    check(
-      runbook.includes(j.command),
-      `docs/RUNBOOK-JOBS.md does not mention the ${j.command} command.`,
-    );
+  for (const u of units) {
+    if (!runbook.includes(`${u.name}.timer`)) {
+      undocumented.push(u.name);
+      continue;
+    }
+    for (const expression of all(u.timer, "Timer", "OnCalendar")) {
+      check(
+        runbook.includes(expression),
+        `docs/RUNBOOK-JOBS.md mentions ${u.name}.timer but does not quote its OnCalendar "${expression}". The runbook and the unit have drifted, and a runbook that drifts is worse than none: it is consulted.`,
+      );
+    }
+    if (u.command !== undefined) {
+      check(
+        runbook.includes(u.command),
+        `docs/RUNBOOK-JOBS.md mentions ${u.name}.timer but not the ${u.command} command it corresponds to.`,
+      );
+    }
   }
+}
+
+if (systemdAvailable) {
+  notes.push(
+    `every OnCalendar expression was validated and expanded by systemd-analyze (${ITERATIONS} iterations from ${BASE})`,
+  );
+} else {
+  notes.push(
+    "systemd-analyze is NOT INSTALLED, so no OnCalendar expression was validated and no firing interval was derived. The bound-shorter-than-gap assertion and the collision check did not run. Run this on Linux, which CI does.",
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
-console.log("scheduled background jobs\n");
-const width = Math.max(...JOBS.map((j) => j.unit.length));
-for (const j of JOBS) {
+const pad = (s, n) => String(s).padEnd(n);
+const nameW = Math.max(...units.map((u) => u.name.length), 4);
+const dirW = Math.max(...units.map((u) => u.dir.length), 9);
+
+console.log(`scheduled units discovered in this repository: ${units.length}\n`);
+console.log(
+  `  ${pad("UNIT", nameW)}  ${pad("DIRECTORY", dirW)}  ${pad("TRIGGER", 9)}  ${pad("CADENCE", 24)}  BOUND / GAP`,
+);
+for (const u of units) {
+  const gap = u.gapSec === undefined ? "?" : `${u.gapSec}s`;
+  const bound = `${u.timeoutSec}s${u.timeoutIsDefault ? "*" : ""}`;
+  // A monotonic timer rearms only after its unit goes inactive, so its bound is
+  // not compared against its interval and the row says so rather than showing
+  // two numbers that look like a violation.
+  const relation = u.kind === "calendar" ? "of" : "per (not compared,";
+  const tail = u.kind === "calendar" ? "" : " see below)";
   console.log(
-    `  ${j.unit.padEnd(width)}  ${j.onCalendar.padEnd(22)}  runs <= ${String(j.timeoutStartSec).padStart(4)}s of ${j.intervalSec}s`,
+    `  ${pad(u.name, nameW)}  ${pad(u.dir, dirW)}  ${pad(u.kind ?? "?", 9)}  ${pad(u.cadence ?? "?", 24)}  ${bound} ${relation} ${gap}${tail}`,
   );
 }
-console.log();
+console.log(
+  "\n  * bound is systemd's DefaultTimeoutStartSec; the unit sets no TimeoutStartSec=.\n" +
+    "  A monotonic timer (OnUnitActiveSec=) rearms from the moment its unit goes\n" +
+    "  INACTIVE, so it cannot overlap its own run and its bound is deliberately not\n" +
+    "  compared against its interval. Only calendar timers can collide with themselves.",
+);
+
+const scheduled = units.filter((u) => u.enabledBy);
+console.log(
+  `\nasked to be installed by an installer in this repository: ${scheduled.length} of ${units.length}\n`,
+);
+for (const u of scheduled) {
+  console.log(`  ${pad(u.name, nameW)}  <- ${u.enabledBy.join(", ")}`);
+}
+
+const parked = units.filter((u) => !u.enabledBy);
+if (parked.length > 0) {
+  const settled = parked.filter((u) => !acknowledged.get(u.name)?.open);
+  const open = parked.filter((u) => acknowledged.get(u.name)?.open);
+
+  if (settled.length > 0) {
+    console.log(
+      `\nIN THE REPOSITORY AND DELIBERATELY NOT SCHEDULED: ${settled.length}\n`,
+    );
+    for (const u of settled) {
+      console.log(`  ${u.name}`);
+      console.log(`    ${acknowledged.get(u.name)?.why ?? "(no reason)"}\n`);
+    }
+  }
+
+  if (open.length > 0) {
+    console.log(
+      `\nOPEN FINDINGS - IN THE REPOSITORY, SCHEDULED BY NOTHING, NOT A DECISION: ${open.length}\n`,
+    );
+    for (const u of open) {
+      console.log(`  ${u.name}`);
+      console.log(`    ${acknowledged.get(u.name)?.why ?? "(no reason)"}\n`);
+    }
+  }
+}
+
+if (undocumented.length > 0) {
+  console.log(
+    `not mentioned in docs/RUNBOOK-JOBS.md, so no drift check ran against it: ${undocumented.length}`,
+  );
+  console.log(`  ${undocumented.join(", ")}\n`);
+}
+
 for (const n of notes) console.log(`  note: ${n}`);
 console.log();
 
@@ -525,9 +811,25 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
+// ---------------------------------------------------------------------------
+// The pass message is deliberately narrow. The previous one read "PASS: every
+// job is scheduled, enabled, bounded, and exit 1 reaches the alert path" while
+// asserting over four of thirteen units and while having no way whatsoever to
+// know whether anything was enabled anywhere. Both halves of that were wrong.
+// ---------------------------------------------------------------------------
 console.log(
-  "PASS: every job is scheduled, enabled, bounded, and exit 1 reaches the alert path.",
+  `PASS  ${units.length} timers discovered; each has a service, a valid schedule, a bound\n` +
+    "      shorter than its own firing gap, a wired failure path where it declares one,\n" +
+    `      and is either enabled by an installer here (${scheduled.length}) or written down with a\n` +
+    `      reason (${parked.length}).`,
 );
 console.log(
-  "      NOT running: nothing is deployed. See docs/RUNBOOK-JOBS.md, 'What is actually running'.",
+  "\nWHAT THIS DID NOT CHECK, because a checkout cannot:\n" +
+    "      whether any of these is enabled on any machine, whether any timer has a\n" +
+    "      NEXT, whether any has ever fired, and what it exited. This proves the\n" +
+    "      repository ASKS for a schedule; it cannot prove a machine HAS one. The only\n" +
+    "      answer to that is `systemctl list-timers --all 'pullfm-*'` on the node.\n" +
+    "      PULLFM-RISK-012 was a unit that would have passed every repository-side\n" +
+    "      assertion above and was installed nowhere; it was found by enumerating the\n" +
+    "      machine, and pullfm-heartbeat is the same gap in the other direction.",
 );
