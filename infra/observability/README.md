@@ -34,8 +34,8 @@ make alerts                        # both of the above
 
 | File                          | What it is                                                                         |
 | ----------------------------- | ---------------------------------------------------------------------------------- |
-| `pullfm-alert`                | **The** notification sender. Provider-agnostic: ntfy, Discord, Slack or JSON        |
-| `pullfm-heartbeat`            | Emits the content-free beat the external dead man's switch watches                  |
+| `pullfm-alert`                | **The** notification sender. Provider-agnostic: ntfy, Discord, Slack or JSON       |
+| `pullfm-heartbeat`            | Emits the content-free beat the external dead man's switch watches                 |
 | `pullfm-watchdog`             | Scrapes the node's own `/metrics` once a minute and fires the section 6 conditions |
 | `install-alert-env.sh`        | Writes `/etc/pullfm/alert.env` from 1Password. The one command that arms a node    |
 | `alert.env.example`           | The shape of that file. `op://` references, never values                           |
@@ -50,13 +50,13 @@ make alerts                        # both of the above
 
 **There are two paths and the order matters.**
 
-| |  Primary  |  Secondary  |
-| --- | --- | --- |
-| Direction | **Pull.** An observer fetches from us | Push. The node posts outward |
-| Runs on | **GitHub's scheduler**, every 10 min | the node, at the moment of the alert |
-| Credential on the node | **none** | one, if configured |
-| Latency | one watcher interval, 10 to 20 min | seconds |
-| Configured today | **yes** | no |
+|                        | Primary                               | Secondary                            |
+| ---------------------- | ------------------------------------- | ------------------------------------ |
+| Direction              | **Pull.** An observer fetches from us | Push. The node posts outward         |
+| Runs on                | **GitHub's scheduler**, every 10 min  | the node, at the moment of the alert |
+| Credential on the node | **none**                              | one, if configured                   |
+| Latency                | one watcher interval, 10 to 20 min    | seconds                              |
+| Configured today       | **yes**                               | no                                   |
 
 The primary path exists because of a finding that is worth stating in one line:
 
@@ -82,7 +82,14 @@ pullfm-heartbeat  ->  /var/lib/pullfm/heartbeat/staging.json   (every 5 min, and
 The beat is four scalars and a list of names:
 
 ```json
-{"v":1,"env":"staging","ts":"2026-07-29T21:50:46Z","epoch":1785361846,"pending":1,"keys":["unit:pullfm-deadman-selftest"]}
+{
+  "v": 1,
+  "env": "staging",
+  "ts": "2026-07-29T21:50:46Z",
+  "epoch": 1785361846,
+  "pending": 1,
+  "keys": ["unit:pullfm-deadman-selftest"]
+}
 ```
 
 **It carries a count, never an alert.** No hostname, no unit path, no journal tail,
@@ -97,10 +104,10 @@ than remembered.
 `pending` reuses two pieces of state that already had exactly the right lifecycle,
 so nothing new has to be kept in sync:
 
-| Source | Created by | Cleared by |
-| --- | --- | --- |
+| Source                         | Created by            | Cleared by               |
+| ------------------------------ | --------------------- | ------------------------ |
 | `/var/lib/pullfm/alerts/<key>` | `pullfm-alert` firing | `pullfm-alert --resolve` |
-| a `pullfm-*` unit in `failed` | any job unit failing | `systemctl reset-failed` |
+| a `pullfm-*` unit in `failed`  | any job unit failing  | `systemctl reset-failed` |
 
 The second is why **`pullfm-job-alert` needed no change at all** to reach the
 switch. It already left the failed unit failed and called that "a fourth surface
@@ -113,12 +120,12 @@ needed no new verb.
 A push design was built first: a write credential on the node, posting a beat to a
 destination the watcher could read. It was abandoned on measurements, not on taste:
 
-| Candidate write credential | Measured on 2026-07-29 |
-| --- | --- |
-| GitHub deploy key (the only one an API can mint) | **disabled organisation-wide** on `312-dev` |
-| GitHub fine-grained PAT, or a GitHub App | no creation API exists; both need a human |
-| Cloudflare Worker plus KV | every Pull.fm token: `Authentication error`. Minting one: `403` |
-| An existing R2 bucket credential | reaches the **database backups**. That is `PULLFM-RISK-009` re-committed |
+| Candidate write credential                       | Measured on 2026-07-29                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------ |
+| GitHub deploy key (the only one an API can mint) | **disabled organisation-wide** on `312-dev`                              |
+| GitHub fine-grained PAT, or a GitHub App         | no creation API exists; both need a human                                |
+| Cloudflare Worker plus KV                        | every Pull.fm token: `Authentication error`. Minting one: `403`          |
+| An existing R2 bucket credential                 | reaches the **database backups**. That is `PULLFM-RISK-009` re-committed |
 
 So it pulls. **That is strictly stronger than any push**, and the reasoning
 generalises: there is no token to steal, rotate, scope wrongly or spend, and a
@@ -136,12 +143,12 @@ branch, so there is no version of the alarm that the monitored side supplies.
 `pullfm-alert` derives its wire format from the sink URL, so the destination is
 **one 1Password item** and no code change:
 
-| `pull-fm/{env}/ALERT_SINK_URL` looks like | kind | shape sent |
-| --- | --- | --- |
-| `…discord.com/api/webhooks/…` | `discord` | JSON `content` |
-| `…hooks.slack.com/…` | `slack` | JSON `text` |
-| anything with `ntfy` in it | `ntfy` | body plus `Title`/`Priority`/`Tags` headers |
-| anything else | `webhook` | JSON with both, plus structured fields |
+| `pull-fm/{env}/ALERT_SINK_URL` looks like | kind      | shape sent                                  |
+| ----------------------------------------- | --------- | ------------------------------------------- |
+| `…discord.com/api/webhooks/…`             | `discord` | JSON `content`                              |
+| `…hooks.slack.com/…`                      | `slack`   | JSON `text`                                 |
+| anything with `ntfy` in it                | `ntfy`    | body plus `Title`/`Priority`/`Tags` headers |
+| anything else                             | `webhook` | JSON with both, plus structured fields      |
 
 All four are proven against a live receiver. **It is unset today**, and that is
 deliberate rather than unfinished: no third-party account could be created, because
@@ -170,7 +177,7 @@ an argument to find.
 
 ### The KNOWN GAP recorded here on 2026-07-29 is now FIXED
 
-It read: *`--check` now reports ARMED on a node that cannot deliver.* It was real,
+It read: _`--check` now reports ARMED on a node that cannot deliver._ It was real,
 and it was measured - the same node was refused **403 on every publish** while
 `--check` printed `ARMED` and exited **0**. Both halves are closed in
 `install-alert-env.sh`, which this change owns:
@@ -320,11 +327,11 @@ as the retained capability behind the deferred monitoring stack.
 
 What the split buys, and it is worth keeping straight:
 
-| Question | Answered by | Because |
-| --- | --- | --- |
-| Is the node serving traffic? | the external probe | it must not depend on the node |
-| Is the watchdog still watching? | heartbeat staleness | a dead watchdog stops the beat |
-| Which condition is firing? | the watchdog, via `pending` | it needs loopback `/metrics` |
+| Question                        | Answered by                 | Because                        |
+| ------------------------------- | --------------------------- | ------------------------------ |
+| Is the node serving traffic?    | the external probe          | it must not depend on the node |
+| Is the watchdog still watching? | heartbeat staleness         | a dead watchdog stops the beat |
+| Which condition is firing?      | the watchdog, via `pending` | it needs loopback `/metrics`   |
 
 The watchdog's own `/healthz` check remains a **backstop for a crashed container on
 a live node**, and its alert text says so, so it is not mistaken for A1.

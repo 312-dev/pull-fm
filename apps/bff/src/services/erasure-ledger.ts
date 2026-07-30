@@ -72,9 +72,7 @@ export interface ErasureLedgerEntry {
  * discarding it, so an Article 17 response can say which one applied.
  */
 export type ErasureDurability =
-  | "inline"
-  | "already-present"
-  | "deferred-to-reconciler";
+  "inline" | "already-present" | "deferred-to-reconciler";
 
 export interface ErasureLedger {
   /**

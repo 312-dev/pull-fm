@@ -37,41 +37,6 @@
       "file": "infra/scripts/check-origin-config.sh"
     },
     {
-      "fingerprint": "a981-1b17-b109-cc80",
-      "detector": "neon-branch-id",
-      "file": "infra/neon/README.md"
-    },
-    {
-      "fingerprint": "50a6-f0db-8fef-9c1e",
-      "detector": "neon-branch-id",
-      "file": "infra/neon/imports.tf"
-    },
-    {
-      "fingerprint": "50a6-f0db-8fef-9c1e",
-      "detector": "neon-branch-id",
-      "file": "infra/neon/imports.tf"
-    },
-    {
-      "fingerprint": "50a6-f0db-8fef-9c1e",
-      "detector": "neon-branch-id",
-      "file": "infra/neon/imports.tf"
-    },
-    {
-      "fingerprint": "50a6-f0db-8fef-9c1e",
-      "detector": "neon-branch-id",
-      "file": "infra/neon/imports.tf"
-    },
-    {
-      "fingerprint": "50a6-f0db-8fef-9c1e",
-      "detector": "neon-branch-id",
-      "file": "infra/neon/imports.tf"
-    },
-    {
-      "fingerprint": "848f-6593-5e02-f37a",
-      "detector": "neon-branch-id",
-      "file": "infra/neon/outputs.tf"
-    },
-    {
       "fingerprint": "d60f-46ec-5999-d63a",
       "detector": "password-manager-item-id",
       "file": "infra/lib/backup-common.sh"
@@ -85,46 +50,6 @@
       "fingerprint": "990c-500a-0c4d-3d9b",
       "detector": "password-manager-item-id",
       "file": "infra/lib/secrets.sh"
-    },
-    {
-      "fingerprint": "9533-8fb4-fa4a-2eeb",
-      "detector": "neon-endpoint-id",
-      "file": "infra/neon/README.md"
-    },
-    {
-      "fingerprint": "34f6-8557-0898-f7f7",
-      "detector": "neon-endpoint-id",
-      "file": "infra/neon/checks.tf"
-    },
-    {
-      "fingerprint": "34f6-8557-0898-f7f7",
-      "detector": "neon-endpoint-id",
-      "file": "infra/neon/checks.tf"
-    },
-    {
-      "fingerprint": "e315-6ba2-06ab-ddd8",
-      "detector": "neon-endpoint-id",
-      "file": "infra/neon/imports.tf"
-    },
-    {
-      "fingerprint": "e315-6ba2-06ab-ddd8",
-      "detector": "neon-endpoint-id",
-      "file": "infra/neon/imports.tf"
-    },
-    {
-      "fingerprint": "e315-6ba2-06ab-ddd8",
-      "detector": "neon-endpoint-id",
-      "file": "infra/neon/imports.tf"
-    },
-    {
-      "fingerprint": "b7b9-4636-9e8a-89c3",
-      "detector": "neon-endpoint-id",
-      "file": "infra/neon/main.tf"
-    },
-    {
-      "fingerprint": "b7b9-4636-9e8a-89c3",
-      "detector": "neon-endpoint-id",
-      "file": "infra/neon/main.tf"
     }
   ]
 }

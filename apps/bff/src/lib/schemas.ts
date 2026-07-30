@@ -128,7 +128,14 @@ export function problemResponses<const C extends readonly number[]>(
 const PROBLEM_DESCRIPTIONS: Record<number, string> = {
   400: "Malformed request, or an invalid cursor or download link.",
   401: "No credential, or a credential that is not valid.",
-  403: "The credential is valid but not permitted to perform this operation.",
+  // Broadened deliberately. This map is keyed on the STATUS, so one sentence has
+  // to describe every 403 in the API, and 403 is no longer only about a
+  // credential: `registration-closed` refuses a sign-in that carries no
+  // credential at all, and `consent-required` refuses a valid one. Leaving the
+  // credential-only wording would have made the published description wrong for
+  // the sign-in routes rather than merely incomplete. Switch on `type`, not on
+  // this text.
+  403: "The request was refused. Either the credential is valid but not permitted to perform this operation, or the operation itself is not open to the caller. The problem document's `type` says which.",
   404: "No such object, or an object belonging to another subject. The two are deliberately indistinguishable.",
   409: "Conflicting state, or an Idempotency-Key reused with a different body.",
   422: "The request was understood but its contents are not acceptable.",

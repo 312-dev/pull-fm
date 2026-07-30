@@ -168,6 +168,61 @@ export const errors = {
     ),
 
   /**
+   * Account formation is refused because Pull.fm is in a closed beta.
+   *
+   * 403 RATHER THAN 451, 503, 404 OR 401, AND THE CHOICE IS ARGUED RATHER THAN
+   * COPIED FROM THE REFUSAL NEXT DOOR.
+   *
+   *   NOT 451. `regionUnavailable` above is a 451 for a good reason and it does
+   *            not transfer. RFC 7725 is for a refusal that is a LEGAL position -
+   *            there is nothing the caller could present, and no future date at
+   *            which the answer changes. A closed beta is neither: it is a
+   *            product decision that ends, and reusing 451 would tell a client
+   *            "never" about something that means "not yet". It would also
+   *            collapse two unrelated facts into one status code, so an operator
+   *            reading a dashboard could no longer tell a European sign-up
+   *            attempt from a curious stranger.
+   *   NOT 503. Tempting, because "the service is not open" is true and says
+   *            nothing about the address. Refused because 503 in this repository
+   *            already means an outage or maintenance (see `maintenance` and
+   *            `upstreamUnavailable`, and the 503 description in lib/schemas.ts).
+   *            A permanent 503 producer on the sign-in route would make every
+   *            error-rate panel and the node watchdog unable to distinguish a
+   *            closed beta from a broken staging environment.
+   *   NOT 404. It would be a lie about a route that plainly exists, which is the
+   *            same reason `regionUnavailable` refused it.
+   *   NOT 401. The caller has no credential and could not obtain one that helps.
+   *            A client that sees 401 refreshes or restarts sign-in, and on the
+   *            sign-in route itself that is a loop with no exit.
+   *
+   * 403 is what is left and it is also the honest reading: RFC 9110 says the
+   * server understood the request and refuses to authorize it, which is exactly
+   * what happened. `consentRequired` below reached the same status by the same
+   * route, and the distinct `type` URI is what a client actually switches on.
+   *
+   * THE MESSAGE IS ONE STRING FOR EVERY REFUSED ADDRESS, AND THAT IS THE WHOLE
+   * CONTROL. It does not say whether the address is on a list, whether a list
+   * exists, whether the address is known, or what the caller could do about it.
+   * A refusal that differed between "your address is not on the list" and "the
+   * service is not open" would turn this route into a way to DISCOVER WHICH
+   * ADDRESSES ARE ALLOWLISTED, one probe at a time - which is the same
+   * enumeration oracle `/v1/auth/start` spends thirty lines refusing to be for
+   * account existence, reintroduced through the back door. There is one body, and
+   * test/security/registration-allowlist.test.ts asserts it is byte-identical for
+   * a near-miss address and a plainly unrelated one.
+   *
+   * It is also not hostile. Nobody who reaches it has done anything wrong.
+   */
+  registrationClosed: () =>
+    new ApiError(
+      403,
+      "registration-closed",
+      "Forbidden",
+      "Pull.fm is in a closed beta, so this request was not carried out. " +
+        "No message was sent and no account was created.",
+    ),
+
+  /**
    * The caller has not accepted the current legal documents.
    *
    * 403 RATHER THAN 401, 409 OR 428, AND THE CHOICE IS ARGUED RATHER THAN

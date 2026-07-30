@@ -91,7 +91,8 @@ export function createKillSwitchSource(
   opts: KillSwitchFileOptions,
 ): KillSwitchSource {
   const now = opts.now ?? Date.now;
-  const readdir = opts.readdir ?? ((p: string): readonly string[] => readdirSync(p));
+  const readdir =
+    opts.readdir ?? ((p: string): readonly string[] => readdirSync(p));
 
   let cachedAt = -Infinity;
   let cached: readonly ProviderName[] = [];

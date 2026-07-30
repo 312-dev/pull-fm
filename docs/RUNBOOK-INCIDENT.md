@@ -246,14 +246,14 @@ it is the only number in this procedure you cannot reconstruct later.
 > **RECIPIENT, RESOLVED 2026-07-29. SEND TO BOTH, AND THE REASON IS THAT THEY ARE
 > TWO DIFFERENT CHANNELS FOR TWO DIFFERENT PURPOSES.**
 >
-> | To                                                                                                             | Why                                                                                                                                                                                                       |
-> | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-> | `legal@seatgeek.com`, Attention: General Counsel                                                               | **This is the contractual notice channel.** Their clause 12.4 (Notices) requires notices to SeatGeek to be addressed to SeatGeek, Inc., 902 Broadway, Floor 10, New York, NY 10010, Attention: Legal Team, "with email copies to legal@seatgeek.com, Attention: General Counsel". A notification sent anywhere else is not a notice under their terms. |
-> | `tech-architecture@seatgeek.com`                                                                               | **This is the operational contact**, given under their Contact Us clause for questions about the APIs. It is the address a human is likely to read quickly, which is what a 24 hour clock needs.            |
+> | To                                               | Why                                                                                                                                                                                                                                                                                                                                                    |
+> | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+> | `legal@seatgeek.com`, Attention: General Counsel | **This is the contractual notice channel.** Their clause 12.4 (Notices) requires notices to SeatGeek to be addressed to SeatGeek, Inc., 902 Broadway, Floor 10, New York, NY 10010, Attention: Legal Team, "with email copies to legal@seatgeek.com, Attention: General Counsel". A notification sent anywhere else is not a notice under their terms. |
+> | `tech-architecture@seatgeek.com`                 | **This is the operational contact**, given under their Contact Us clause for questions about the APIs. It is the address a human is likely to read quickly, which is what a 24 hour clock needs.                                                                                                                                                       |
 >
 > **WHY NOT tech-architecture ALONE, which was the operator's first instinct.**
 > It is the address published for API questions, so it is the obvious guess and it
-> is the fast one, but 12.4 is explicit about where a *notice* goes. Discharging a
+> is the fast one, but 12.4 is explicit about where a _notice_ goes. Discharging a
 > contractual notification duty through a support mailbox invites the argument that
 > the notice was never given. Sending both costs one extra line in the To field and
 > removes the argument entirely.
@@ -265,7 +265,7 @@ it is the only number in this procedure you cannot reconstruct later.
 >
 > **This duty is already owed and does not wait for the events route.** We hold
 > their API credentials today, those credentials are Confidential Information under
-> section 5 of their terms, and 5.3 attaches to a *suspected* incident whether or
+> section 5 of their terms, and 5.3 attaches to a _suspected_ incident whether or
 > not `SEATGEEK_ENABLED` is set.
 
 | Step | Deadline  | Action                                                                                                                                                                                                                                                                                       |

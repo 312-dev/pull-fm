@@ -91,7 +91,10 @@ function harness(
       },
     },
     crosswalkStore: {
-      lookupByMbid: (_entity: string, mbid: string): Promise<CrosswalkHit | null> =>
+      lookupByMbid: (
+        _entity: string,
+        mbid: string,
+      ): Promise<CrosswalkHit | null> =>
         Promise.resolve(
           inCrosswalk.has(mbid)
             ? ({
@@ -144,7 +147,11 @@ describe("an MBID no local record has ever heard of", () => {
     // declined path throws inside `load`, so `#fill` never reaches `store.set`.
     const h = harness({ inDump: [KNOWN] });
     await h.discovery.similarArtists(RANDOM);
-    const cached = await h.cache.peek("listenbrainz", `labs-similar:${RANDOM}`, (p) => p);
+    const cached = await h.cache.peek(
+      "listenbrainz",
+      `labs-similar:${RANDOM}`,
+      (p) => p,
+    );
     expect(cached).toBeNull();
   });
 
@@ -213,7 +220,8 @@ describe("the deployment shapes that must behave exactly as before", () => {
       {
         cache: new CachedUpstream(new MemoryCacheStore()),
         canonical: {
-          loadState: () => Promise.reject(new Error("schema mb does not exist")),
+          loadState: () =>
+            Promise.reject(new Error("schema mb does not exist")),
           exists: () => Promise.reject(new Error("schema mb does not exist")),
           lookupExact: () => Promise.resolve([]),
           lookupArtistPrefix: () => Promise.resolve([]),
@@ -268,7 +276,11 @@ describe("the gate is not reachable from anything else", () => {
     const svc = new DiscoveryService(
       {
         cache: new CachedUpstream(new MemoryCacheStore()),
-        canonical: { ...({} as CanonicalStore), exists, loadState: () => Promise.resolve(LOADED) },
+        canonical: {
+          ...({} as CanonicalStore),
+          exists,
+          loadState: () => Promise.resolve(LOADED),
+        },
         lastfm: undefined,
         listenbrainz: { similarArtists: () => Promise.resolve([]) },
         crosswalkStore: { lookupByMbid: () => Promise.resolve(null) },

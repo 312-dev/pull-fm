@@ -109,7 +109,10 @@ function hmac(key: Buffer | string, data: string): Buffer {
 
 /** `20260729T101500Z` and `20260729`, the two forms SigV4 asks for. */
 function timestamps(now: Date): { amzDate: string; dateStamp: string } {
-  const amzDate = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  const amzDate = now
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}/, "");
   return { amzDate, dateStamp: amzDate.slice(0, 8) };
 }
 
@@ -157,7 +160,9 @@ export function signRequest(opts: {
     signed["content-type"] = opts.contentType;
   }
   const names = Object.keys(signed).sort();
-  const canonicalHeaders = names.map((n) => `${n}:${signed[n] ?? ""}\n`).join("");
+  const canonicalHeaders = names
+    .map((n) => `${n}:${signed[n] ?? ""}\n`)
+    .join("");
   const signedHeaders = names.join(";");
 
   const canonicalRequest = [

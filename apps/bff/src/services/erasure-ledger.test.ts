@@ -40,9 +40,10 @@ interface Recorded {
   readonly body: string | undefined;
 }
 
-function ledgerWith(
-  responder: (req: Recorded) => Response,
-): { ledger: R2ErasureLedger; calls: Recorded[] } {
+function ledgerWith(responder: (req: Recorded) => Response): {
+  ledger: R2ErasureLedger;
+  calls: Recorded[];
+} {
   const calls: Recorded[] = [];
   // Not `async`: the body never awaits, and an async arrow with no await
   // trips require-await. Returning the promise directly is equivalent.
@@ -110,7 +111,9 @@ describe("R2ErasureLedger", () => {
     // The retry path. An erasure that failed AFTER the ledger write and is
     // retried must find its own entry and proceed, not replace an immutable
     // record with a second version of itself.
-    const { ledger, calls } = ledgerWith(() => new Response(null, { status: 200 }));
+    const { ledger, calls } = ledgerWith(
+      () => new Response(null, { status: 200 }),
+    );
     await expect(
       ledger.record({ deletedUserId: USER, requestedAt: REQUESTED_AT }),
     ).resolves.toBe("already-present");

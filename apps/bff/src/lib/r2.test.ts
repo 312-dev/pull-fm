@@ -213,9 +213,7 @@ describe("R2Client", () => {
   });
 
   test("truncates the error body it carries into the log", async () => {
-    const f = fakeFetch(
-      () => new Response("x".repeat(4096), { status: 500 }),
-    );
+    const f = fakeFetch(() => new Response("x".repeat(4096), { status: 500 }));
     const err = (await client(f.impl)
       .put("k", "{}")
       .catch((e: unknown) => e)) as R2Error;

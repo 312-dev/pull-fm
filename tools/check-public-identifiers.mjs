@@ -143,6 +143,46 @@ const ALLOW = [
     why: "a vendor's published sales contact, quoted in a sourcing review",
   },
   {
+    value: "legal@seatgeek.com",
+    why: "SeatGeek's own published notice address, quoted from clause 12.4 of their API terms in docs/RUNBOOK-INCIDENT.md. This is the CONTRACTUAL channel for the 24 hour security-incident notification their clause 5.3 requires, so a runbook that cannot name it cannot be followed. Same category as partners@last.fm above: a vendor's published address, not our infrastructure and not a person here.",
+  },
+  {
+    value: "tech-architecture@seatgeek.com",
+    why: "SeatGeek's own published API contact, quoted from the Contact Us clause of their API terms in docs/RUNBOOK-INCIDENT.md. Recorded alongside legal@ because 12.4 is where a notice is legally given and this is the address a human reads quickly; a 24 hour clock needs both.",
+  },
+  // ---------------------------------------------------------------------------
+  // PUBLIC IPv4 LITERALS THAT ARE TEST FIXTURES, NOT INFRASTRUCTURE.
+  //
+  // This detector exists to stop OUR addresses reaching a public repository. The
+  // four below are none of ours: they are the boundary inputs that prove
+  // `isOriginIngressPeer` refuses a globally routable peer, which is the check
+  // standing between a forged CF-IPCountry header and the registration geo-block.
+  //
+  // They have to be real public addresses to test the thing at all. A private
+  // address would be ACCEPTED by the function and would assert the opposite of
+  // what the test claims, so replacing them with placeholders would silently
+  // invert the test while making this gate pass. Each is also chosen to be
+  // uninteresting: 8.8.8.8 is Google's public resolver, and the other three sit
+  // one step outside a private range specifically to catch an off-by-one in the
+  // range arithmetic.
+  // ---------------------------------------------------------------------------
+  {
+    value: "8.8.8.8",
+    why: "Google's public DNS resolver, used in apps/bff/src/lib/registration-geo.test.ts as a globally routable peer that must NOT be treated as origin ingress. Universally documented, not our infrastructure.",
+  },
+  {
+    value: "172.15.0.1",
+    why: "one step BELOW the 172.16.0.0/12 private range, in registration-geo.test.ts. A boundary fixture for the off-by-one that would otherwise let a public peer look private. Must be a real public address or the test asserts the opposite of its own name.",
+  },
+  {
+    value: "172.32.0.1",
+    why: "one step ABOVE the 172.16.0.0/12 private range, in registration-geo.test.ts. The upper half of the same boundary pair as 172.15.0.1.",
+  },
+  {
+    value: "193.168.1.1",
+    why: "a deliberate near-miss for 192.168.1.1, in registration-geo.test.ts. Catches a prefix check that matches on the wrong first octet. Not our infrastructure and not reachable by us.",
+  },
+  {
     value: "security@better-auth.com",
     why: "a third-party project's published security contact, quoted in an auth landscape review",
   },

@@ -4,13 +4,13 @@ The tools. Everything below is executable from a laptop today and was executed
 on 2026-07-29; the timings in [`../../docs/RUNBOOK-DR.md`](../../docs/RUNBOOK-DR.md)
 section 5 came out of them.
 
-| File                      | What it is                                                                         |
-| ------------------------- | ---------------------------------------------------------------------------------- |
-| `pullfm-restore.sh`       | Neon restore primitives: restore points, PITR, branch restore, restore-from-dump   |
-| `pullfm-backup.sh`        | Logical dumps to R2, retention rules, and the out-of-band erasure ledger           |
-| `restore-drill.sh`        | The Gate 4 drill. Destroys data on the staging branch and gets it back, timed      |
-| `systemd/`                | Unit files for four scheduled jobs. **Two are installed on the node.** See below.  |
-| `../lib/backup-common.sh` | Credential loading, timing, the R2 endpoint probe, the Neon API wrapper            |
+| File                      | What it is                                                                        |
+| ------------------------- | --------------------------------------------------------------------------------- |
+| `pullfm-restore.sh`       | Neon restore primitives: restore points, PITR, branch restore, restore-from-dump  |
+| `pullfm-backup.sh`        | Logical dumps to R2, retention rules, and the out-of-band erasure ledger          |
+| `restore-drill.sh`        | The Gate 4 drill. Destroys data on the staging branch and gets it back, timed     |
+| `systemd/`                | Unit files for four scheduled jobs. **Two are installed on the node.** See below. |
+| `../lib/backup-common.sh` | Credential loading, timing, the R2 endpoint probe, the Neon API wrapper           |
 
 ---
 
@@ -204,25 +204,25 @@ not it lives in this directory:
 
 **Changes by re-pointing a value, no code edit:**
 
-| What                                                       | Where the value comes from                                                    |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| The bucket names                                           | `PULLFM_BACKUP_BUCKET` / `PULLFM_LEDGER_BUCKET` in `../lib/backup-common.sh`, both `${VAR:-default}` |
-| The endpoint the tools use                                 | probed. Update the `s3 endpoint` field on the vault items and re-converge      |
-| The endpoint and bucket the node uses                      | `/etc/pullfm/backup.env`, rendered by `../lib/secrets.sh` from those fields    |
-| The endpoint, bucket and keys the BFF uses for the ledger  | `ERASURE_LEDGER_*` in `bff.env`, same renderer, same vault items               |
-| The drill's ledger bucket and credential                   | `PULLFM_LEDGER_BUCKET` and the item read in `restore-drill.sh`                 |
+| What                                                      | Where the value comes from                                                                           |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| The bucket names                                          | `PULLFM_BACKUP_BUCKET` / `PULLFM_LEDGER_BUCKET` in `../lib/backup-common.sh`, both `${VAR:-default}` |
+| The endpoint the tools use                                | probed. Update the `s3 endpoint` field on the vault items and re-converge                            |
+| The endpoint and bucket the node uses                     | `/etc/pullfm/backup.env`, rendered by `../lib/secrets.sh` from those fields                          |
+| The endpoint, bucket and keys the BFF uses for the ledger | `ERASURE_LEDGER_*` in `bff.env`, same renderer, same vault items                                     |
+| The drill's ledger bucket and credential                  | `PULLFM_LEDGER_BUCKET` and the item read in `restore-drill.sh`                                       |
 
 **Needs a real edit, and none of it is in this directory:**
 
-| File                                                       | What has to change                                                                                 |
-| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `../terraform/modules/backup-storage/variables.tf`         | `jurisdiction` default and its `validation`; the description calls the `eu` value a GDPR control    |
-| `../terraform/modules/backup-storage/outputs.tf`           | derives the endpoint from the jurisdiction. Correct already, but it is the authority worth checking |
-| `../terraform/envs/*/versions.tf`, `backend.hcl.example`   | comment blocks asserting which buckets are and are not EU-pinned                                    |
-| `../terraform/README.md`, `../neon/backend.hcl.example`    | the same assertions in prose, including a recorded open decision about the state bucket             |
-| `legal/privacy-policy.md`                                  | **the load-bearing one.** Sections stating backups are "pinned to an EU jurisdiction bucket" become false the moment the buckets move, in a document published to users |
-| `apps/bff/src/lib/r2.ts` and its tests                     | comments and fixtures use a jurisdiction host as the worked example; the code itself takes the endpoint from config |
-| `../neon/README.md`                                        | references a risk about the state bucket not being EU-pinned                                        |
+| File                                                     | What has to change                                                                                                                                                      |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `../terraform/modules/backup-storage/variables.tf`       | `jurisdiction` default and its `validation`; the description calls the `eu` value a GDPR control                                                                        |
+| `../terraform/modules/backup-storage/outputs.tf`         | derives the endpoint from the jurisdiction. Correct already, but it is the authority worth checking                                                                     |
+| `../terraform/envs/*/versions.tf`, `backend.hcl.example` | comment blocks asserting which buckets are and are not EU-pinned                                                                                                        |
+| `../terraform/README.md`, `../neon/backend.hcl.example`  | the same assertions in prose, including a recorded open decision about the state bucket                                                                                 |
+| `legal/privacy-policy.md`                                | **the load-bearing one.** Sections stating backups are "pinned to an EU jurisdiction bucket" become false the moment the buckets move, in a document published to users |
+| `apps/bff/src/lib/r2.ts` and its tests                   | comments and fixtures use a jurisdiction host as the worked example; the code itself takes the endpoint from config                                                     |
+| `../neon/README.md`                                      | references a risk about the state bucket not being EU-pinned                                                                                                            |
 
 Two things that are **not** on either list, deliberately. Nothing in
 `pullfm-backup.sh`, `pullfm-restore.sh` or `../lib/backup-common.sh` names a

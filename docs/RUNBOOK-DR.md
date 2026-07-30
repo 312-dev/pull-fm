@@ -499,12 +499,12 @@ Four units in `infra/backup/systemd/`. **Two are installed and enabled on the
 staging node as of 2026-07-29**; the other two are deliberately not, and the
 reason is in the table rather than left to be rediscovered.
 
-| Unit                      | When                       | Installed | Why that cadence, or why not                                                                                                             |
-| ------------------------- | -------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `pullfm-backup-dump`      | daily 03:23 UTC            | **yes**   | this layer's RPO **is** the interval; before the 06:17 audit purge so the two agree; daily is also what makes the 35-day window recoverable |
-| `pullfm-backup-retention` | Mondays 07:11 UTC          | **yes**   | lifecycle rules drift when a person changes them, not on their own                                                                        |
+| Unit                      | When                       | Installed | Why that cadence, or why not                                                                                                                                                                                                                                           |
+| ------------------------- | -------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pullfm-backup-dump`      | daily 03:23 UTC            | **yes**   | this layer's RPO **is** the interval; before the 06:17 audit purge so the two agree; daily is also what makes the 35-day window recoverable                                                                                                                            |
+| `pullfm-backup-retention` | Mondays 07:11 UTC          | **yes**   | lifecycle rules drift when a person changes them, not on their own                                                                                                                                                                                                     |
 | `pullfm-deletion-ledger`  | every 10 minutes           | no        | superseded: `apps/bff` writes the ledger object inline with the deletion cascade and fails the request if that write fails, so the RPO is 0 and this is now a reconciler that would need a second R2 credential on the node to backfill rows that no longer accumulate |
-| `pullfm-restore-drill`    | 1st of the month 04:47 UTC | no        | it **destroys data** on the staging branch and needs a Neon API key that can delete branches. Monthly drilling is a Gate 4 obligation, but arming it unattended on a node that has never run it once is how a drill becomes an incident. Operator-run for now |
+| `pullfm-restore-drill`    | 1st of the month 04:47 UTC | no        | it **destroys data** on the staging branch and needs a Neon API key that can delete branches. Monthly drilling is a Gate 4 obligation, but arming it unattended on a node that has never run it once is how a drill becomes an incident. Operator-run for now          |
 
 **Why daily and not weekly, stated against the retention number.** The lifecycle
 rule expires `dumps/scheduled/` after 35 days. Retention is a window, not a
@@ -518,7 +518,7 @@ RPO as 24 hours, and that number **is** the `OnCalendar` line.
 
 **No `RandomizedDelaySec`, deliberately.** `pullfm-cf-ranges.timer` carries an
 hour of jitter because it is a polite client of a shared public endpoint.
-Every *job* timer instead pins `AccuracySec=1s` and owns a distinct minute,
+Every _job_ timer instead pins `AccuracySec=1s` and owns a distinct minute,
 because systemd's default one-minute accuracy window lets it coalesce timers and
 put two jobs on one small node at the same instant. Jitter would also turn
 "before the 06:17 audit purge" into a probability rather than an ordering, and
