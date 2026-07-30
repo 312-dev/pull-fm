@@ -1,6 +1,54 @@
 # Runbook: migrating the database to Neon
 
-> **Status: APPLIED 2026-07-29. SCHEMA AND ROLES MIGRATED 2026-07-29.** The
+> # READ THIS FIRST: THE PROJECT THIS RUNBOOK WAS WRITTEN AGAINST NO LONGER EXISTS
+>
+> **Everything below was executed against the EU Neon project, and that project
+> was deleted on 2026-07-29** in the cutover to a United States estate. The
+> sections that follow are kept as the dated record of what was done and what was
+> learned doing it, because several of the defects written up here are properties
+> of Neon rather than of one project and would be rediscovered the hard way. They
+> are **not** instructions to follow as they stand.
+>
+> **The live database, as read back from the Neon API on 2026-07-29:**
+>
+> |                        |                                                                                |
+> | ---------------------- | ------------------------------------------------------------------------------ |
+> | Project                | `cold-brook-02833828`, named `pull-fm-us`                                      |
+> | Region                 | `aws-us-east-1` (Northern Virginia)                                            |
+> | Plan                   | `launch_v3`, a paid plan. **Not the free plan section 2 was written about**    |
+> | Branch in use          | `launch_v3`                                                                    |
+> | Point-in-time recovery | **7 days** (`history_retention_seconds` 604800), not the 6 hours stated below  |
+> | Consumption quota      | armed: 720,000 CU-seconds (200 CU-hours) and 520 GB egress                     |
+> | Logical size cap       | deliberately **not** set. See the warning below before you set one             |
+> | Maintenance window     | `weekdays:[4]`, `05:00-06:00`, read from `project.settings.maintenance_window` |
+>
+> **Do not set a logical-size quota to "be safe".** `logical_size_bytes` bounds a
+> single branch for that branch's LIFETIME rather than per period, and the
+> canonical loader is stage-then-swap, so staging peaks near 22 GB during a load. A
+> value between 1 and 25 GB would stop a load that is working correctly.
+>
+> **Every number in section 2 below is a free-plan number and none of them applies
+> now.** The live plan's figures, from the same API call: 5000 branches rather than
+> 10, a 16 TiB logical size limit rather than 0.5 GB, an 8 CU autoscaling ceiling
+> rather than 2, and `allowed_ips` present as a setting rather than unavailable
+> (see section 3, where the consequence changed).
+>
+> **The connection strings and other credentials are in the operator's password
+> vault, and this runbook deliberately no longer names the items.** They were
+> renamed during the cutover and are being renamed again while this is written, so
+> any name written down here would be wrong within the day. **The vault is the
+> source of truth for the item names; this document is the source of truth for
+> which ROLE each one holds.** The four that exist are: a pooled application
+> credential and a direct owner credential, for each of staging and production.
+> Section 13 lists them by role. **The pre-cutover items are archived and point at
+> the deleted EU project**, so an item that resolves is not by itself evidence that
+> it points anywhere useful; one agent nearly loaded 31.5 million rows into the
+> retired database on exactly that assumption and caught it only by checking the
+> project id in the host name.
+>
+> ---
+>
+> **Status of the original migration: APPLIED 2026-07-29. SCHEMA AND ROLES MIGRATED 2026-07-29.** The
 > Terraform in section 5.1 has been applied against the live Neon control
 > plane: 4 imported, 2 added, 1 changed, 0 destroyed, matching
 > [Appendix A](#appendix-a-the-verified-plan). The staging branch is
@@ -45,14 +93,14 @@
 
 ## 0. What is changing, in one table
 
-| Before                                                  | After                                                         |
-| ------------------------------------------------------- | ------------------------------------------------------------- |
-| Postgres 17 on a Hetzner `cax31`/`cpx12` node           | Neon serverless Postgres 18, `aws-eu-central-1`               |
-| PgBouncer planned for the same node (never shipped)     | Neon's pooled endpoint, which _is_ PgBouncer transaction mode |
-| pgBackRest to R2 for PITR                               | Neon instant restore, 6 h window on the current plan          |
-| Staging DB destroyed and rebuilt per gate run           | Staging DB is a Neon branch, reset in seconds                 |
-| DB unreachable from the internet by topology            | DB reachable from the internet, guarded by a credential       |
-| One Hetzner node for Postgres + Redis (`role=postgres`) | Same node, Redis only, smaller (`role=cache`)                 |
+| Before                                                  | After                                                                                        |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Postgres 17 on a Hetzner `cax31`/`cpx12` node           | Neon serverless Postgres 18. **Was `aws-eu-central-1`; the live project is `aws-us-east-1`** |
+| PgBouncer planned for the same node (never shipped)     | Neon's pooled endpoint, which _is_ PgBouncer transaction mode                                |
+| pgBackRest to R2 for PITR                               | Neon instant restore. **6 h was the free-plan window; the live window is 7 days**            |
+| Staging DB destroyed and rebuilt per gate run           | Staging DB is a Neon branch, reset in seconds                                                |
+| DB unreachable from the internet by topology            | DB reachable from the internet, guarded by a credential                                      |
+| One Hetzner node for Postgres + Redis (`role=postgres`) | Same node, Redis only, smaller (`role=cache`)                                                |
 
 The last two rows are the ones a reviewer should slow down on. One is a real
 security regression and one is the reason a second Hetzner node still exists.
@@ -94,17 +142,23 @@ deploy. The runner now prefers `DATABASE_URL_DIRECT` and falls back to
 ## 1. Facts, verified rather than assumed
 
 Everything below was read from the Neon API (`console.neon.tech/api/v2`) on
-2026-07-29, not from documentation or a ticket.
+2026-07-29, not from documentation or a ticket. **It describes the EU project,
+which was deleted later the same day.** It is the inventory the migration was
+planned against; the banner at the top of this file has the live one.
 
 ```
 org       <neon-org-id>   "312.dev LLC", subscription free_v3
-project   <neon-project-id>     "pull-fm", aws-eu-central-1, pg_version 18
+project   <neon-project-id>     "pull-fm", aws-eu-central-1, pg_version 18   [DELETED 2026-07-29]
 branch    <neon-main-branch-id>   "main", default, protected false
 database  neondb                   owned by neondb_owner
 endpoint  <neon-main-endpoint-id>     read_write, 0.25-2 CU, pooler DISABLED
           direct  <neon-main-endpoint-id>.c-4.eu-central-1.aws.neon.tech
           pooled  <neon-main-endpoint-id>-pooler.c-4.eu-central-1.aws.neon.tech
 ```
+
+**The live project is `cold-brook-02833828` (`pull-fm-us`) in `aws-us-east-1` on
+`launch_v3`, with the branch `launch_v3` in use.** The organisation is unchanged:
+the replacement project was created in the same one.
 
 Three of those are load-bearing and easy to get wrong:
 
@@ -134,20 +188,27 @@ anything else needs a line in this table before it is created.
 
 ---
 
-## 2. Free-plan limits, and where this design runs out of road
+## 2. Plan limits, and where this design ran out of road
 
-The organisation is on `free_v3`. The branch-per-environment design depends on
-these numbers, so they are recorded rather than assumed.
+> **SUPERSEDED as a statement of the present, kept as the reasoning that forced the
+> upgrade.** This section was written while the organisation was on `free_v3`, and
+> its conclusion, that production does not fit on the free plan, is what the
+> 2026-07-29 cutover acted on. The live project is on `launch_v3`. Both columns are
+> given below so the argument can still be read, and so nobody quotes a free-plan
+> number as a current constraint.
 
-| Limit                   | Free plan                           | Confirmed by                                  |
-| ----------------------- | ----------------------------------- | --------------------------------------------- |
-| Branches per project    | 10                                  | API: `owner.branches_limit: 10`               |
-| Storage per project     | 0.5 GB                              | API: `branch_logical_size_limit_bytes` 512 MB |
-| Compute                 | 100 CU-hours/project/month          | Neon plans page                               |
-| Instant restore (PITR)  | 6 hours                             | API: `history_retention_seconds: 21600`       |
-| Autoscaling ceiling     | 2 CU                                | API + plans page                              |
-| Scale to zero           | after 5 min, **cannot be disabled** | plans page                                    |
-| Public network transfer | 5 GB/month                          | plans page                                    |
+| Limit                   | Free plan (`free_v3`, superseded)            | Live (`launch_v3`, read from the API 2026-07-29)                                                   |
+| ----------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Branches per project    | 10                                           | **5000** (`owner.branches_limit`)                                                                  |
+| Storage per project     | 0.5 GB                                       | **16 TiB** (`branch_logical_size_limit_bytes`)                                                     |
+| Compute                 | 100 CU-hours/project/month                   | Quota armed at **200 CU-hours** (720,000 CU-seconds), a chosen ceiling rather than a plan limit    |
+| Instant restore (PITR)  | 6 hours (`history_retention_seconds: 21600`) | **7 days** (`history_retention_seconds: 604800`)                                                   |
+| Autoscaling ceiling     | 2 CU                                         | **8 CU**                                                                                           |
+| Scale to zero           | after 5 min, **cannot be disabled**          | after 5 min. **Do not disable it:** an always-warm 0.25 CU compute is 186 of the 200 CU-hour quota |
+| Public network transfer | 5 GB/month                                   | Quota armed at **520 GB**                                                                          |
+
+The arithmetic below is the free-plan arithmetic. It is left intact because it is
+the calculation that justified the upgrade, not because it describes today.
 
 **Does staging-as-a-branch fit? Yes, comfortably, and that is the good news.**
 Two branches out of ten. A child branch stores only its diff from the parent, so
@@ -177,6 +238,13 @@ prerequisite rather than an afterthought. Three things unlock at the same time
 and all three are wanted: a longer PITR window, IP allowlisting
 (`allowed_ips`, currently the missing control), and protected branches.
 
+**That conclusion was acted on.** The paid upgrade happened as part of the
+2026-07-29 cutover, and of the three things it unlocked, **one was taken and two
+were not**: the PITR window is now 7 days, `allowed_ips` is available but is still
+an empty list, and no branch is protected. So the security paragraph in section 3
+below has changed its reason without changing its conclusion, which is the more
+dangerous kind of staleness. It is corrected in place there.
+
 ---
 
 ## 3. Security: what got worse
@@ -188,18 +256,30 @@ network, and was additionally covered by a firewall with no inbound `5432` rule.
 Three independent mechanisms, none of which relied on a credential.
 
 A Neon endpoint is **reachable from the public internet by anyone holding the
-connection string**. On the free plan `allowed_ips` is not available, so the
-credential is not the primary control, it is the only one. Compensating
-measures, in the order they should be applied:
+connection string**, and the credential is not the primary control, it is the only
+one.
+
+**The reason for that changed on 2026-07-29 and the conclusion did not, which is
+worth stating explicitly.** This paragraph used to say `allowed_ips` was not
+available on the free plan. On `launch_v3` it **is** available: the API returns
+`settings.allowed_ips` as a real object. It returns it as `{"ips": [], "protected_branches_only": false}`,
+meaning **an empty allowlist, which allows everything**. So the control went from
+absent-because-unavailable to absent-because-unset, which is a worse position to be
+in silently: the first is a plan limitation somebody would rediscover, the second
+looks configured to anyone who checks that the field exists rather than what is in
+it. Item 3 below is therefore no longer blocked on anything.
+
+Compensating measures, in the order they should be applied:
 
 1. **Rotate the connection strings on cutover** (section 6). The current ones
    were created in a browser and have been through a console clipboard.
 2. **The credential never lands in git.** It is copied from `terraform output`
    into 1Password and rendered onto nodes at 0600 by `infra/lib/secrets.sh`,
    exactly like every other secret here.
-3. **Set `allowed_ips` to the BFF egress addresses** the moment the plan permits
-   it. The addresses are already published as the `app_egress_ipv4` output of
-   the environment roots, so this is a one-line change plus an apply.
+3. **Set `allowed_ips` to the BFF egress addresses.** The addresses are already
+   published as the `app_egress_ipv4` output of the environment roots, so this is a
+   one-line change plus an apply. **This no longer waits for a plan upgrade**, as it
+   did when this list was written; the plan permits it and the list is empty.
 4. **`sslmode=require` on every connection string**, which Neon enforces anyway.
 5. **Do not connect as the database owner.** Section 5.5 creates a role that can
    read and write rows and can do nothing else, so a leaked runtime credential
@@ -408,13 +488,17 @@ and the application must not be pointed at these for longer than it takes to get
 there.
 
 ```bash
-terraform output -raw main_database_url_owner_direct     # -> pull-fm/prod/DATABASE_URL_DIRECT
-terraform output -raw staging_database_url_owner_direct  # -> pull-fm/staging/DATABASE_URL_DIRECT
+terraform output -raw main_database_url_owner_direct     # -> the production OWNER, direct item
+terraform output -raw staging_database_url_owner_direct  # -> the staging OWNER, direct item
 ```
 
-Store each as the `credential` field of an item with that exact title, because
-that is what `infra/lib/secrets.sh` reads. **Do not paste them into a shell that
-records history, a chat window, or a file.**
+Store each as the `credential` field of the corresponding vault item, because that
+is what `infra/lib/secrets.sh` reads; `credential` and not `password`, which on at
+least one of these items is empty. The items are identified by role and endpoint in
+[section 11d](#11d-where-the-connection-strings-live-now) rather than by title,
+because the titles have been renamed twice and the vault is the source of truth for
+them. **Do not paste these into a shell that records history, a chat window, or a
+file.**
 
 Output names encode the role as well as the endpoint
 (`<branch>_database_url_<role>_<endpoint>`). The old names said only which
@@ -519,8 +603,10 @@ terraform output -raw main_database_url_app_pooled_template
 ```
 
 Substitute the password, URL-encoding it first if it contains any of
-`: / ? # [ ] @ %`, and store the result as `pull-fm/prod/DATABASE_URL` (or
-`pull-fm/staging/DATABASE_URL`). Terraform cannot do this for you and should
+`: / ? # [ ] @ %`, and store the result in the **pooled application** vault item
+for that environment (see [section 11d](#11d-where-the-connection-strings-live-now)
+for how those four items are identified, and why their titles are not written down
+here). Terraform cannot do this for you and should
 not: see [section 10](#10-what-terraform-cannot-express-here-and-why).
 
 Finally, converge so the node picks up the new value:
@@ -701,8 +787,9 @@ keep it off synced or shared storage and delete it once the apply is confirmed.
 
 ### 7.2 The schema or the data is wrong, but Neon is fine
 
-**Use instant restore, not a dump.** The PITR window is 6 hours on this plan.
-Restoring `main` to a timestamp is a control-plane operation measured in seconds,
+**Use instant restore, not a dump.** The PITR window is **7 days** on the live
+project; it was 6 hours when this was written, on the free plan.
+Restoring a branch to a timestamp is a control-plane operation measured in seconds,
 because Neon's storage is copy-on-write. This is strictly better than the
 pgBackRest path it replaces, which Gate 4 budgets at 30 minutes.
 
@@ -1188,12 +1275,29 @@ concealed field labelled `credential`, which is what `infra/lib/secrets.sh`
 reads. They also carry `role` and `endpoint` fields, so which privilege level an
 item holds is visible without opening it.
 
-| Item                                  | Role           | Endpoint |
-| ------------------------------------- | -------------- | -------- |
-| `pull-fm/prod/DATABASE_URL`           | `pullfm_app`   | pooled   |
-| `pull-fm/prod/DATABASE_URL_DIRECT`    | `neondb_owner` | direct   |
-| `pull-fm/staging/DATABASE_URL`        | `pullfm_app`   | pooled   |
-| `pull-fm/staging/DATABASE_URL_DIRECT` | `neondb_owner` | direct   |
+**The item titles are deliberately not reproduced here, and this is not tidiness.**
+They were renamed once during the 2026-07-29 cutover, to distinguish the United
+States items from the European ones while both existed, and are being renamed again
+now that the European project is deleted. **A title written into this file would be
+wrong within the day.** So the four are identified below by the two properties that
+do not move, and **the vault is the source of truth for what each one is called**.
+Resolve them with a title lookup rather than an `op://` path, because a title
+containing parentheses is not legal in `op://` syntax.
+
+| Which one               | Role           | Endpoint | What reads it                    |
+| ----------------------- | -------------- | -------- | -------------------------------- |
+| Production, application | `pullfm_app`   | pooled   | the BFF                          |
+| Production, owner       | `neondb_owner` | direct   | migrations and one-off admin SQL |
+| Staging, application    | `pullfm_app`   | pooled   | the BFF, and the gate runs       |
+| Staging, owner          | `neondb_owner` | direct   | migrations and one-off admin SQL |
+
+**Two traps when resolving one of these.** First, the pre-cutover items still
+exist, are **archived**, and hold connection strings for the **deleted** European
+project; an item that resolves and a password that looks right are not evidence you
+are pointed at the live database. Check the project id in the host name. Second, on
+at least one of these items the `password` field is **empty** and the value is in
+the `credential` field, so a lookup that reads `password` succeeds, returns an
+empty string, and fails later somewhere less obvious.
 
 The two app roles have **different passwords**, both from `openssl rand -base64 24`,
 and each was used exactly once and never written to disk. Both pooled strings

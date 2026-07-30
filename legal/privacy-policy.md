@@ -31,20 +31,28 @@
 > which of them Pull.fm is below the threshold of, and neither claim is made
 > without saying how it was reached.
 >
-> **Of the two changes the posture depends on, one has landed and one has not.**
-> Registration from the EEA, the United Kingdom and Switzerland is refused by
-> code, covered by tests, and described in section 9 including what it cannot do.
-> **The infrastructure has not moved**; the placements in section 9 are the
-> intended end state and the repository still pins everything to the European
-> Union, which is marked `[OPEN]` there.
+> **Both of the changes the posture depends on have now landed.** Registration
+> from the EEA, the United Kingdom and Switzerland is refused by code, covered by
+> tests, and described in section 9 including what it cannot do. **The
+> infrastructure moved on 2026-07-29**: the database is a United States Neon
+> project, the application node is in Ashburn, Virginia, and the entire European
+> estate was deleted rather than left running. Section 9 states each placement
+> separately and was re-read against the live provider APIs rather than against
+> the intention.
+>
+> **One consequence of that move is a weaker claim than the move suggests, not a
+> stronger one.** Object storage is **not pinned to any jurisdiction**, because
+> the platform offers no United States jurisdiction to pin it to. Section 9 says
+> so plainly and declines to say "stored in the United States", which would be
+> the comfortable sentence and the false one.
 >
 > 312.dev LLC is organised in **Illinois**, which the operator supplied on
 > 2026-07-29. That settles the controller identity here and the governing law and
 > venue in `terms-of-service.md` section 16. **The postal address is still
 > unfilled** and is a separate fact.
 
-**Version:** DRAFT-0 (unpublished)
-**Last updated:** 2026-07-29
+**Version:** DRAFT-1 (unpublished)
+**Last updated:** 2026-07-30
 **Effective:** not yet effective
 
 ---
@@ -517,13 +525,21 @@ what a backup is. It comes with three commitments that make it meaningful:
 4. A restored backup yields your connected-service credentials **only as
    ciphertext**, under a key that was never in the database.
 
-**The point-in-time-recovery window is 6 hours.** The database is hosted by Neon,
+**The point-in-time-recovery window is 7 days.** The database is hosted by Neon,
 which keeps a copy-on-write history rather than periodic snapshots, and the
-window is set in this repository as `history_retention_seconds = 21600` in
-[`../infra/neon/variables.tf`](../infra/neon/variables.tf). Six hours is the
-ceiling on the plan in use, not a choice; raising it is a plan upgrade. In
-practice that means a deletion is beyond point-in-time recovery within six hours
-of being applied.
+window is set in this repository as `history_retention_seconds = 604800` in
+[`../infra/neon/variables.tf`](../infra/neon/variables.tf). In practice that
+means a deletion stays within point-in-time recovery for seven days after it is
+applied, and is beyond it after that.
+
+**This figure was 6 hours until 2026-07-29 and the change is worth stating rather
+than silently substituting.** Six hours was the ceiling on the free plan the
+retired European project was on. The United States project is on a paid plan and
+was created with a seven-day window, so the number moved because the plan and the
+project moved, not because somebody tuned it. It is stated here in the direction
+that matters to you: **a longer recovery window means your deleted data remains
+restorable for longer**, which is a cost of durability rather than a benefit of
+it, and section 6 explains how deletion and backups interact.
 
 **There is a second backup path, and it now has numbers.** Alongside Neon's own
 history, encrypted logical dumps of the database are written to object storage,
@@ -561,7 +577,7 @@ records the same qualification, and the two must not drift apart.
 | Audit records                                               | **90 days** at full fidelity, or **30 days** after your account is deleted, whichever comes first. Past that the row is anonymized in place: the account id is replaced by an irreversible random pseudonym and the IP is truncated to a `/24` or `/48`. The anonymized row is hard deleted **400 days** from the event. Applied by `purge:audit`, whose intended cadence is daily. See section 7 and **the scheduling note below**.                                                                                                   |
 | Personal API token last-used IP                             | Cleared **90 days** after the token was last used, by setting the column to null in place. A token with an IP recorded but no recorded use is also cleared, because that state can only come from a bug and the safe resolution is to drop the IP. Applied by the same `purge:audit` job. **See the scheduling note below.**                                                                                                                                                                                                           |
 | Deletion records                                            | Indefinite. They hold an internal identifier and timestamps, and nothing else.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Encrypted backups                                           | **6 hours** for Neon's point-in-time-recovery history. **35 days** for the daily encrypted logical dumps in object storage, and **90 days** for a dump taken by hand before a destructive operation, both enforced by a bucket lifecycle rule. `[OPEN]` We hold a bucket-scoped credential that is refused lifecycle reads, so both figures are configured but unverifiable by us today. See section 7.                                                                                                                                |
+| Encrypted backups                                           | **7 days** for Neon's point-in-time-recovery history, read back from the live project on 2026-07-29. **35 days** for the daily encrypted logical dumps in object storage, and **90 days** for a dump taken by hand before a destructive operation, both enforced by a bucket lifecycle rule. `[OPEN]` We hold a bucket-scoped credential that is refused lifecycle reads, so the 35 and 90 day figures are configured but unverifiable by us today. See section 7.                                                                     |
 | Identity data held by WorkOS                                | Deleted when you delete your account. Separately, an address that was sent a sign-in code but never verified leaves an **unverified record at WorkOS and no account here**; `reap:unverified` deletes those once they pass `AUTH_UNVERIFIED_REAP_AFTER_S`, and **the scheduling note below applies to that job too**. On termination of our agreement with WorkOS, their addendum commits them to delete identity data other than backup and archival copies, which go on their own schedule. `[OPEN]` That schedule is not published. |
 
 ### `[OPEN]` The scheduling note, which qualifies five rows above
@@ -742,17 +758,31 @@ this deployment is not on. This is a disclosed property of the architecture
 rather than a setting left wrong, and it is stated here because a policy that
 answered only the storage question would leave you with a false picture.
 
-`[OPEN]` **None of the placements in the table above have been applied yet, and
-this section describes the intended end state rather than the deployed one.** As
-of 2026-07-29 the infrastructure code in this repository still pins the database
-to `aws-eu-central-1` in Frankfurt, still validates the Hetzner location against
-an EU-only list of `fsn1`, `nbg1` and `hel1` with the live staging node in
-Helsinki, and still defaults the backup bucket to the `eu` jurisdiction. A
-separate point about the same table: the **erasure-ledger bucket is not described
-by the infrastructure code at all**, so unlike the backup bucket there is no
-committed artifact that fixes or checks its jurisdiction. Before publication,
-every row above must be re-read against the applied Terraform, and the erasure
-ledger needs a placement that something enforces.
+**The placements in the table above are applied, and they were re-read from the
+providers rather than from the plan.** This paragraph previously said the opposite
+and it is the sentence in this document that was wrong for the longest, so what
+changed is recorded rather than quietly replaced. Until 2026-07-29 the
+infrastructure code pinned the database to `aws-eu-central-1` in Frankfurt,
+accepted only the EU sites `fsn1`, `nbg1` and `hel1` for the application node,
+with the live node in Helsinki, and defaulted the backup bucket to the `eu`
+jurisdiction. On 2026-07-29 all three moved, and the European estate was
+**deleted** rather than left in place: the Frankfurt database project, its object
+storage, and the credentials scoped to it no longer exist. The database region was
+confirmed as `aws-us-east-1` by reading the live project back from the provider's
+API, not by reading the Terraform that asks for it.
+
+`[OPEN]` **What is applied is not the same as what is pinned by committed code,
+and two of the rows above are held in place by something less durable than the
+rest.** First, the application node's location is supplied from an operator file
+that is deliberately not committed, while the checked-in default for that variable
+is still a European site; the live node is in Ashburn, and a fresh apply that
+forgot the operator file would not be. Second, the **erasure-ledger bucket is not
+described by the infrastructure code at all**, so unlike the backup bucket there
+is no committed artifact that fixes or checks its placement. Neither of these
+makes a sentence above false today. Both mean a true sentence above is one
+forgotten input away from becoming false, which is the condition this marker is
+recording. Before publication, the committed default should name the site the
+table names, and the erasure ledger needs a placement something enforces.
 
 ### Cross-border processing
 
@@ -786,7 +816,18 @@ of the architecture that you are entitled to know about.
 WorkOS's own subprocessors are listed at
 [workos.com/legal/subprocessors](https://workos.com/legal/subprocessors), and the
 addendum gives **fourteen calendar days** to object before a new subprocessor is
-engaged. We check that list; you can too.
+engaged. You can read that page yourself, and the mechanics of it are worth
+knowing because they are easy to misread as a stronger protection than they are:
+**notice is given by WorkOS updating that page, not by WorkOS contacting us**, and
+the addendum makes checking it our responsibility. So the fourteen days run from a
+change we have to notice for ourselves.
+
+`[OPEN]` **An earlier version of this paragraph said "we check that list", and
+nothing implemented it.** A duty with a fourteen-day clock and no inbound
+notification lapses silently by design, so an intention is not a control here. The
+sentence has been narrowed to what is true rather than deleted, and what would make
+the stronger claim honest is a scheduled job that fetches the page, hashes it, and
+alerts on a change. Until that exists, this document does not claim we monitor it.
 
 Under the same addendum WorkOS commits to security measures consistent with a
 SOC 2 Type II programme, to notify us of a security incident "without undue
@@ -817,20 +858,21 @@ rather than by storing anything.
 
 ### Service providers
 
-| Provider                     | What they handle                                                                                                                                                                                             | Where                                                                                              | Written security commitment                                                                                                                             |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Neon** (database)          | Every application table, and the backups of it                                                                                                                                                               | United States region                                                                               | `[OPEN]` Not on file                                                                                                                                    |
-| **Hetzner Online GmbH**      | Application servers, cache                                                                                                                                                                                   | Ashburn, Virginia                                                                                  | `[OPEN]` Not on file                                                                                                                                    |
-| **Cloudflare, Inc.**         | DNS, and the reverse proxy every request passes through: TLS is terminated at the edge, so IP addresses, paths, headers and bodies are processed in the clear. Also object storage holding encrypted backups | **Global edge**, at the data centre nearest each visitor; object storage pinned to no jurisdiction | Published DPA, incorporated by reference under Self-Serve Subscription Agreement 6.1. `[OPEN]` Not confirmed for this account and no dated copy on file |
-| **WorkOS, Inc.**             | Authentication and identity                                                                                                                                                                                  | United States                                                                                      | The published DPA, incorporated automatically. `[CONFIRM]` that the WorkOS agreement itself is executed, and keep a dated copy of the DPA on file       |
-| **GitHub, Inc. (Microsoft)** | Source hosting and release distribution. Handles no user data.                                                                                                                                               | United States                                                                                      | Not required                                                                                                                                            |
+| Provider                     | What they handle                                                                                                                                                                                             | Where                                                                                              | Written security commitment                                                                                                                                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Neon** (database)          | Every application table, and the backups of it                                                                                                                                                               | United States region                                                                               | **Data Processing Agreement, executed by both parties.** Neon signed 2024-11-22; 312.dev LLC signed 2026-07-29. Annex 2 is the security schedule                                      |
+| **Hetzner Online GmbH**      | Application servers, cache                                                                                                                                                                                   | Ashburn, Virginia                                                                                  | **Data Processing Agreement, executed 2026-07-30**, version 1.2, with 312.dev LLC as controller. Appendix 2 is the Article 32 security schedule                                       |
+| **Cloudflare, Inc.**         | DNS, and the reverse proxy every request passes through: TLS is terminated at the edge, so IP addresses, paths, headers and bodies are processed in the clear. Also object storage holding encrypted backups | **Global edge**, at the data centre nearest each visitor; object storage pinned to no jurisdiction | **Published DPA, incorporated by reference** by section 6.1 of the Self-Serve Subscription Agreement, which is the agreement this account is on. Section 6.2 is the security schedule |
+| **WorkOS, Inc.**             | Authentication and identity                                                                                                                                                                                  | United States                                                                                      | **Published Data Processing Addendum, binding without a signature** by its own sections 1(b) and 6(c). Version dated 2023-06-27. Exhibit A is the security schedule                   |
+| **GitHub, Inc. (Microsoft)** | Source hosting and release distribution. Handles no user data.                                                                                                                                               | United States                                                                                      | Not required                                                                                                                                                                          |
 
-`[OPEN]` **This obligation does not disappear with the GDPR, and it would be easy
-to think it did.** Earlier versions of this document sourced it to **GDPR Article
-28**, which required a written processor contract. Article 28 no longer applies.
-But two United States laws impose a materially similar duty on a business holding
-personal information about their residents, **with no revenue and no volume
-threshold at all**, and Pull.fm is offered to residents of every state:
+**Which obligation the four agreements above discharge, because "we have DPAs" is
+not a checkable statement without the reason.** Earlier versions of this document
+sourced the duty to **GDPR Article 28**, which required a written processor
+contract. Article 28 no longer applies. But two United States laws impose a
+materially similar duty on a business holding personal information about their
+residents, **with no revenue and no volume threshold at all**, and Pull.fm is
+offered to residents of every state:
 
 - **Massachusetts, 201 CMR 17.03(2)(f)**, which requires taking reasonable steps
   to select service providers capable of maintaining appropriate security, and
@@ -839,21 +881,49 @@ threshold at all**, and Pull.fm is offered to residents of every state:
   safeguards include selecting service providers capable of maintaining
   appropriate safeguards and **requiring those safeguards by contract**.
 
-So the position is unchanged in substance: **Neon and Hetzner are outstanding.**
-WorkOS is covered by an addendum that applies by its own terms, and Cloudflare by
-a published DPA that its self-serve agreement incorporates by reference. Both of
-those should still be downloaded, dated and filed so that what we agreed to is
-provable later, and the Cloudflare one carries one extra check that has not been
-done: **confirm which Cloudflare agreement this account is actually on**, since
-the incorporation route above is the Self-Serve Subscription Agreement and a
-different agreement would change the analysis. That is a five-minute check
-against the account's own billing page.
+**That duty is what the four agreements satisfy, and as of 2026-07-30 all four are
+in writing.** The named schedule in each is the written security commitment the
+two laws call for, which is why the table above names the schedule and not just
+the agreement: Neon's Annex 2, Hetzner's Appendix 2, Cloudflare's section 6.2 and
+WorkOS's Exhibit A. Each is filed as a dated document in the operator's password
+vault under `pull-fm/legal/`, addressed by title. **They are deliberately not
+copied into this repository**, which is public, and one of them is marked
+confidential by the processor that issued it.
 
-**The two citations above are the operator's reading and have not been verified
-against the primary sources.** They were checked from memory rather than from the
-regulation and the statute, because the sources could not be retrieved while this
-was written. Counsel must confirm both, and confirm whether any other state
-imposes the same duty, before this is published.
+Three of the four needed a question answered rather than a signature collected,
+and the answers are recorded because each one is the sort of thing that gets
+re-litigated later:
+
+- **Neon was signed by both parties even though it did not have to be.** Its
+  preamble binds the agreement when the last party signs, while its section 10(a)
+  treats signing the main agreement as entering the DPA. Those two readings
+  disagree about whether an unsigned block leaves you with no DPA, so it was
+  signed rather than resolved in our own favour.
+- **Hetzner's agreement is with a German company and the server is in Virginia**,
+  which raised whether it covers the machine at all. It does: their terms apply to
+  all business relationships between the customer and Hetzner Online GmbH, their
+  legal notice names no United States subsidiary, and the DPA attaches to the
+  contract rather than to a data centre. There is no separate United States entity
+  to contract with.
+- **Cloudflare's DPA binds us with zero European users, which is stronger than
+  earlier drafts of this document claimed.** Section 6.1 makes Cloudflare a
+  processor where customer content includes the personal data of European data
+  subjects **and** all data defined as personal information under the California
+  Consumer Privacy Act, which it then labels collectively as "Personal Data". The
+  two categories are the definition of that term rather than two conditions that
+  must both be met, so the CCPA limb stands on its own: our content falls inside
+  the CCPA's broad definition, so the DPA is incorporated whether or not a single
+  European user ever registers. Earlier notes called this conditional and
+  unconfirmed. It is neither, and the account was confirmed to be on the Self-Serve
+  Subscription Agreement from its own billing page.
+
+**The two statutory citations above are still the operator's reading rather than a
+verified one.** They were written from memory of the regulation and the statute
+rather than from the primary sources, and four separate processor records now rest
+on them, which makes checking them more worthwhile rather than less. Counsel must
+confirm both, and confirm whether any other state imposes the same duty, before
+this is published. What is settled is that the agreements exist and are dated; what
+is not settled is the citation that explains why they were needed.
 
 ### Upstream data sources (not processors)
 
@@ -1109,22 +1179,24 @@ reverse it: entering an app store, and sending a first marketing email.
 
 A checklist, so that nothing above is quietly published while still untrue.
 
-| #   | Item                                                                                                                                                                                                                                                                                                                                                                                                                                | Section |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| 1   | **The retention jobs are built, tested and scheduled, and the schedule has never fired** because no compute is deployed to run it. The windows in sections 7 and 8 are enforced on each run, and a run is presently started by hand. A schedule must be verified to have fired before those windows are stated as unqualified promises.                                                                                             | 7, 8    |
-| 2   | No log retention period is configured anywhere. A number must exist in the system before it is stated here.                                                                                                                                                                                                                                                                                                                         | 8       |
-| 3   | The 35-day lifecycle rule on the logical dumps is configured but **we cannot read it**, because the backup credential is bucket-scoped and lifecycle reads are a bucket-admin operation. Run the conformance check from an operator credential. The Neon PITR window itself is settled at 6 hours.                                                                                                                                  | 7, 8    |
-| 4   | No written security commitments are on file with **Neon or Hetzner**. This is now sourced to Massachusetts 201 CMR 17.03(2)(f) and the New York SHIELD Act rather than to GDPR Article 28, and those two citations themselves need verifying. WorkOS and Cloudflare are each covered by a published addendum; file a dated copy of both, and confirm which Cloudflare agreement this account is on.                                 | 9       |
-| 5   | ~~The registration refusal for the EEA, the UK and Switzerland does not exist.~~ **Resolved 2026-07-29:** `apps/bff/src/lib/registration-geo.ts` holds the list, three auth routes enforce it before the identity provider is called, and 40 tests across two suites cover it. Its honest limits are described in section 9 and recorded in the private risk register, not left as a gap here.                                      | 2, 9    |
-| 6   | ~~Controller's state of organisation, postal address, and governing supervisory authority are unfilled.~~ **Resolved:** 312.dev LLC is organised in Illinois. The postal address is deliberately not published and section 2 records what was checked; the supervisory-authority row is gone with the GDPR.                                                                                                                         | 2, 10   |
-| 7   | **The infrastructure has not moved.** Section 9 describes a US-region database, US application servers and unpinned object storage; the Terraform in this repository still pins all three to the EU. Re-read every row of that table against the applied configuration before publication.                                                                                                                                          | 9       |
-| 7a  | The **erasure-ledger bucket is not described by infrastructure code at all**, so nothing fixes or checks its placement the way the backup bucket's is fixed and checked.                                                                                                                                                                                                                                                            | 9       |
-| 7b  | ~~Confining TLS termination to the EU needs Cloudflare Regional Services.~~ **Not applicable.** That was a Chapter V mitigation for an EU transfer. The edge is still global and section 9 still discloses it, but there is no longer a safeguard it is failing to provide.                                                                                                                                                         | 9       |
-| 7c  | **The state comprehensive privacy laws other than California were not checked against their statutes.** Texas and Nebraska first, because they use an SBA size test rather than a numeric threshold.                                                                                                                                                                                                                                | 10      |
-| 8   | ~~Expired `idempotency_keys` and `connect_states` rows are never deleted.~~ **Resolved:** `sweep:expired` deletes both an hour past expiry. Scheduling it is item 1.                                                                                                                                                                                                                                                                | 8       |
-| 9   | ~~The sign-in methods sentence disagrees with `docs/PLAN.md` section 4.~~ **Resolved:** `docs/PLAN.md` section 4a records magic link only, and a test and a database constraint enforce it. `legal/terms-of-service.md` section 4 still described social sign-in when this row was first marked resolved, and was corrected on 2026-07-29; check the sibling documents, not only the plan, before closing a row of this kind again. | 3.1     |
-| 10  | The WorkOS subprocessor list has not been read and summarized.                                                                                                                                                                                                                                                                                                                                                                      | 9       |
-| 11  | WorkOS may use personal data "to build or improve the quality of its services", and their addendum is silent on AI/ML training. Decide whether to seek a commitment.                                                                                                                                                                                                                                                                | 3.1, 9  |
-| 12  | ~~Terraform still describes the pre-Neon self-hosted database.~~ **Resolved** as to the self-hosted layout. The region it is pinned to is now item 7.                                                                                                                                                                                                                                                                               | 9       |
-| 13  | This document has not been reviewed by a lawyer, and the rewrite to a United States posture makes that more pressing rather than less: it replaced one settled body of law with several unsettled ones, and the reasoning in sections 9, 10 and 12 is the operator's.                                                                                                                                                               | all     |
-| 14  | The territorial posture is now enforced, and its two residual weaknesses are **in the private risk register rather than here**, because neither is a gap between what this document claims and what the system does: address-based geolocation can be evaded, and the country header is trusted on the strength of a zone-level origin-pull certificate. Section 9 already declines to claim more than the control delivers.        | 2, 9    |
+| #   | Item                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Section |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| 1   | **The retention jobs are built, tested and scheduled, and the schedule has never fired** because no compute is deployed to run it. The windows in sections 7 and 8 are enforced on each run, and a run is presently started by hand. A schedule must be verified to have fired before those windows are stated as unqualified promises.                                                                                                                                                                                                                                        | 7, 8    |
+| 2   | No log retention period is configured anywhere. A number must exist in the system before it is stated here.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 8       |
+| 3   | The 35-day lifecycle rule on the logical dumps is configured but **we cannot read it**, because the backup credential is bucket-scoped and lifecycle reads are a bucket-admin operation. Run the conformance check from an operator credential. The Neon PITR window itself is settled at **7 days**, read back from the live project on 2026-07-29; it was 6 hours on the retired free-plan project and this row said so until then.                                                                                                                                          | 7, 8    |
+| 4   | ~~No written security commitments are on file with **Neon or Hetzner**.~~ **Resolved 2026-07-30:** all four are in writing and filed as dated documents in the operator's vault under `pull-fm/legal/`, addressed by title and deliberately not copied into this public repository. Neon executed by both parties, Hetzner executed at version 1.2, WorkOS and Cloudflare binding by their own terms with the Cloudflare agreement confirmed from the billing page. **What remains open is narrower and is now item 4a:** the two statutory citations the obligation rests on. | 9       |
+| 4a  | **The Massachusetts 201 CMR 17.03(2)(f) and New York SHIELD Act citations in section 9 are the operator's reading and have not been checked against the primary sources.** Four processor records now rest on them. Counsel must confirm both, and whether any other state imposes the same duty.                                                                                                                                                                                                                                                                              | 9       |
+| 5   | ~~The registration refusal for the EEA, the UK and Switzerland does not exist.~~ **Resolved 2026-07-29:** `apps/bff/src/lib/registration-geo.ts` holds the list, three auth routes enforce it before the identity provider is called, and 40 tests across two suites cover it. Its honest limits are described in section 9 and recorded in the private risk register, not left as a gap here.                                                                                                                                                                                 | 2, 9    |
+| 6   | ~~Controller's state of organisation, postal address, and governing supervisory authority are unfilled.~~ **Resolved:** 312.dev LLC is organised in Illinois. The postal address is deliberately not published and section 2 records what was checked; the supervisory-authority row is gone with the GDPR.                                                                                                                                                                                                                                                                    | 2, 10   |
+| 7   | ~~**The infrastructure has not moved.**~~ **Resolved 2026-07-29:** it moved, and the European estate was deleted rather than left running. The database region was confirmed as `aws-us-east-1` by reading the live project back from the provider API; the application node is in Ashburn; the object storage carries no jurisdiction. **The residual is now item 7d**, which is about what pins those placements rather than what they are.                                                                                                                                  | 9       |
+| 7a  | The **erasure-ledger bucket is not described by infrastructure code at all**, so nothing fixes or checks its placement the way the backup bucket's is fixed and checked.                                                                                                                                                                                                                                                                                                                                                                                                       | 9       |
+| 7d  | **The application node's location is applied from an operator file that is not committed, and the checked-in default for it is still a European site.** Nothing in section 9 is false today; a fresh apply that forgot the operator file would make it false. Point the committed default at the site the table names.                                                                                                                                                                                                                                                         | 9       |
+| 7b  | ~~Confining TLS termination to the EU needs Cloudflare Regional Services.~~ **Not applicable.** That was a Chapter V mitigation for an EU transfer. The edge is still global and section 9 still discloses it, but there is no longer a safeguard it is failing to provide.                                                                                                                                                                                                                                                                                                    | 9       |
+| 7c  | **The state comprehensive privacy laws other than California were not checked against their statutes.** Texas and Nebraska first, because they use an SBA size test rather than a numeric threshold.                                                                                                                                                                                                                                                                                                                                                                           | 10      |
+| 8   | ~~Expired `idempotency_keys` and `connect_states` rows are never deleted.~~ **Resolved:** `sweep:expired` deletes both an hour past expiry. Scheduling it is item 1.                                                                                                                                                                                                                                                                                                                                                                                                           | 8       |
+| 9   | ~~The sign-in methods sentence disagrees with `docs/PLAN.md` section 4.~~ **Resolved:** `docs/PLAN.md` section 4a records magic link only, and a test and a database constraint enforce it. `legal/terms-of-service.md` section 4 still described social sign-in when this row was first marked resolved, and was corrected on 2026-07-29; check the sibling documents, not only the plan, before closing a row of this kind again.                                                                                                                                            | 3.1     |
+| 10  | The WorkOS subprocessor list has not been read and summarized.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 9       |
+| 11  | WorkOS may use personal data "to build or improve the quality of its services", and their addendum is silent on AI/ML training. Decide whether to seek a commitment.                                                                                                                                                                                                                                                                                                                                                                                                           | 3.1, 9  |
+| 12  | ~~Terraform still describes the pre-Neon self-hosted database.~~ **Resolved** as to the self-hosted layout, and as of 2026-07-29 as to the region as well; see item 7.                                                                                                                                                                                                                                                                                                                                                                                                         | 9       |
+| 13  | This document has not been reviewed by a lawyer, and the rewrite to a United States posture makes that more pressing rather than less: it replaced one settled body of law with several unsettled ones, and the reasoning in sections 9, 10 and 12 is the operator's.                                                                                                                                                                                                                                                                                                          | all     |
+| 14  | The territorial posture is now enforced, and its two residual weaknesses are **in the private risk register rather than here**, because neither is a gap between what this document claims and what the system does: address-based geolocation can be evaded, and the country header is trusted on the strength of a zone-level origin-pull certificate. Section 9 already declines to claim more than the control delivers.                                                                                                                                                   | 2, 9    |

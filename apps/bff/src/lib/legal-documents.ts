@@ -197,14 +197,14 @@ export const CONSENT_DOCUMENTS: readonly LegalDocument[] = [
   consentDocument({
     id: "privacy-policy",
     path: "legal/privacy-policy.md",
-    version: "DRAFT-0",
+    version: "DRAFT-1",
     consentEpoch: 1,
     material: true,
     contentSha256:
-      "32a9f74702261aa661391106407850ce62f06c3cf5b87788856d8e7ced122fc7",
+      "e3f63c850eda58fc1a47410b57924948c59a0c7987dd85b3d08452facaa55bbb",
     effectiveAt: null,
     notes:
-      "First recorded revision. Presented alongside the Terms because section 18 makes the two the entire agreement, so accepting one without the other would leave the agreement incomplete on its own terms.",
+      "Residency and retention corrections after the 2026-07-29 cutover out of the European Union. THE CHANGE IS MATERIAL and is recorded as such: three factual disclosures about the user's own data moved. Backups went from an EU-pinned bucket to object storage pinned to NO jurisdiction, so the true claim is 'not EU-pinned' and never 'stored in the United States'; the point-in-time-recovery window went from 6 hours to 7 days, a 28-fold increase in how long deleted data stays restorable; and the four processor agreements became executed and dated. WHY THE EPOCH IS 1 AND NOT 2, since material normally means +1: DRAFT-0 was never published. It was checked rather than assumed - `legal_document_revisions` is empty on staging, the table does not yet exist on prod, and `legal_consents` holds zero rows in both - so there is no first publication for this to supersede and no acceptance anywhere for a raised epoch to invalidate. DRAFT-1 IS the first revision, which the epoch guard in migration 0008 requires to be epoch 1 and material, and epoch 2 is refused by that trigger for exactly this reason. Recording material: true is what keeps this from being a precedent that residency corrections are cosmetic; the epoch is 1 because nothing preceded it, not because the change was small.",
   }),
 ];
 

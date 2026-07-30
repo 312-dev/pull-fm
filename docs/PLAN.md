@@ -83,7 +83,7 @@ remains in force**; Gate S is retired and replaced by Gate R (§11.6).
 | Area                       | Decision                                                                                                               | Changed?             |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------- |
 | **Playback**               | 30s previews (iTunes hotlinkable; **Deezer URLs are signed and expire, never cache them**)                             | **[R]** caching rule |
-| **Data layer**             | **Neon serverless Postgres 18** (`aws-eu-central-1`), branch per environment, Neon's built-in pooler                   | **[R]** see 1c       |
+| **Data layer**             | **Neon serverless Postgres 18** (`aws-us-east-1`), branch per environment, Neon's built-in pooler                      | **[R]** see 1c       |
 | **Auth**                   | **WorkOS Magic Auth. MAGIC LINK ONLY: no passwords, no social, no passkeys, no SSO.**                                  | **[R]** see §4       |
 | **Per-user token storage** | **AES-256-GCM envelope encryption, ciphertext in Postgres.** Infisical removed entirely.                               | **[R]** see §5       |
 | **App secrets**            | 1Password -> Nomad variables. No standing secrets service.                                                             | **[R]**              |
@@ -130,8 +130,17 @@ destroy**); `terraform apply` is gated on operator sign-off. Full procedure:
 [`runbooks/neon-migration.md`](runbooks/neon-migration.md).
 
 The database moves off a self-managed Hetzner node onto **Neon serverless
-Postgres 18** in `aws-eu-central-1` (Frankfurt), managed by a fourth Terraform
+Postgres 18** in `aws-us-east-1` (Northern Virginia), managed by a fourth Terraform
 root at `infra/neon/` with its state in the same R2 bucket as the others.
+
+> **This said `aws-eu-central-1` (Frankfurt) until 2026-07-29.** The service moved
+> to a United States posture that day: the live project is `cold-brook-02833828`
+> on the paid `launch_v3` plan, and the Frankfurt project was **deleted** rather
+> than kept warm. A Neon project's region cannot be changed, so this was a new
+> project and a data migration, not a setting. `legal/privacy-policy.md` section 9
+> is the authority on what that means for residency, and it is careful about one
+> thing this line is not: **object storage is pinned to no jurisdiction at all**,
+> so "United States" is true of the database and is NOT true of the backups.
 
 | Was                                             | Is                                                            |
 | ----------------------------------------------- | ------------------------------------------------------------- |
@@ -185,9 +194,20 @@ serialising without erroring, and the damage appears only as two concurrent
    R2 state bucket becomes the trust boundary for the production database
    credential.
 
-### The free plan does not reach production, and the arithmetic says so
+### The free plan did not reach production, and the arithmetic is why we left it
 
-`org-tiny-leaf-89756764` is on `free_v3`: 0.5 GB storage per project, **100
+> **RESOLVED 2026-07-29: the upgrade this section argues for has happened.** The
+> organisation is on **`launch_v3`**, a paid plan. The live figures, read from the
+> Neon API rather than the plans page: **5000 branches**, a **16 TiB** logical size
+> limit, an **8 CU** autoscaling ceiling, and a **7 day** restore window. In place
+> of a plan allowance there is now a **chosen** ceiling: a consumption quota armed
+> at 720,000 CU-seconds (200 CU-hours) and 520 GB of egress. Storage is
+> deliberately **not** capped, because `logical_size_bytes` bounds a branch for its
+> lifetime rather than per period and the canonical loader peaks near 22 GB
+> mid-load. The arithmetic below is kept because it is the reasoning that forced
+> the upgrade, not a current constraint.
+
+`org-tiny-leaf-89756764` was on `free_v3`: 0.5 GB storage per project, **100
 CU-hours per project per month**, 10 branches, a 6 hour restore window, and
 scale-to-zero after 5 minutes that cannot be disabled.
 
@@ -201,6 +221,12 @@ premise is that every MBID-keyed fact is stored forever (section 3).
 **A paid plan is therefore a Phase 6 prerequisite, not an optimisation.** It is
 also what unlocks `allowed_ips`, a PITR window longer than 6 hours, and protected
 branches, all three of which are wanted.
+
+**Of those three, one was taken.** The PITR window is 7 days. **`allowed_ips` is
+now available and is set to an empty list, which allows everything**, and no branch
+is protected. That is a worse failure mode than the plan limitation it replaced,
+because a field that exists and is empty reads as configured to anyone who checks
+that it exists rather than what is in it.
 
 ### What this does not fix
 
@@ -942,6 +968,11 @@ These cannot be resolved by engineering judgment.
    paperwork tasks, and each one is a sentence that cannot honestly be published until it is
    closed.** A privacy policy that misdescribes the system is a false statement of fact, which is
    materially worse than not having one.
+
+   **Two of those four closed on 2026-07-29 and 2026-07-30.** There is a PITR number, 7 days, and
+   all four processor agreements are in writing and dated. The other two, log retention and the
+   `audit_log` IP purge, are still open. The appendix in `legal/privacy-policy.md` is the current
+   list; this paragraph is not, and should be read against it rather than instead of it.
 
 8. **Where the legal documents live.** Gate L requires "stable URLs". Serving them from
    `pull.fm/legal/*` versus rendering this directory is undecided, and the commitment that matters

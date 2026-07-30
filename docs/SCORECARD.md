@@ -5,8 +5,25 @@ a machine checks it and the command to re-run it is written down.
 
 **Last updated:** 2026-07-29 (Gate 4 measured and failing; Gate $ reclassified; Gate R opened)
 
+> **STALE AS A WHOLE, as of the 2026-07-29 EU-to-US cutover.** Every gate below
+> that was measured against infrastructure was measured against the **European**
+> estate, and that estate no longer exists: the Frankfurt Neon project, the EU
+> object storage and the EU-scoped credentials were deleted, and the application
+> node is now in Ashburn, Virginia. **A green row here is evidence about a system
+> that was replaced.** Two rows have been corrected in place because they are
+> paperwork rather than measurement, the DPA and PITR blockers below. **The rest
+> need re-measuring, not re-reading**, and are deliberately left showing their old
+> result rather than being marked green on the assumption that a cutover preserved
+> them. Gates 0 and 4 and Gate $ are the ones to re-run first.
+>
+> The two figures that are now settled and can be relied on: the database PITR
+> window is **7 days**, and a Neon consumption quota is **armed** at 720,000
+> CU-seconds plus 520 GB egress.
+
 **Staging is currently torn down** (EUR 0.00/mo). Any gate whose command needs a
 live host is marked `needs staging up` rather than counted as a pass.
+**That line is stale too:** a US application node exists. Whether it is serving is
+a separate question from whether it exists, and neither is answered here.
 
 ---
 
@@ -422,16 +439,16 @@ all.
 appendix of `[OPEN]` items where the system does not do what a policy would have
 to claim:
 
-| #   | Blocker                                                                                                     |
-| --- | ----------------------------------------------------------------------------------------------------------- |
-| 1   | `audit_log` retains an IP address linked to a deleted account **indefinitely**; no purge exists             |
-| 2   | **No log retention period is configured anywhere** in the system                                            |
-| 3   | pgBackRest is **not deployed**, so there is no PITR window to state                                         |
-| 4   | **No DPAs on file** with Hetzner, Cloudflare, or WorkOS (GDPR Art. 28 requires written processor contracts) |
-| 5   | **No EU Article 27 representative** appointed                                                               |
-| 6   | Controller's state of organisation, postal address, and supervisory authority unfilled                      |
-| 7   | The US-access transfer mechanism is undecided                                                               |
-| 8   | No legal review                                                                                             |
+| #   | Blocker                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `audit_log` retains an IP address linked to a deleted account **indefinitely**; no purge exists                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 2   | **No log retention period is configured anywhere** in the system                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 3   | ~~pgBackRest is **not deployed**, so there is no PITR window to state~~ **CLOSED 2026-07-29:** the database is managed Neon and the PITR window is **7 days** (`history_retention_seconds` 604800), read back from the live project                                                                                                                                                                                                                                                                                                                                                                        |
+| 4   | ~~**No DPAs on file** with Hetzner, Cloudflare, or WorkOS (GDPR Art. 28 requires written processor contracts)~~ **CLOSED 2026-07-30: all four are in writing**, including Neon which this row omitted. Filed as dated documents in the operator's vault under `pull-fm/legal/`, not in this public repository. **Re-sourced from GDPR Art. 28**, which no longer applies, **to Massachusetts 201 CMR 17.03(2)(f) and the NY SHIELD Act**, neither of which has a threshold. Those two citations are themselves unverified against the primary sources, which is now item 4a of the privacy policy appendix |
+| 5   | **No EU Article 27 representative** appointed. **Re-derive rather than close:** Article 27 was removed from the privacy policy on the merits, because GDPR Art. 3(2) turns on who a service is offered to and registration from the EEA, UK and Switzerland is refused in code. This row predates that analysis                                                                                                                                                                                                                                                                                            |
+| 6   | Controller's state of organisation, postal address, and supervisory authority unfilled                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 7   | The US-access transfer mechanism is undecided                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 8   | No legal review                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 Items 1 through 3 are engineering tasks. **Item 1 is the sharpest**: the register
 currently keeps an IP address tied to an internal account id forever, after the

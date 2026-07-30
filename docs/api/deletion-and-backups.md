@@ -48,12 +48,21 @@ Ordering matters and is chosen so that a failure at any point leaves a recoverab
 > pgBackRest was never deployed. A later version of this block correctly recorded that **nothing
 > invoked the dump on a schedule**. That is now fixed; see the correction under the table for what
 > was done and for the one part of the retention claim that is still unverified.
+>
+> **Later the same day the estate moved out of the European Union, and two things below moved with
+> it.** The provider point-in-time-recovery window is now **7 days** rather than 6 hours, because the
+> replacement database project is on a paid plan; the figure in the table has been corrected and was
+> read back from the provider API rather than from configuration. The dump and ledger layers were
+> re-created against United States object storage, so **the specific drilled artefacts described
+> below were in storage that has since been deleted**, and the drill is evidence about the mechanism
+> rather than about the objects currently there. The mechanism is unchanged. The **35 days** remains
+> configured-but-unconfirmed for the reason given below, which the move did not fix.
 
 Backups are three layers, because no single one covers what the others do not:
 
 | Layer                                    | Covers                                                                     | Window                              |
 | ---------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------- |
-| Provider point-in-time recovery          | a wrong delete or bad migration, noticed quickly                           | **6 hours**                         |
+| Provider point-in-time recovery          | a wrong delete or bad migration, noticed quickly                           | **7 days**                          |
 | A pinned restore branch                  | planned destructive operations, any age                                    | kept until deliberately released    |
 | Encrypted logical dump in object storage | loss of the database project itself, or a fault older than the PITR window | **35 days** scheduled, 90 preflight |
 
@@ -102,7 +111,9 @@ The position we take instead, which is the one regulators accept:
    scoped object-storage credential, and never queried to serve live traffic. That key inherits the KEK's escrow
    obligation: losing it makes every dump unreadable.
 2. **Retention is bounded and stated.** Deleted data disappears from the backup set when the last
-   backup containing it expires, within the documented PITR window.
+   backup containing it expires. For the provider layer that is the documented PITR window, **7
+   days**, so a deletion is not beyond recovery until seven days have passed; for the dump layer it
+   is the lifecycle window in the table.
 3. **A restore replays the deletions, from a list held outside this database.** The authoritative
    replay list is an append-only erasure ledger in object storage, one immutable object per erasure.
    Any restored user id present in the ledger is re-deleted before the restored system serves
