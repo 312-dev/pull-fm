@@ -14,6 +14,8 @@
 import { ALL_PROVIDERS, type ProviderName } from "@pull-fm/upstream";
 import { z } from "zod";
 
+import { parseRegistrationAllowlist } from "./lib/registration-allowlist.js";
+
 /**
  * A comma-separated list of provider names, validated against the real list.
  *
@@ -45,6 +47,64 @@ const providerListSchema = z
       out.push(name as ProviderName);
     }
     return out;
+  });
+
+/**
+ * The closed-beta registration allowlist, as a comma-separated address list.
+ *
+ * WHAT THIS IS FOR, IN ONE PARAGRAPH, BECAUSE AN OPERATOR WILL READ THIS LINE
+ * AND NOTHING ELSE. Pull.fm's current legal position is that the owner is the
+ * only End User of the API, which is what makes SeatGeek's clause 4.3 EULA duty
+ * have nothing to attach to. Until a client exists that presents the Terms and
+ * records acceptance (the remaining `[OPEN]` in legal/terms-of-service.md
+ * section 1), that premise has to be an ENFORCED CONTROL rather than the
+ * accident of nobody having signed up yet. This variable is the enforcement.
+ *
+ *   AUTH_REGISTRATION_ALLOWLIST=you@example.com
+ *
+ * THE EXAMPLE IS A PLACEHOLDER ON PURPOSE. This repository is public and
+ * tools/check-public-identifiers.mjs fails CI on a named human's address in a
+ * tracked file, because an inbox is the target of every account-recovery and
+ * phishing path around the technical controls. The real value is set per
+ * deployment and exists only in the env file rendered onto the node.
+ *
+ * Only the addresses named here may create an account. EMPTY MEANS OPEN, which
+ * is the launch state and is the opposite of the direction `SEATGEEK_ENABLED`
+ * was corrected in; the full argument for that asymmetry, and for why the
+ * deployment rather than this default is what keeps staging shut, is at the top
+ * of lib/registration-allowlist.ts. Read it before widening the list, because
+ * widening it one friend at a time is the thing it exists to prevent: five
+ * friends is five people whose assent is missing.
+ *
+ * A MALFORMED VALUE REFUSES TO START, in both of the two ways it can be
+ * malformed: an entry that is not an address can never match and would leave a
+ * list that reads as covering somebody it silently refuses, and a value that IS
+ * set but names nobody (`" "`, `","`) collapses to open, which is the typo that
+ * fails in the permissive direction. `providerListSchema` above takes the same
+ * position for the same reason. An entry that is simply not on the list is not a
+ * configuration error, and no runtime refusal is ever reported to the caller in
+ * enough detail to tell them which case they hit.
+ *
+ * The transform is a thin adapter over `parseRegistrationAllowlist`, never a
+ * second parser: the gate, this schema and the suite all read the one function.
+ */
+const registrationAllowlistSchema = z
+  .string()
+  .default("")
+  .transform((raw, ctx): ReadonlySet<string> => {
+    const { addresses, problems } = parseRegistrationAllowlist(raw);
+    if (problems.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          problems.map((p) => `"${p.entry}": ${p.why}`).join("; ") +
+          ". A closed-beta allowlist that cannot match the address it names is " +
+          "a lockout, and one that names nobody is an open service, so neither " +
+          "is allowed to boot. Leave the variable empty to accept everyone.",
+      });
+      return z.NEVER;
+    }
+    return addresses;
   });
 
 /** Comma-separated `id:base64key` pairs, e.g. "kek:v1=BASE64,kek:v2=BASE64". */
@@ -195,6 +255,23 @@ const schema = z.object({
    * is not claimed as one; see services/magic-auth.ts.
    */
   AUTH_START_FLOOR_MS: z.coerce.number().int().nonnegative().default(250),
+
+  /**
+   * Who may form an account. Empty means everyone. See the schema above.
+   *
+   * IT IS NOT A SECRET AND MUST NOT BE TREATED AS ONE, which is why it is a
+   * plain environment variable rather than a 1Password item. It is a list of
+   * addresses that are allowed in; knowing one buys nothing, because knowing an
+   * address was never what stopped anybody. Storing it in the vault would only
+   * add a converge-time failure mode to a value an operator needs to be able to
+   * read off the node while debugging a refused sign-in.
+   *
+   * It IS personal data, so it is never logged, never a metric label, and never
+   * echoed to a caller. The only place a value from here can appear is the
+   * startup error for a malformed list, which reaches an operator's terminal and
+   * not a response body.
+   */
+  AUTH_REGISTRATION_ALLOWLIST: registrationAllowlistSchema,
 
   /**
    * Directory reaper: how long an unverified WorkOS record may live.

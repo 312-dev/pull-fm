@@ -78,6 +78,58 @@ readonly PULLFM_WORKOS_OP_ITEM="${PULLFM_WORKOS_OP_ITEM:-qr6sfpfzskhpqtzbehw7kdh
 readonly PULLFM_PUBLIC_BASE_URL="${PULLFM_PUBLIC_BASE_URL:-https://api-staging.pull.fm}"
 readonly PULLFM_MB_USER_AGENT="${PULLFM_MB_USER_AGENT:-PullFM/0.1.0 (ope@312.dev)}"
 
+# ---------------------------------------------------------------------------
+# THE CLOSED-BETA REGISTRATION ALLOWLIST, AND WHY ITS DEFAULT IS NOT EMPTY
+# ---------------------------------------------------------------------------
+#
+# WHAT WAS WRONG, MEASURED ON THE DEPLOYMENT ON 2026-07-29. Pull.fm's legal
+# position for the SeatGeek events work is that the owner is the ONLY End User of
+# the API, which is what leaves SeatGeek's clause 4.3 EULA duty with nothing to
+# attach to. That was true BY COINCIDENCE: the US staging database held zero user
+# rows and there was no allowlist anywhere in the application. Meanwhile
+# api-staging.pull.fm answers on the public internet and signs people in with a
+# magic link, so anybody who knew the hostname and had a mailbox could open an
+# account and make the premise false retroactively.
+#
+# THE APPLICATION'S OWN DEFAULT IS OPEN, DELIBERATELY, so this line is what
+# actually keeps staging shut. The reasoning for that split is at the top of
+# apps/bff/src/lib/registration-allowlist.ts and it is the opposite of the
+# SEATGEEK_ENABLED correction below, on purpose: emptying the list is the LAUNCH
+# state, so a schema default that closed registration would be a control nobody
+# could develop against and a silent sign-up outage on the one day the project
+# cannot afford one.
+#
+# SO THE DEFAULT HERE IS NON-EMPTY, and that is the fail-safe. A converge that
+# forgets to override it still renders a CLOSED deployment; the only cost is that
+# the owner cannot sign in until he sets his own address, which is loud and
+# immediate. An empty default here would have made the whole control a formality
+# that every `up` run bypassed, which is exactly the way SEATGEEK_ENABLED was
+# already found to have been bypassed once.
+#
+# THE OWNER SETS HIS OWN ADDRESS IN HIS SHELL, NOT IN THIS FILE, because the
+# repository is PUBLIC and a personal address committed here is published forever,
+# for a value that changes with whoever is testing. This is not a style
+# preference: tools/check-public-identifiers.mjs FAILS CI on a named human's
+# address in a tracked file, on the grounds that an inbox is the target of every
+# account-recovery and phishing path around the technical controls. So the example
+# below is a placeholder and the real address never enters the repository.
+#
+#   PULLFM_REGISTRATION_ALLOWLIST=you@example.com infra/staging/up.sh
+#
+# Comma-separate to admit more than one. It is not a secret and is not read from
+# 1Password: knowing an admitted address buys nothing, because knowing an address
+# was never what stopped anybody, and putting it in the vault would add a
+# converge-time failure mode to a value an operator needs to read off the node
+# while debugging a refused sign-in. A malformed value REFUSES TO BOOT rather than
+# defaulting to open; see the schema in apps/bff/src/config.ts.
+#
+# EMPTYING IT IS THE LAUNCH ACT AND IT IS GATED. The allowlist comes off when a
+# client exists that presents the Terms and records acceptance, which is the
+# remaining `[OPEN]` in legal/terms-of-service.md section 1. Widening it one friend
+# at a time is the thing it exists to prevent: five friends is five people whose
+# assent is missing.
+readonly PULLFM_REGISTRATION_ALLOWLIST="${PULLFM_REGISTRATION_ALLOWLIST:-ope@312.dev}"
+
 # The backup credential, addressed BY TITLE rather than by item id, unlike its
 # twin in infra/lib/backup-common.sh. Both work - `op item get` takes either, and
 # these titles are unambiguous where the two WorkOS titles above are not - and
@@ -301,6 +353,12 @@ WORKOS_WEBHOOK_SECRET=${workos_webhook}
 PUBLIC_BASE_URL=${PULLFM_PUBLIC_BASE_URL}
 MUSICBRAINZ_USER_AGENT=${PULLFM_MB_USER_AGENT}
 CORS_ORIGINS=https://app-staging.pull.fm
+
+# Closed beta. Only these addresses may create an account; see the long comment
+# on PULLFM_REGISTRATION_ALLOWLIST above for why it is never empty here and why
+# emptying it is a gated launch act rather than a cleanup. Reversing it on the
+# node is the same one-line edit and restart as SEATGEEK_ENABLED.
+AUTH_REGISTRATION_ALLOWLIST=${PULLFM_REGISTRATION_ALLOWLIST}
 
 METRICS_TOKEN=${metrics_token}
 

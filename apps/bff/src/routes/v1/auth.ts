@@ -107,6 +107,104 @@
  * for an address that exists is exactly the enumeration oracle that route
  * spends thirty lines refusing to be. The oracle is the worse of the two, so
  * the residual stands and is written down here rather than discovered later.
+ *
+ * ---------------------------------------------------------------------------
+ * THE CLOSED-BETA ALLOWLIST SITS BESIDE THE GEO REFUSAL AND USES A DIFFERENT
+ * HOOK, AND THE DIFFERENCE IS FORCED RATHER THAN CHOSEN
+ *
+ * lib/registration-allowlist.ts carries the whole argument for why the list
+ * exists (the owner being the only End User is what makes SeatGeek's clause 4.3
+ * EULA duty have nothing to attach to, and that has to be enforced rather than
+ * hoped for). What belongs HERE is where it runs.
+ *
+ * IT CANNOT BE `onRequest`, AND THE GEO CHECK'S ANSWER IS WRONG FOR IT. The
+ * geo refusal reads a HEADER, which Fastify has already parsed by `onRequest`,
+ * so the earliest hook is also a usable one and it takes it. An address is in
+ * the request BODY, and at `onRequest` the body has not been read off the socket
+ * yet: `request.body` is undefined and there is nothing to compare. So the four
+ * hooks that could see it were considered in order:
+ *
+ *   preParsing      the body is still a stream. There is a parsed address here
+ *                   only if this hook parses one itself, which is a second
+ *                   parser that can disagree with the real one.
+ *   preValidation   the body is parsed but NOT validated. `email` may be absent,
+ *                   a number, an array or an object, `additionalProperties:
+ *                   false` has not run, and `format: email` has not run. A gate
+ *                   here has to re-implement the narrowing the schema already
+ *                   does, and a security check whose input contract differs from
+ *                   the handler's is a check that can be walked around by
+ *                   sending a shape it did not anticipate.
+ *   preHandler      the body is parsed AND validated, so `email` is a string
+ *                   that satisfied the schema, and the handler has not run.
+ *                   CHOSEN.
+ *   the handler     too late, and this is the whole point. See below.
+ *
+ * `preHandler` IS EARLY ENOUGH FOR THE PROPERTY THAT ACTUALLY MATTERS, which is
+ * not "as early as possible" but "before the identity provider is contacted".
+ * `POST /user_management/magic_auth/send` CREATES A WORKOS USER for any address
+ * handed to it and EMAILS that address, so a refusal that ran a moment later
+ * would leave a personal-data record at a processor for somebody we just refused
+ * AND put an unexpected sign-in mail in a stranger's inbox. Both of those calls
+ * happen inside `services.magicAuth.requestCode`, which the HANDLER invokes, and
+ * every `preHandler` runs before the handler. The send budgets are in the same
+ * method, so they too are downstream. The refused caller is therefore invisible
+ * to WorkOS and receives nothing.
+ *
+ * WHERE IT IS ENFORCED, AND THE ONE PLACE THE SHAPE HAD TO CHANGE:
+ *
+ *   `POST /auth/start`    THE point of enforcement. This is where an account
+ *                         comes into being, and where the provider is written
+ *                         to. `preHandler`.
+ *   `POST /auth/verify`   Also gated, `preHandler`, for the same reason the geo
+ *                         check gates it and one more. The geo reason:
+ *                         `establish()` writes the local `users` row, so a gate
+ *                         that stopped at step one would refuse the code and then
+ *                         complete a registration for anybody holding a code
+ *                         obtained elsewhere. The additional reason is specific
+ *                         to a list that CHANGES: a code lives ten minutes, so
+ *                         "you cannot get here without passing /auth/start" is
+ *                         true only if the list has not narrowed in between.
+ *                         Relying on that property would mean removing an address
+ *                         from the list does not take effect for ten minutes,
+ *                         which is not a property worth depending on when the
+ *                         alternative costs one line.
+ *   `GET /auth/callback`  Gated, but NOT with the hook, because there is no
+ *                         address anywhere in the request: the hosted flow sends
+ *                         a `code` and the address is only knowable from the
+ *                         provider's answer to it. So the check is in the
+ *                         handler, between `authenticateWithCode` and
+ *                         `establish`. That is late by the standard set above and
+ *                         it is the earliest point that exists. Being honest
+ *                         about what it does and does not buy: no local account
+ *                         is created and no session is returned, but the WorkOS
+ *                         user and session were already created by the hosted
+ *                         flow before we were called, and `WorkOsSession` carries
+ *                         no session id so there is nothing here to revoke. It is
+ *                         gated anyway rather than left open, because a
+ *                         deployment that turns the hosted flow on must not
+ *                         acquire an unguarded registration path by doing so.
+ *
+ * DELIBERATELY UNGATED, and this is the same line the geo refusal draws:
+ *
+ *   `/auth/refresh`  A session that was legitimately created keeps working.
+ *                    Refusing a refresh would lock out an account that already
+ *                    exists, which is a punishment rather than a control, and the
+ *                    control is about FORMING a relationship. The route also
+ *                    carries no address at all, so there is nothing an address
+ *                    gate could read even if one were wanted.
+ *   `/auth/logout`   Refusing a revocation traps a live session open on a device
+ *                    its owner is trying to leave. It must work from anywhere,
+ *                    always, for anybody.
+ *
+ * The residual, stated rather than left to be found: an address that is NOT on
+ * the list and whose session lapses cannot sign in again, because `/auth/verify`
+ * is gated and cannot tell an existing account from a new one without asking the
+ * database - which is the same enumeration oracle the geo residual above refuses
+ * to build, for the same reason. During a closed beta with one intended user that
+ * is the intent rather than a defect, and the US staging database held zero rows
+ * when the list was added, so nobody is affected today. It stops being acceptable
+ * the moment the beta has real users, which is the same moment the list should be
+ * emptied.
  */
 
 import type {
@@ -114,10 +212,12 @@ import type {
   FastifyReply,
   FastifyRequest,
   onRequestHookHandler,
+  preHandlerHookHandler,
 } from "fastify";
 
 import { errors } from "../../lib/errors.js";
 import { annotate } from "../../lib/openapi.js";
+import { decideRegistrationAllowlist } from "../../lib/registration-allowlist.js";
 import {
   COUNTRY_HEADER,
   decideRegistrationGeo,
@@ -236,6 +336,70 @@ export function registerAuthRoutes(
     // problem+json shape, with the request id in `instance`, that every other
     // refusal in this API produces.
     done(errors.regionUnavailable());
+  };
+
+  /**
+   * Records that a closed-beta refusal happened, and NOTHING ABOUT WHO.
+   *
+   * THE LABEL SET IS BOUNDED ON PURPOSE AND THE OBVIOUS LABEL IS ABSENT. The
+   * useful-looking label here would be the address, and it is exactly the one
+   * that cannot exist: an email address is client-controlled and unbounded, so
+   * labelling with it mints one time series per address a stranger types and
+   * turns `/metrics` into the outage it was added to detect. The `onResponse`
+   * hook in server.ts already makes this argument for route templates, and the
+   * geo counter makes it for the country code, which is bounded to 676 values
+   * precisely because it was checked. `route` is bounded by the route table:
+   * three templates, and no caller can invent a fourth.
+   *
+   * It is also the reason the address is not logged and no audit row is written.
+   * lib/audit.ts argues twice over that a refusal row carrying `ip` is personal
+   * data about somebody whose personal data we just declined to hold, and an
+   * address is worse: `audit_log` rows deliberately outlive the user. A counter
+   * tells an operator that refusals are happening and at what volume, which is
+   * what an operator needs, and it identifies nobody.
+   */
+  const countAllowlistRefusal = (request: FastifyRequest): void => {
+    services.metrics.counter(
+      "pullfm_registration_allowlist_refusals_total",
+      "Sign-in attempts refused because the address is not on the closed-beta allowlist.",
+      { route: request.routeOptions.url ?? "unrouted" },
+    );
+  };
+
+  /**
+   * Refuses account formation by an address that is not on the allowlist.
+   *
+   * `preHandler`, NOT `onRequest`, and the geo hook above is not a template for
+   * this one: it reads a header, which exists at `onRequest`, and this reads the
+   * body, which does not. The full comparison of the four candidate hooks, and
+   * the reason `preHandler` is still early enough (every path to WorkOS and to
+   * the send budgets runs inside the HANDLER), is in the header of this file.
+   *
+   * The body is validated by the time this runs, so `email` is a string that
+   * satisfied `format: email`. That is the point of choosing the hook after
+   * validation rather than before it: this hook and the handler narrow the body
+   * the same way, because the schema did it once for both.
+   */
+  const refuseUnlistedAddress: preHandlerHookHandler = (
+    request,
+    _reply,
+    done,
+  ) => {
+    const { email } = request.body as { email: string };
+
+    if (
+      decideRegistrationAllowlist(email, cfg.AUTH_REGISTRATION_ALLOWLIST)
+        .allowed
+    ) {
+      done();
+      return;
+    }
+
+    countAllowlistRefusal(request);
+    // Thrown rather than sent, so the central error handler produces the one
+    // uniform problem+json body. Every refused address gets byte-identical
+    // bytes: see the enumeration-oracle argument on `errors.registrationClosed`.
+    done(errors.registrationClosed());
   };
 
   /** Seals a session into the cookie and attaches it to the reply. */
@@ -371,11 +535,16 @@ export function registerAuthRoutes(
     "/auth/start",
     {
       onRequest: refuseRestrictedRegion,
+      // The address is in the body, so this cannot be an `onRequest` hook the way
+      // the region refusal above is. It is still ahead of every call this route
+      // makes to WorkOS and of both send budgets, because all of them are inside
+      // the handler. See the header of this file.
+      preHandler: refuseUnlistedAddress,
       schema: {
         operationId: "authStart",
         summary: "Request a magic-link sign-in code",
         description:
-          "Sends a one-time code to the address. Step one of two; exchange the code at POST /v1/auth/verify. The response is identical whether or not the address has an account, so it cannot be used to find out. Rate limited; a 429 carries Retry-After. An address that is sent a code and never verified leaves no account behind. Pull.fm is offered in the United States; a request from a region where it is not offered is refused with 451 before anything is sent.",
+          "Sends a one-time code to the address. Step one of two; exchange the code at POST /v1/auth/verify. The response is identical whether or not the address has an account, so it cannot be used to find out. Rate limited; a 429 carries Retry-After. An address that is sent a code and never verified leaves no account behind. Pull.fm is offered in the United States; a request from a region where it is not offered is refused with 451 before anything is sent. Pull.fm is also in a closed beta: while it is, an address that is not admitted is refused with 403 before any mail is sent, and the refusal is identical for every refused address so it cannot be used to discover which addresses are admitted.",
         tags: ["auth"],
         body: {
           type: "object",
@@ -400,7 +569,7 @@ export function registerAuthRoutes(
             },
             required: ["status", "expiresInSeconds", "message"],
           },
-          ...problemResponses(400, 429, 451, 503),
+          ...problemResponses(400, 403, 429, 451, 503),
         },
         ...annotate({ authz: "public", dast: "exclude" }),
       },
@@ -450,11 +619,17 @@ export function registerAuthRoutes(
       // `users` row, so a block that stopped at `/auth/start` would still let a
       // code obtained elsewhere complete a registration from a refused region.
       onRequest: refuseRestrictedRegion,
+      // Same argument for the allowlist, plus one the region check does not have:
+      // a code lives ten minutes, so trusting "you cannot get here without
+      // passing /auth/start" would mean an address removed from the list keeps
+      // working for ten minutes. Gating here makes a narrowed list take effect at
+      // once, and it costs one line.
+      preHandler: refuseUnlistedAddress,
       schema: {
         operationId: "authVerify",
         summary: "Exchange a magic-link code for a session",
         description:
-          "Step two of two. On success the response carries the session in the transport you asked for. Every rejected code returns the same 401 with the same body, so a failure says nothing about which part was wrong. Attempts are rate limited; a 429 carries Retry-After. Choose `cookie` for a browser client: the tokens are then sealed into an HttpOnly cookie and never appear in the response body at all. Refused with 451 from a region where Pull.fm is not offered.",
+          "Step two of two. On success the response carries the session in the transport you asked for. Every rejected code returns the same 401 with the same body, so a failure says nothing about which part was wrong. Attempts are rate limited; a 429 carries Retry-After. Choose `cookie` for a browser client: the tokens are then sealed into an HttpOnly cookie and never appear in the response body at all. Refused with 451 from a region where Pull.fm is not offered, and with 403 while Pull.fm is in a closed beta if the address is not admitted.",
         tags: ["auth"],
         body: {
           type: "object",
@@ -479,7 +654,7 @@ export function registerAuthRoutes(
         },
         response: {
           200: sessionResponse,
-          ...problemResponses(400, 401, 429, 451, 503),
+          ...problemResponses(400, 401, 403, 429, 451, 503),
         },
         ...annotate({ authz: "public", dast: "exclude" }),
       },
@@ -536,6 +711,10 @@ export function registerAuthRoutes(
       // A deployment that turns the hosted flow on must not acquire a second,
       // unguarded registration path by doing so.
       onRequest: refuseRestrictedRegion,
+      // NO `preHandler: refuseUnlistedAddress` here, and its absence is a decision
+      // rather than an omission: this request contains no address for a hook to
+      // read. The allowlist is applied inside the handler, at the first line where
+      // one exists. Nothing else in this file is enforced that late.
       schema: {
         operationId: "authCallback",
         summary: "INTERNAL. Hosted-redirect sign-in callback",
@@ -554,7 +733,7 @@ export function registerAuthRoutes(
         },
         response: {
           200: sessionResponse,
-          ...problemResponses(401, 429, 451, 503),
+          ...problemResponses(401, 403, 429, 451, 503),
         },
         ...annotate({ authz: "public", dast: "exclude" }),
       },
@@ -565,6 +744,36 @@ export function registerAuthRoutes(
         query.code,
         query.code_verifier,
       );
+
+      /**
+       * The allowlist, checked HERE rather than in a hook, because this is the
+       * first line at which an address exists.
+       *
+       * Nothing in the request names a person: the hosted flow sends a `code`,
+       * and the address is only knowable from the provider's answer to it. So
+       * `refuseUnlistedAddress` cannot be attached to this route at all, and the
+       * "refuse before the provider is contacted" rule that governs the other two
+       * routes is unachievable here rather than merely skipped. See the header of
+       * this file for what that does and does not buy: `establish()` never runs,
+       * so no local account and no session come out of it, but the WorkOS user and
+       * session already existed before this handler was entered and
+       * `WorkOsSession` carries no session id to revoke.
+       *
+       * A null address from the provider normalises to the empty string, which is
+       * on no list, so the unusual case fails closed.
+       */
+      if (
+        !decideRegistrationAllowlist(
+          session.user.email ?? "",
+          cfg.AUTH_REGISTRATION_ALLOWLIST,
+        ).allowed
+      ) {
+        countAllowlistRefusal(request);
+        // The identical error, so this refusal is indistinguishable from the two
+        // above and from each other.
+        throw errors.registrationClosed();
+      }
+
       return await establish(
         request,
         reply,
