@@ -37,7 +37,7 @@
 >
 > The applied plan was **6 imported, 0 added, 3 changed, 0 destroyed**. The three
 > changes were `pooler_enabled false -> true` on both endpoints and `protected =
-> "no"` written onto the adopted staging branch. `terraform plan` now reports no
+"no"` written onto the adopted staging branch. `terraform plan` now reports no
 > changes, with no `-var` overrides.
 >
 > **THIS ROOT NOW REQUIRES A GITIGNORED `terraform.tfvars`, WHICH IT DID NOT
@@ -57,7 +57,7 @@
 > **THE PERMANENT PLAN DIFF IS GONE, AND IT WAS THE MOST IMPORTANT THING HERE.**
 > An earlier revision of this banner said the plan was clean while
 > `terraform plan` reported `neon_endpoint.staging autoscaling_limit_max_cu
-> 8 -> 1` on every run: the live endpoint was 8 and the configuration said 1,
+8 -> 1` on every run: the live endpoint was 8 and the configuration said 1,
 > because 1 was `free_v3` arithmetic. Nobody applied it, because nobody believed
 > it. A root whose plan is never clean teaches everyone reading it to skip the
 > plan, which is worse than the drift it was hiding. See the long block above
@@ -135,10 +135,8 @@ source infra/lib/credentials.sh
 pullfm_load_credentials neon
 ```
 
-That exports `NEON_API_KEY` plus the R2 state pair, and nothing else. It reads
-the key from 1Password **by item ID**, because the item's title contains
-parentheses and an `op://` reference cannot address it by title. It then calls
-`pullfm_assert_neon_scope`, which lists projects with the key and refuses to
+That exports `NEON_API_KEY` plus the R2 state pair, and nothing else. It then
+calls `pullfm_assert_neon_scope`, which lists projects with the key and refuses to
 continue if it can see any project other than **`pull-fm-us`**, or any personal
 project at all.
 
@@ -152,6 +150,31 @@ no longer exists is a standing exemption nobody reads.
 argument is rendered into the plan file even when it comes from a `sensitive`
 variable, plan files get attached to pull requests, and this repository is
 public.
+
+**OPEN ITEM: the key is fetched from 1Password by ITEM ID, and it does not have
+to be.** `pullfm_load_credentials neon` runs
+`op read "op://MCP/<item-id>/password"`, and this file used to justify that by
+saying the item's title contains parentheses so an `op://` reference cannot
+address it by title. **The first half is true and the conclusion is not.**
+Measured 2026-07-30:
+
+```
+$ op read "op://MCP/Neon API Key (pull.fm)/password"
+[ERROR] invalid secret reference: invalid character in secret reference: '('
+
+$ op item get "Neon API Key (pull.fm)" --vault MCP --fields label=password --reveal
+<the same value; sha256 of both outputs matches>
+```
+
+So only the `op://` _reference syntax_ rejects the parenthesis. `op item get`
+addresses the same item **by title** and returns the identical secret, and
+`credentials.sh` already uses `op item get` elsewhere in the same file. That
+matters because `tools/check-public-identifiers.mjs` carries a detector for vault
+item ids whose stated reason is that "a vault item id is a direct object
+reference to a specific credential; it turns any vault access from a search
+problem into a fetch" - and one is currently hardcoded in a tracked file in a
+public repository. The fix belongs in `infra/lib/credentials.sh`, which this root
+does not own; the diff is written up rather than applied.
 
 ## Usage
 
@@ -478,13 +501,88 @@ it rather than assuming it.**
 branches ARE now available; the default branch is still unprotected, and the
 reason is no longer the plan - see `default_branch_protected` in `variables.tf`.
 
-**What replaced the allowance as the spend control, and it is not armed.** A
+**What replaced the allowance as the spend control, and it is now ARMED.** A
 fixed monthly allowance that simply stops is a crude cap, but it is a cap. On a
 paid plan, overspend is money. The mechanism for bounding it is `var.quota`,
-enforced server-side across the project, and it is still `null`. It is left null
-because exceeding a quota suspends every compute in the project, which on `main`
-means production is down, so the number is the owner's call. Named here rather
-than implied.
+enforced server-side across the project, and as of 2026-07-30 it holds real
+numbers. See the next section.
+
+### The spend cap, and how to see it coming
+
+**`var.quota` is armed to a USD 35 per month budget, and the owner accepted the
+outage risk.** Exceeding a quota suspends every active compute in the project and
+Neon refuses to start them again until the billing period rolls over, which on
+`main` means **production is down**. That is the accepted trade: an outage rather
+than a surprise bill. The full derivation from USD 35 to each number, and the
+pricing it was computed from, is in the comment block above `variable "quota"` in
+`variables.tf`. The live values:
+
+| Dimension              | Value          | Means                                                                    |
+| ---------------------- | -------------- | ------------------------------------------------------------------------ |
+| `compute_time_seconds` | `720000`       | 200 CU-hours, USD 21.20 at USD 0.106/CU-hour. **The cap that matters.**  |
+| `data_transfer_bytes`  | `520000000000` | 520 GB. 500 GB is included, so USD 2.00 of overage worst case.           |
+| `active_time_seconds`  | `0`            | Unlimited. Not a billed metric; capping it can cost an outage for USD 0. |
+| `written_data_bytes`   | `0`            | Unlimited. Not populated on `launch_v3` and not in the price list.       |
+| `logical_size_bytes`   | `0`            | Unlimited. **See the warning below before you change this one.**         |
+
+Worst case is USD 21.20 compute + USD 2.00 egress (both hard-capped) + USD 9.00
+reserved for branch storage and instant restore (**neither of which any quota
+dimension can bound**) = **USD 32.20**, or 8.0% under budget.
+
+**`compute_time_seconds` is CU-seconds, not wall-clock seconds.** One active
+second costs 0.25 of it at the autoscaling floor and 8 at the ceiling, so on this
+project the two differ by up to **32x**. `active_time_seconds` is the wall-clock
+one. Sizing a spend cap off the wrong one is the single easiest way to be wrong
+here by a factor of thirty-two.
+
+**DO NOT set `logical_size_bytes` to anything between 1 and 25 GB.** It caps a
+**single branch** for that branch's **lifetime**, not per billing period, so
+tripping it does not clear at the rollover. `infra/mb-loader/mb-canonical-load.sh`
+is stage-then-swap: it builds a complete second copy of the 11.05 GB canonical
+table with all its indexes and only then drops the first, so the staging branch
+peaks near **22 GB** every time `pullfm-mb-canonical.timer` finds a new dump. A
+cap sized to the steady state suspends staging on a scheduled job. A `validation`
+in `variables.tf` refuses such a value.
+
+**`launch_v3` has no base fee and no included compute hours.** Older comments in
+this repository said "compute past the included hours is billed". That described
+the retired Launch plan. The current one is pure consumption at USD 0.106 per
+CU-hour from the first CU-second, so there is no allowance to budget against.
+
+**Watch consumption, because with a hard quota the first signal is an outage.**
+Every number needed is on the free `GET /projects/{id}` call:
+
+```bash
+source infra/lib/credentials.sh && pullfm_load_credentials neon
+curl -sS -H "Authorization: Bearer ${NEON_API_KEY}" \
+  https://console.neon.tech/api/v2/projects/cold-brook-02833828 |
+  jq '.project | {
+        period_start: .consumption_period_start,
+        period_end:   .consumption_period_end,
+        compute_used: .compute_time_seconds,
+        compute_cap:  .settings.quota.compute_time_seconds,
+        compute_pct:  (.compute_time_seconds / .settings.quota.compute_time_seconds * 100),
+        egress_used:  .data_transfer_bytes,
+        egress_cap:   .settings.quota.data_transfer_bytes,
+        storage_gb:   (.synthetic_storage_size / 1e9),
+        suspended:    (.compute_time_seconds >= .settings.quota.compute_time_seconds)
+      }'
+```
+
+Note that Neon **omits zero-valued dimensions** from `settings.quota`, so the
+response carries only the two that are set. An absent key means unlimited, not
+missing.
+
+`GET /consumption_history/projects` is **not** available on `launch_v3` (it
+answers `"This endpoint is not available. It is included with Scale plans and
+above."`), so there is no per-hour history to trend from at this plan level. The
+project object's running totals for the current period are the signal.
+
+**The quota is per project; the invoice is per organisation.** `settings.quota`
+bounds `cold-brook-02833828` and nothing else, so a second project in this
+organisation would be entirely outside the cap. The compensating control is
+`pullfm_assert_neon_scope` in `infra/lib/credentials.sh`, which refuses to run if
+the key can see any project other than `pull-fm-us`.
 
 ### The security regression, named
 
@@ -500,10 +598,10 @@ narrows what reaching it is worth.
 
 Three further risks come from where the state lives rather than from Neon:
 
-| Risk              | What                                                                         |
-| ----------------- | ---------------------------------------------------------------------------- |
-| `PULLFM-RISK-008` | The database password is plaintext in state, and R2 cannot version objects   |
-| `PULLFM-RISK-009` | The state R2 key is account-scoped, so it also reaches the backups bucket    |
+| Risk              | What                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PULLFM-RISK-008` | The database password is plaintext in state, and R2 cannot version objects                                                                                                                                                                                                                                                                                      |
+| `PULLFM-RISK-009` | The state R2 key is account-scoped, so it also reaches the backups bucket                                                                                                                                                                                                                                                                                       |
 | `PULLFM-RISK-010` | Retired by the posture change, not by the bucket moving. The residency posture is United States only and R2 has no `us` jurisdiction, so `pull-fm-tfstate` being in the default jurisdiction is now the intended shape rather than a gap. Re-read it in `security/accepted-risks.md` before relying on either reading; that file is not updated by this change. |
 
 ## What this configuration does not manage

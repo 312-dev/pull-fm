@@ -135,3 +135,37 @@ app_role_name = "pullfm_app"
 # environment roots when the plan allows it; until then the credential is the
 # only control on a publicly reachable endpoint.
 allowed_ips = []
+
+# --- consumption quota -----------------------------------------------------
+#
+# DELIBERATELY NOT SET HERE. `var.quota` carries a real default, sized to the
+# USD 35 per month budget, and it is ARMED: 720000 compute-seconds (200 CU-hours,
+# USD 21.20) and 520000000000 transfer bytes (520 GB), with the other three
+# dimensions at 0 for unlimited. Overriding it in a gitignored file is how the
+# spend cap ends up different on one machine than in the repository.
+#
+# EXCEEDING IT SUSPENDS EVERY ACTIVE COMPUTE IN THE PROJECT until the billing
+# period rolls over, which on `main` means production is down. That outage risk
+# was accepted by the owner in exchange for a hard bill ceiling.
+#
+# THE ONE TIME YOU DO SET IT HERE is to get out of a suspension before the period
+# rolls over. Neon's documented recovery is to set the quota to zero, so nothing
+# validates that the cap is non-zero:
+#
+#   quota = {
+#     active_time_seconds  = 0
+#     compute_time_seconds = 0
+#     written_data_bytes   = 0
+#     data_transfer_bytes  = 0
+#     logical_size_bytes   = 0
+#   }
+#
+# Apply that, confirm the computes start, then DELETE the block again so the cap
+# comes back from the default. A repository whose spend cap is disarmed in an
+# untracked file is a repository with no spend cap.
+#
+# Read the comment block above `variable "quota"` in variables.tf before changing
+# any number: it carries the pricing, its URL, and the arithmetic from USD 35 to
+# each value. In particular do NOT put a small number on `logical_size_bytes` -
+# it is per branch and for the branch's lifetime, and the MusicBrainz loader
+# legitimately peaks staging near 22 GB.

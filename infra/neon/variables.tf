@@ -425,6 +425,177 @@ variable "allowed_ips" {
 }
 
 # --- consumption quota -------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# THIS IS NOW ARMED. IT WAS NULL, AND THE COMMENT THAT EXPLAINED WHY IT WAS
+# NULL SAID THE DECISION WAS THE OWNER'S. THE OWNER HAS MADE IT.
+# ---------------------------------------------------------------------------
+#
+# THE DECISION, RECORDED BECAUSE ITS CONSEQUENCE IS AN OUTAGE. The budget is
+# USD 35 per month for Neon. The owner was told plainly that exceeding a quota
+# suspends every active compute in the project and that Neon refuses to start
+# them again until the billing period rolls over, which on `main` means
+# production is down, and accepted that: an outage rather than a surprise bill.
+# So this is armed rather than replaced with an alert. Anyone reading this after
+# an outage should know the suspension is the control working, not failing.
+#
+# ---------------------------------------------------------------------------
+# THE PRICING THIS ARITHMETIC IS BUILT ON. READ IT BEFORE CHANGING A NUMBER.
+# ---------------------------------------------------------------------------
+#
+# Launch plan (`launch_v3`), read from https://neon.com/pricing and
+# https://neon.com/docs/introduction/usage-calculations on 2026-07-29:
+#
+#   base fee                     USD 0.00     pay-as-you-go, NO monthly minimum
+#   compute                      USD 0.106    per CU-hour
+#   root + child branch storage  USD 0.35     per GB-month
+#   instant restore (PITR)       USD 0.20     per GB-month
+#   snapshots                    USD 0.09     per GB-month  (none in use)
+#   public network transfer      500 GB per project included, then USD 0.10/GB
+#   extra branches               USD 1.50 per branch-month past 10 (2 in use)
+#
+# THERE IS NO BASE FEE AND THERE ARE NO INCLUDED COMPUTE HOURS, and that is the
+# single most important correction to the older comments in this file. Several
+# of them, and infra/neon/README.md, said "compute past the INCLUDED HOURS is
+# billed". That describes the retired Launch plan (a monthly fee with an
+# allowance). The current Launch plan is pure consumption: the FIRST CU-second
+# of the month is billed. Budgeting against a non-existent allowance would have
+# over-provisioned this quota by the size of that allowance.
+#
+# Storage is normalised to a 744 hour month and GB means 1e9 bytes, not 2^30:
+# byte-hours / 744 / 1e9 = GB-months.
+#
+# ---------------------------------------------------------------------------
+# active_time_seconds VERSUS compute_time_seconds. CONFUSING THESE IS A 32x
+# ERROR ON THIS PROJECT, SO IT IS SPELLED OUT RATHER THAN ASSUMED.
+# ---------------------------------------------------------------------------
+#
+#   active_time_seconds  WALL-CLOCK seconds a compute is not scaled to zero,
+#                        summed over every compute in the project. NOT weighted
+#                        by compute size. NOT a billed metric.
+#   compute_time_seconds CU-SECONDS: wall-clock seconds multiplied by the
+#                        compute's size in CU. One second at 0.25 CU costs 0.25
+#                        of it; one second at 8 CU costs 8.
+#
+# Every endpoint in this project autoscales 0.25 to 8 CU, so one active second
+# can cost anywhere from 0.25 to 8 CU-seconds: a THIRTY-TWO-FOLD spread (8 /
+# 0.25). Sizing a spend cap off active time would be wrong by up to that factor
+# at the top of the range.
+#
+# compute_time_seconds IS the billed compute metric. It is the legacy name for
+# what the usage-based API now calls `compute_unit_seconds`, and CU-hours are
+# just compute_time_seconds / 3600. That is why the cap goes on this dimension
+# and not the other one.
+#
+# Measured on the live project on 2026-07-30, which is the ratio to sanity-check
+# against: 7,464 compute-seconds against 19,432 active seconds, so the project
+# averaged 0.384 CU. The computes sit near the 0.25 floor and burst rarely.
+#
+# ---------------------------------------------------------------------------
+# FROM USD 35 TO THE NUMBERS BELOW.
+# ---------------------------------------------------------------------------
+#
+# STEP 1: RESERVE WHAT THE QUOTA CANNOT CAP. Two of the four live billing lines
+# are storage, and NO quota dimension bounds storage spend (see
+# logical_size_bytes below for why the one that looks like it does, does not).
+# They therefore come off the top as a reserve rather than being capped:
+#
+#   branch storage      measured 2026-07-30: staging 11,051,925,504 bytes
+#                       (11.05 GB, the MusicBrainz canonical data) plus main
+#                       32,907,264 bytes (0.033 GB). 11.08 GB x 0.35 = USD 3.88.
+#                       RESERVED USD 5.00, which covers growth to about 14.3 GB.
+#   instant restore     7 day window (history_retention_seconds = 604800). At
+#                       steady state the window holds roughly one MusicBrainz
+#                       reload's worth of superseded pages, so about 11 GB
+#                       resident: 11 x 0.20 = USD 2.20. RESERVED USD 4.00, which
+#                       covers about two reload cycles sitting in the window at
+#                       once.
+#
+#   uncappable reserve  USD 9.00
+#
+# STEP 2: WHAT IS LEFT FOR THE CAPPED LINES. 35.00 - 9.00 = USD 26.00, split
+# between compute and egress.
+#
+# STEP 3: EGRESS. 500 GB per project is included and the project transferred
+# 987,517 bytes (under 1 MB) in its first day, so the allowance is roughly four
+# orders of magnitude above real use. The cap is set at 520 GB: 20 GB past the
+# allowance at USD 0.10 = USD 2.00 worst case. That buys a hard money bound for
+# almost nothing, because 520 GB is still about 17,000x measured use, so it
+# cannot trip on a normal month. It is set at 520 and not at exactly 500 on
+# purpose: a cap at the allowance boundary would suspend production at the
+# moment egress cost begins, which is an outage that saves USD 0.00.
+#
+# STEP 4: COMPUTE. 26.00 - 2.00 = USD 24.00, which at USD 0.106 per CU-hour is
+# 226.4 CU-hours. ROUNDED DOWN to 200 CU-hours = 720,000 CU-seconds = USD 21.20.
+#
+# STEP 5: THE HEADROOM, STATED. Worst case with everything at its cap or its
+# reserve:
+#
+#   compute        720,000 / 3600 x 0.106      = USD 21.20   (hard-capped)
+#   egress         (520 - 500) x 0.10          = USD  2.00   (hard-capped)
+#   branch storage reserve                     = USD  5.00   (NOT capped)
+#   instant restore reserve                    = USD  4.00   (NOT capped)
+#   snapshots, extra branches, base fee        = USD  0.00
+#                                                ------------
+#                                                USD 32.20
+#
+# That is 8.0% under the USD 35 budget, and the headroom is doing three specific
+# jobs rather than being decorative: it absorbs the two uncapped storage lines
+# drifting above their reserves before anyone notices; it absorbs Neon metering
+# hourly and enforcing the quota periodically rather than instantaneously, so
+# consumption can overshoot the trip point slightly; and it means a month that
+# lands near the cap does not produce a bill over budget, which is the whole
+# point of a cap.
+#
+# ---------------------------------------------------------------------------
+# THE PART THAT MATTERS OPERATIONALLY, AND IT IS NOT COMFORTABLE.
+# ---------------------------------------------------------------------------
+#
+# 200 CU-hours is NOT a lot of headroom over what this project costs simply by
+# existing. An endpoint held warm at the 0.25 CU FLOOR for a whole 744 hour
+# month consumes 744 x 0.25 = 186 CU-hours, or USD 19.72. That is 93% of this
+# quota spent on production merely being reachable, before one query.
+#
+# It does not trip TODAY because scale-to-zero is working: `main` was active
+# 2,168 seconds out of 33,600 wall-clock (6.5%) and burned 551 compute-seconds,
+# which extrapolates to about 12 CU-hours a month. Staging's MusicBrainz load
+# costs 6,913 compute-seconds (1.92 CU-hours) per run at roughly four runs a
+# month, so about 8 CU-hours. Today's regime is therefore around 21 CU-hours a
+# month against a 200 CU-hour cap: nearly 10x headroom.
+#
+# THE THING THAT CHANGES THAT IS PRODUCTION GETTING TRAFFIC. Once `main` stops
+# scaling to zero - real users, or merely a health check or a pooler keepalive
+# often enough to defeat the five minute suspend - it alone takes 186 of the 200
+# and this quota becomes a live outage risk within days. Two consequences, both
+# deliberate:
+#
+#   1. NEVER set suspend_timeout_seconds to -1 on any endpoint in this project.
+#      Scale-to-zero is not a nicety here, it is the reason the budget fits.
+#      `staging_suspend_timeout_seconds` above already says this; it is true of
+#      `main` for a harder reason.
+#   2. Consumption must be watched BEFORE the cliff, because with a hard quota
+#      and no warning the first signal is total database unavailability. The
+#      check is in infra/neon/README.md under "The spend cap, and how to see it
+#      coming".
+#
+# Stated plainly so nobody rediscovers it during an incident: USD 35 a month on
+# `launch_v3` buys about 226 CU-hours after storage, and an always-warm 0.25 CU
+# production compute is 186 of them. The budget is roughly 1.2x the cost of the
+# database existing. That is a fact about the budget, not a bug in the quota.
+#
+# ---------------------------------------------------------------------------
+# THE QUOTA IS PER PROJECT, AND THE BUDGET IS PER ORGANISATION.
+# ---------------------------------------------------------------------------
+#
+# `settings.quota` bounds `cold-brook-02833828` and nothing else. The invoice is
+# the organisation's. This is not hypothetical: the v2 consumption API still
+# reports 8,247 compute-unit-seconds for the retired EU project
+# `steep-frost-83698289` inside the CURRENT billing period, because it was
+# deleted partway through it. That spend is already incurred and does not recur
+# (GET on that project now returns 404), but it is the demonstration: a second
+# project in this organisation would be entirely outside this cap. The
+# compensating control is `pullfm_assert_neon_scope` in infra/lib/credentials.sh,
+# which refuses to run if the key can see a project other than `pull-fm-us`.
 
 variable "quota" {
   type = object({
@@ -435,32 +606,131 @@ variable "quota" {
     logical_size_bytes   = optional(number, 0)
   })
   description = <<-DESC
-    Per-project consumption quota. When a quota is exceeded Neon suspends every
-    active compute in the project and refuses to start them again until the
-    billing period rolls over. Zero means unlimited for that dimension.
+    Per-project consumption quota, sized to a USD 35 per month budget on the
+    `launch_v3` plan. When a quota is exceeded Neon suspends every active compute
+    in the project and refuses to start them again until the billing period rolls
+    over. Zero means unlimited for that dimension.
+
+    ARMED, WITH THE OUTAGE RISK ACCEPTED. On `main` a suspension means production
+    is down. That is the accepted trade: an outage rather than a surprise bill.
+    The full derivation from USD 35 to each number is in the comment block above
+    this variable, including the pricing it was computed from and its URL.
 
     THIS IS THE SPEND CAP HETZNER DOES NOT HAVE. docs/PLAN.md section 2 records
     Gate $ as "one vendor armed, one vendor limitation": Hetzner publishes no
     budget API and the operator could not find the option in the console either.
-    Neon does have one, it is enforced server-side, and it is declarable here.
+    Neon does have one, it is enforced server-side, and it is now declared.
 
-    Null by default because the block is Optional+Computed in the provider, so
-    omitting it produces no diff against the adopted project.
+    TWO OF THE FIVE DIMENSIONS ARE BOUND AND THREE ARE DELIBERATELY UNLIMITED.
+    Zero is not "not got round to it" in any of the three cases:
 
-    THE CONDITION THIS WAS WAITING FOR HAS ALREADY HAPPENED, AND IT IS STILL
-    NULL. The old note said "set it in the same change that moves the org off the
-    Free plan, where a quota starts to mean money rather than an allowance that
-    simply stops". The US project is on launch_v3. Compute past the included
-    hours is billed, so overspend is now money and not a stopped allowance, and
-    this is the only control in this repository that bounds it: it is enforced by
-    Neon, project-wide, and it is the mechanism `staging_max_cu` was wrongly
-    being asked to stand in for.
+      active_time_seconds   0, UNLIMITED. It is not a billed metric. Two computes
+                            warm at 0.25 CU cost exactly what one warm at 0.5 CU
+                            costs but consume twice the active time, so a cap
+                            here can suspend production while spend is far under
+                            budget: an outage that saves nothing.
+                            compute_time_seconds already dominates it as a spend
+                            control, since every active second costs at least
+                            0.25 CU-seconds at the autoscaling floor.
 
-    Left null rather than guessed at, because a quota that is exceeded SUSPENDS
-    EVERY ACTIVE COMPUTE IN THE PROJECT until the billing period rolls over,
-    which on the `main` branch means production is down. Picking that number is
-    the owner's call and it needs the plan's included-hours figure in front of
-    whoever picks it. It is a named gap, not an oversight.
+      compute_time_seconds  720,000 = 200 CU-hours = USD 21.20 at USD 0.106 per
+                            CU-hour. This is the billed compute metric and the
+                            only dimension that can run away, so it carries the
+                            cap. Project-wide, so a runaway load test on staging
+                            spends production's budget - which is exactly the
+                            thing `staging_max_cu` was wrongly being asked to
+                            prevent, and could not, because a per-endpoint
+                            ceiling bounds one compute's peak and not spend.
+
+      written_data_bytes    0, UNLIMITED, and this one is evidence-based rather
+                            than argued. The live project reports 0 written bytes
+                            project-wide AND 0 on both branches, inside a
+                            consumption period that contains an 11 GB COPY. The
+                            metric is not populated on `launch_v3`; it is a
+                            legacy dimension with no counterpart in the v2
+                            metrics and no line in the price list, so it bounds
+                            no spend. A number here would be inert at best, and
+                            an outage trigger nobody reasoned about if Neon ever
+                            starts populating it.
+
+      data_transfer_bytes   520,000,000,000 = 520 GB. 500 GB per project is
+                            included, so the worst case this permits is 20 GB of
+                            overage at USD 0.10 = USD 2.00. Measured use is under
+                            1 MB a day, so the cap is about 17,000x real traffic:
+                            a hard money bound that cannot trip normally.
+
+      logical_size_bytes    0, UNLIMITED, AND THIS IS THE ONE WORTH READING. It
+                            is not a monthly spend dimension at all: it is the
+                            maximum size ANY ONE BRANCH may reach, it applies for
+                            the branch's LIFETIME rather than per billing period,
+                            and exceeding it suspends that branch's compute. So
+                            it does not clear at the rollover the way the others
+                            do; it needs a human.
+
+                            The value that would make it a spend control is about
+                            14 GB, bounding branch storage near the USD 5.00
+                            reserve. THAT VALUE WOULD SUSPEND STAGING ON THE NEXT
+                            SCHEDULED JOB. infra/mb-loader/mb-canonical-load.sh
+                            is stage-then-swap: it CREATEs mb.canonical_stage_*,
+                            COPYs the whole dump in, builds five or six indexes,
+                            ANALYZEs, and only then DROPs mb.canonical and
+                            renames. Both full copies, heap and indexes, coexist
+                            for the entire load, so the branch peaks at roughly
+                            2x its steady 11.05 GB - about 22 GB - every time
+                            pullfm-mb-canonical.timer finds a new dump.
+
+                            A cap high enough to clear that peak safely (say 30
+                            to 40 GB) bounds storage at USD 10.50 to USD 14.00
+                            per branch, which is not a bound inside a USD 35
+                            budget. And because the limit is per branch it never
+                            bounds the project's total storage anyway. So the
+                            dimension is a branch-size guardrail, not a spend
+                            cap, and using it as one here buys a self-inflicted
+                            outage on a timer. Storage is MONITORED instead; see
+                            infra/neon/README.md.
+
+    SETTING THIS TO ALL ZEROES IS THE DOCUMENTED WAY OUT OF A SUSPENSION. Neon's
+    own guidance for restoring access before the billing period rolls over is to
+    set the quota to 0. That is why nothing here validates that the cap is
+    non-zero: such a validation would block the recovery path during the outage
+    it was meant to prevent. The validations below bound it from ABOVE only.
   DESC
-  default     = null
+
+  default = {
+    active_time_seconds  = 0
+    compute_time_seconds = 720000
+    written_data_bytes   = 0
+    data_transfer_bytes  = 520000000000
+    logical_size_bytes   = 0
+  }
+
+  # Bound from above, never from below. 900,000 CU-seconds is 250 CU-hours, or
+  # USD 26.50 at USD 0.106 - the absolute most the USD 35 budget can buy once the
+  # USD 9.00 of uncappable storage is reserved. This catches the fat-finger that
+  # matters, which is an extra zero: 7,200,000 would be 2,000 CU-hours and USD
+  # 212. It does NOT encode the price, so it does not silently rot into a wrong
+  # number if Neon reprices; it encodes the ceiling the price implies today, and
+  # the arithmetic to redo is in the comment block above.
+  validation {
+    condition     = var.quota == null || var.quota.compute_time_seconds <= 900000
+    error_message = "quota.compute_time_seconds must not exceed 900000 (250 CU-hours). At USD 0.106 per CU-hour that is USD 26.50, which is all the USD 35 monthly budget leaves after reserving USD 9.00 for branch storage and instant restore, neither of which any quota dimension can bound. The armed value is 720000 (200 CU-hours, USD 21.20). Redo the arithmetic in the comment above variable \"quota\" before raising this."
+  }
+
+  # 600 GB permits 100 GB past the 500 GB included allowance, or USD 10.00 - the
+  # most a single line can take out of this budget before the compute cap has to
+  # shrink to pay for it. The armed value is 520 GB (USD 2.00 worst case).
+  validation {
+    condition     = var.quota == null || var.quota.data_transfer_bytes <= 600000000000
+    error_message = "quota.data_transfer_bytes must not exceed 600000000000 (600 GB). 500 GB per project is included on launch_v3, so 600 GB already permits USD 10.00 of egress overage at USD 0.10/GB. The armed value is 520000000000 (520 GB, USD 2.00 worst case)."
+  }
+
+  # logical_size_bytes is per branch and for the branch's LIFETIME, and the
+  # MusicBrainz loader peaks staging at about 22 GB (2x its steady 11.05 GB)
+  # because it builds a full second copy before dropping the first. A cap below
+  # 25 GB therefore suspends staging on a scheduled job and does not clear at the
+  # billing rollover. Zero (unlimited) is the armed value and stays permitted.
+  validation {
+    condition     = var.quota == null || var.quota.logical_size_bytes == 0 || var.quota.logical_size_bytes >= 25000000000
+    error_message = "quota.logical_size_bytes must be 0 (unlimited) or at least 25000000000 (25 GB). It caps a SINGLE branch for that branch's LIFETIME, not per billing period, so tripping it does not clear at the rollover. infra/mb-loader/mb-canonical-load.sh is stage-then-swap and holds two full copies of the 11.05 GB canonical table at once, peaking near 22 GB, so any lower cap suspends staging the next time pullfm-mb-canonical.timer finds a new dump. See the comment above variable \"quota\"."
+  }
 }
