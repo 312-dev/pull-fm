@@ -9,7 +9,7 @@
  *
  * Three groups here carry more weight than the rest:
  *
- *   THE WIDENING CASES. `owner+anything@`, `o.w.n.e.r@` and `owner@sub.domain` must
+ *   THE WIDENING CASES. `owner+anything@`, `o.w.n.e.r@` and `owner@sub.example.test` must
  *   NOT be admitted by an entry that says `owner@example.test`. Every one of them is
  *   a way an allowlist can silently admit an address nobody put on it, which is
  *   the failure mode that cannot be recovered from: the account exists and the

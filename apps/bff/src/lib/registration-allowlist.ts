@@ -123,7 +123,8 @@ export interface AllowlistDecision {
  *
  *   Here, the argument is that both transformations WIDEN AN ACCESS-CONTROL LIST
  *   in response to a client-controlled string. Strip plus tags and
- *   `gray+anyone@grayada.ms` is admitted by an entry that says `gray@grayada.ms`;
+ *   `owner+anyone@example.test` is admitted by an entry that says
+ *   `owner@example.test`;
  *   strip dots and `g.r.a.y@…` is too. An allowlist that admits addresses nobody
  *   put on it is not an allowlist. The failure it would cause is silent and
  *   unrecoverable - the account exists, the collection happened - whereas the
@@ -233,7 +234,7 @@ export function parseRegistrationAllowlist(raw: string): ParsedAllowlist {
  * so it checks exactly that and nothing more.
  */
 function whyNotAnAddress(entry: string): string | null {
-  // FIRST, and the order is deliberate. `a@b.com c@d.com` is a missing comma, and
+  // FIRST, and the order is deliberate. `a@example.test c@example.test` is a missing comma, and
   // it is both the likeliest typo here and the one whose other symptoms are
   // misleading: reported by @-count it comes back as "more than one @", which
   // sends the operator looking for the wrong thing. The entry has already been

@@ -199,7 +199,7 @@ describe("the gate, on the route where an account comes into being", () => {
     // So be precise about where trimming IS load-bearing, because a reader who
     // saw only this test could reasonably delete it:
     //
-    //   THE OPERATOR'S VALUE. `AUTH_REGISTRATION_ALLOWLIST=" a@b.com , c@d.com "`
+    //   THE OPERATOR'S VALUE. `AUTH_REGISTRATION_ALLOWLIST=" a@example.test , c@example.test "`
     //   is exactly what a shell heredoc produces, and every entry there arrives
     //   padded. src/lib/registration-allowlist.test.ts covers it.
     //   THE CALLBACK PATH. That address comes from the identity provider's JSON

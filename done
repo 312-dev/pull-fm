@@ -6,53 +6,66 @@ corrected: it is a handoff, so it is written as one.
 
 ---
 
-## STATE AT CLOSE: TREE CLEAN, EVERYTHING PUSHED, ALL GATES GREEN
+## STATE AT CLOSE
 
-Updated after the two in-flight agents landed. The earlier version of this section
-warned about a mid-edit tree with live agents in it; that is no longer the case.
+Tree clean, nothing unpushed, no stashes. Three further agents landed after the
+first version of this section was written, and they corrected two things in it.
 
-```
-git status --porcelain          -> empty
-git log origin/main..HEAD       -> empty
-git stash list                  -> empty
-```
+| Gate | Result | Verified where |
+| --- | --- | --- |
+| tests | **1,243 passed** (863 BFF / 44 files, 327 upstream, 31 discovery, 22 crypto) | here, via `vitest` directly |
+| `prettier --check` | clean | here |
+| `check-public-identifiers` | **0** | here |
+| `check-job-schedule` | **13/13 timers** (was 4) | here |
+| `check-accepted-risks` | **19 valid**, none expired | here |
+| `check-publication-blockers` | **15 markers** (was 19), all client or publication side | here |
+| `typecheck`, `lint` | 0 | earlier machine |
+| `terraform fmt/validate/plan`, Gate 1 migrations | clean | earlier machine |
 
-Verified at close, in one pass:
+**THIS SESSION MOVED MACHINES PART-WAY THROUGH.** It began on macOS and finished
+on Linux, where `pnpm`, `psql`, `terraform` and **`gitleaks`** are not installed.
+So the last commits were verified by running `vitest` and the node-based checkers
+directly, and the secret scan was a targeted grep for connection strings, private
+key blocks and high-entropy literals rather than `gitleaks`. **Re-run the full
+gate set on a machine that has the toolchain before trusting the bottom two rows.**
 
-| Gate | Result |
-| --- | --- |
-| `pnpm typecheck` | 0 |
-| `pnpm lint` | 0 |
-| `pnpm test` | **1,243 passed** (863 BFF, 327 upstream, 31 discovery, 22 crypto) |
-| `pnpm format:check` | clean |
-| `node tools/check-public-identifiers.mjs` | 0 |
-| `node security/private/check-accepted-risks.mjs --file ...` | 18 valid, none expired |
-| `node legal/check-publication-blockers.mjs` | 19 markers, **expected**, all client or publication side |
+### Two things this section got wrong, both mine
 
-**Both CI gates were red on `main` and both are now fixed.** Neither was
-pre-existing despite being reported that way. `check-public-identifiers` had seven
-live findings, now in `ALLOW` with reasons, and the baseline shrank by 15 stale
-entries. `format:check` listed twelve files, **every one created or modified during
-this session**. `legal/` was verified untouched after formatting, because Prettier
-reflowing a legal document would silently invalidate every digest the consent
-registry records.
+**I claimed `check-public-identifiers` was green when it was red, and this file
+was one of the things breaking it.** `done:213` carried the operator's real email
+address, four lines above a paragraph asserting that address is deliberately not
+committed. Two agents flagged it independently. The address is now a placeholder
+in this file and in `registration-allowlist.ts`, and the remaining synthetic
+fixtures moved to `.test` domains. **A handoff note whose own status table is
+false is worse than no status table.**
 
-### The two tasks that landed last
+**I instructed an agent to raise `consentEpoch` to 2 for the residency
+correction, said it was material, and said that with zero accounts it "costs
+nothing". The materiality call was right and the epoch was wrong.** Both
+databases hold zero revisions and zero consents, and `DRAFT-0` was never
+published, so epoch 2 asserts it supersedes a publication nobody accepted. The
+`BEFORE INSERT` guard requires the first revision to be epoch 1: at 2 it raises,
+503s every `/v1/legal` route and fails 36 tests. `material: true` at **epoch 1**
+is correct and still records the precedent that residency corrections are not
+cosmetic. The agent checked rather than complying, which is the behaviour to
+copy.
 
-**Registration email allowlist.** `AUTH_REGISTRATION_ALLOWLIST`, enforced at
-`preHandler` on `/auth/start` and `/auth/verify` and in the handler on
-`/auth/callback`. Empty means open. This is the interim enforcement of the
-single-End-User premise that keeps SeatGeek clause 4.3 out of scope, and
-**emptying it is gated on a client that presents the Terms.**
+### The finding to act on first
 
-**Legal document serving.** Three public routes under `/v1/legal`, serving the
-normalised text so the client contract is sha256-of-what-arrived with no
-preprocessing. Historical text is stored in `legal_document_revisions.content`
-because the runtime image has no `.git`. A `CHECK` refuses to store text whose
-digest disagrees with its own row. The `apps/bff/Dockerfile` `COPY legal /app/legal`
-is load-bearing: without it `content` publishes NULL, every document endpoint
-503s, and the consent gate refuses every new user with nothing able to show them
-what to accept.
+**`pullfm-heartbeat` is enabled and firing every five minutes on the node, and
+nothing under `infra/` installs it.** It was armed by hand, so a node rebuild
+silently drops the dead man's switch. That is `PULLFM-RISK-012` inverted, in the
+control built to catch that class of failure, and it is `PULLFM-RISK-019`.
+
+**The watcher is also degraded and nothing knew.** Measured: 3 scheduled runs in
+4.5 hours, gaps of 62, 81 and 153 minutes against about 27 expected, with **every
+gap exceeding the 30 minute staleness ceiling the watcher itself enforces**. Two
+causes, and the second invalidates a cost argument recorded in `SD-003`: making
+the repo private means Actions minutes are no longer unmetered, and at GitHub's
+one-minute-per-job floor a ten minute cadence is about 4,320 minutes a month
+against 3,000 available. **The advertised cadence is not affordable even if
+GitHub delivered it.** `PULLFM-RISK-020`. Making the repo public is the cheapest
+fix and widens `RISK-017`; that is the owner's call and was left to him.
 
 ---
 
@@ -210,8 +223,13 @@ deliberate to whoever finds it next.
   `/etc/pullfm/bff.env`, or via a converge so it survives the next `up`:
 
   ```
-  AUTH_REGISTRATION_ALLOWLIST=gray@grayada.ms
+  AUTH_REGISTRATION_ALLOWLIST=you@example.com     # your own address
   ```
+
+  **The real address is deliberately absent from this file**, and it was here for
+  three commits before `check-public-identifiers` caught it. That is worth more
+  than the fix: the paragraph below already said the address is not committed
+  anywhere, so the file asserted the thing it was violating, four lines apart.
 
   Deliberately not committed anywhere: `check-public-identifiers` blocks the
   operator's address in tracked files, so `config.ts` and `secrets.sh` carry
