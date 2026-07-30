@@ -169,6 +169,9 @@ if [ "${MODE}" = check ]; then
   BEAT_FILE=${PULLFM_HEARTBEAT_FILE:-${BEAT_FILE}}
   BEAT_URL=${PULLFM_HEARTBEAT_URL:-${BEAT_URL}}
   STALE_S=${PULLFM_HEARTBEAT_STALE_S:-1800}
+  # The user agent this command sends on its OWN probe of the public beat, so the
+  # poll-freshness check can exclude it and still be able to fail.
+  SELF_UA='pullfm-check/1 (self-probe; excluded from poll-freshness)'
 
   # --- 1. is the beat being written ---------------------------------------
   if [ -f "${BEAT_FILE}" ]; then
@@ -199,7 +202,13 @@ if [ "${MODE}" = check ]; then
   if [ "${PULLFM_CHECK_SKIP_PUBLIC:-0}" = 1 ]; then
     echo "SKIPPED: public heartbeat reachability (PULLFM_CHECK_SKIP_PUBLIC=1). This is the check that matters."
   else
-    pub=$(curl -s --max-time 15 -w '\n%{http_code}' "${BEAT_URL}" 2>/dev/null || printf '\n000')
+    # A DISTINCTIVE USER AGENT, and it is load-bearing for check 2b below rather
+    # than cosmetic. This request lands in the same nginx access log that 2b reads
+    # to decide whether anything is polling the beat, so without a way to exclude
+    # it, --check would see its own fetch, report "polled 0s ago", and pass
+    # unconditionally. A check that cannot fail is not a check - the exact defect
+    # this whole command was rewritten to stop shipping.
+    pub=$(curl -s --max-time 15 -A "${SELF_UA}" -w '\n%{http_code}' "${BEAT_URL}" 2>/dev/null || printf '\n000')
     pub_code=${pub##*$'\n'}
     pub_body=${pub%$'\n'*}
     case "${pub_code}" in
@@ -231,6 +240,95 @@ if [ "${MODE}" = check ]; then
         rc=1
         ;;
     esac
+  fi
+
+  # --- 2b. IS ANYTHING ACTUALLY POLLING THE BEAT --------------------------
+  #
+  # Questions 1 and 2 prove OUR half of the chain: the beat is written, and it is
+  # readable from outside. Neither says the watcher is reading it. That is the
+  # same defect this whole check was rewritten to remove, one layer further out:
+  # a green verdict for a chain that is only half verified.
+  #
+  # It matters because the watcher's schedule is best-effort. Measured on
+  # 2026-07-30, the GitHub cron that claims a 10-minute cadence had actually run
+  # 3 times in 4.5 hours, with gaps of 62, 81 and 153 minutes - every one of them
+  # LONGER than the 30-minute staleness ceiling the watcher itself enforces. The
+  # switch was degraded for hours and nothing reported it, because nothing looked.
+  #
+  # WHAT THIS CAN AND CANNOT PROVE, stated because the asymmetry is the point:
+  #
+  #   It CANNOT prove a poll came from the watcher. Requests arrive through
+  #   Cloudflare, so every client looks like a Cloudflare address with a curl
+  #   user agent, and an operator's own `curl` is indistinguishable from the
+  #   watcher's. So presence is reported WITHOUT claiming attribution.
+  #
+  #   It CAN prove NOBODY polled. If the access log shows no request for the beat
+  #   path in the window, then the watcher certainly did not poll, whatever else
+  #   is true. Absence is exactly the alarm condition for a dead man's switch, so
+  #   the half that is provable is the half that matters.
+  #
+  # Requires read access to the nginx access log, so it is skipped rather than
+  # failed when the log is unreadable - and it says which, because "I could not
+  # look" must never render as "I looked and it was fine".
+  POLL_LOG=${PULLFM_ACCESS_LOG:-/var/log/nginx/access.log}
+  POLL_CEILING_S=${PULLFM_POLL_CEILING_S:-3600}
+  BEAT_PATH=${BEAT_URL##*//}
+  BEAT_PATH=/${BEAT_PATH#*/}
+  if [ ! -r "${POLL_LOG}" ]; then
+    echo "SKIPPED: watcher-poll freshness. ${POLL_LOG} is not readable, so whether anything is"
+    echo "  polling the beat is UNKNOWN here. Re-run with sudo. This is not a pass."
+  else
+    # `grep -v` on this command's own user agent, so --check cannot satisfy itself.
+    # See the SELF_UA comment on the question-2 curl above: without this line the
+    # fetch performed seconds earlier by this same run is the freshest poll in the
+    # log, and the check passes on every node forever, including one that no
+    # watcher has touched in a week.
+    # `|| true` IS NOT DECORATION. This script runs under `set -euo pipefail`, and
+    # grep exits 1 when it matches nothing. Without it, the case where NOTHING has
+    # polled the beat - the single most important alarm condition this check
+    # exists to detect - aborted the whole command right here: no verdict, no sink
+    # check, no RESULT line, just a bare exit 1 that looked enough like a failure
+    # verdict to be mistaken for one. Measured on the node against a log with no
+    # heartbeat requests in it.
+    last_poll=$(grep -F "${BEAT_PATH}" "${POLL_LOG}" 2>/dev/null |
+      grep -vF 'pullfm-check/' | tail -1 |
+      sed -n 's/.*\[\([^]]*\)\].*/\1/p' || true)
+    if [ -z "${last_poll}" ]; then
+      echo "NOT ARMED: nothing has requested ${BEAT_PATH} in ${POLL_LOG} at all."
+      echo "  Nobody is polling the dead man's switch, so it is not a switch. Check the"
+      echo "  workflow is enabled and scheduled: gh run list -R 312-dev/pullfm-heartbeat"
+      rc=1
+    else
+      # nginx logs `30/Jul/2026:03:44:16 +0000`. GNU date parses neither the
+      # slashes nor the colon between the year and the hour, so BOTH have to go:
+      # every '/' becomes a space, and then the FIRST remaining ':' becomes one
+      # (no `g`, or the time separators would be destroyed too), giving
+      # `30 Jul 2026 03:44:16 +0000`.
+      #
+      # The first version of this only replaced the colon and left the slashes, so
+      # `date` refused the whole string and the check printed SKIPPED on a node
+      # whose log was perfectly readable. It looked like a limitation and was a
+      # bug, which is why a parse failure is reported with the offending string
+      # rather than as a bare skip.
+      poll_epoch=$(date -u -d "$(printf '%s' "${last_poll}" | sed 's|/| |g; s|:| |')" +%s 2>/dev/null || echo 0)
+      case "${poll_epoch}" in '' | *[!0-9]*) poll_epoch=0 ;; esac
+      if [ "${poll_epoch}" -eq 0 ]; then
+        echo "SKIPPED: watcher-poll freshness. Could not parse '${last_poll}' from ${POLL_LOG}."
+      else
+        poll_age=$(($(date -u +%s) - poll_epoch))
+        if [ "${poll_age}" -gt "${POLL_CEILING_S}" ]; then
+          echo "NOT ARMED: the beat was last fetched ${poll_age}s ago (ceiling ${POLL_CEILING_S}s)."
+          echo "  Nothing is polling the switch often enough for it to detect anything. GitHub's"
+          echo "  cron is best-effort and drops runs; see PULLFM-RISK-020."
+          rc=1
+        else
+          echo "ARMED (polled): the beat was fetched ${poll_age}s ago."
+          echo "  NOT ATTRIBUTED: requests arrive via Cloudflare, so this cannot distinguish the"
+          echo "  watcher from your own curl. Confirm the watcher itself with:"
+          echo "  gh run list -R 312-dev/pullfm-heartbeat --event schedule"
+        fi
+      fi
+    fi
   fi
 
   # --- 3. will the optional push sink accept a publish --------------------

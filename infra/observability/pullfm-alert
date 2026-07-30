@@ -3,10 +3,56 @@
 # Pull.fm alert sender. THE notification channel, and the only one.
 #
 #   pullfm-alert --key <dedupe-key> --title <title> [options] [--message <text>]
+#   pullfm-alert --resolve --key <dedupe-key>     # the condition went away
+#   pullfm-alert --ack <dedupe-key> [--ack-note <text>]   # a HUMAN saw it
+#   pullfm-alert --list                           # what is pending, and how old
 #
 # Everything that wants to tell the operator something goes through this file,
 # so there is exactly one place that knows what the channel is, one place that
 # knows how to authenticate to it, and one place to change when it moves.
+#
+# ---------------------------------------------------------------------------
+# WHY --ack EXISTS, AND WHY IT IS NOT `rm`
+#
+# The heartbeat publishes a count of UNACKNOWLEDGED conditions and the external
+# dead man's switch raises "N unacknowledged alert(s)" from it. Until this verb
+# existed there was no supported way to acknowledge one: the only way to clear a
+# condition that was seen and understood but not yet fixed was to delete its
+# dedupe stamp under /var/lib by hand.
+#
+# That is a training defect, not an inconvenience. A monitor that demands
+# acknowledgement while offering only `rm` teaches its operator to delete files
+# under /var/lib by reflex, and the reflex does not distinguish the probe you
+# recognise from the real alert you have not read yet. Eventually a real one gets
+# cleared unread, and nothing anywhere records that it was.
+#
+# So --ack RECORDS rather than unlinks: who acknowledged, when, from where, and
+# an optional note. The record is the point. `--resolve` remains the verb for a
+# condition that actually went away, and the two are deliberately different:
+# resolve means fixed, ack means seen.
+#
+# THREE INVARIANTS, because this touches the dedupe marker:
+#
+#   1. THE DEDUPE STAMP IS NEVER TOUCHED BY AN ACK. /var/lib/pullfm/alerts/<key>
+#      still holds exactly one Unix timestamp and nothing else, so the repeat
+#      window keeps working and `exit 5` keeps meaning suppressed-not-failed.
+#      An ack is a SIBLING file, <key>.ack. Acknowledging must not turn a
+#      suppressed duplicate into a fresh page every minute.
+#   2. AN ACK IS CLEARED WHEN THE CONDITION ACTUALLY FIRES AGAIN. Suppressed
+#      repeats inside the window do not clear it; a real re-fire after the window
+#      does. So an ack silences the nagging without silencing the condition, and
+#      a problem that is still there comes back rather than staying acknowledged
+#      forever.
+#   3. ACKING SOMETHING THAT IS NOT PENDING FAILS LOUDLY (exit 6). A typo that
+#      appeared to succeed would be the same defect in a new place: an operator
+#      who believes they acknowledged something they did not.
+#
+# Age is tracked in a second sibling, <key>.first, written once when a key is
+# first seen and never rewritten. It exists because a condition that re-fires
+# every hour keeps a FRESH dedupe timestamp forever, so the dedupe stamp cannot
+# answer "how long has this been broken". Without a first-seen time an
+# unacknowledged alert sits at the same count indefinitely and never escalates,
+# which is how a permanent alarm becomes wallpaper.
 #
 # ---------------------------------------------------------------------------
 # WHY THE CHANNEL IS NOT IN THIS FILE
@@ -72,6 +118,9 @@
 #      difference matters now that a second path exists.
 #   4  a push sink is configured and delivery FAILED
 #   5  suppressed as a duplicate inside the repeat window
+#   6  --ack named a key that is not pending. Nothing was acknowledged, and
+#      saying so is the whole point: a silent success here would leave an
+#      operator believing a condition was acknowledged when it was not.
 #
 # Never non-zero for a bad argument once the message exists: an alerter that
 # refuses to alert because of its own argument handling is the failure mode this
@@ -91,6 +140,9 @@ PRIORITY=high
 TAGS=rotating_light
 RUNBOOK=""
 RESOLVE=false
+ACK=false
+ACK_NOTE=""
+LIST=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -101,6 +153,12 @@ while [ $# -gt 0 ]; do
     --tags) TAGS=${2:-rotating_light}; shift 2 ;;
     --runbook) RUNBOOK=${2:-}; shift 2 ;;
     --resolve) RESOLVE=true; shift ;;
+    # --ack takes the key as its own argument so the acknowledging command reads
+    # as one thing: `pullfm-alert --ack unit:pullfm-backup`. It also sets KEY, so
+    # the same sanitiser produces the same filename it did when the alert fired.
+    --ack) ACK=true; KEY=${2:-}; shift 2 ;;
+    --ack-note) ACK_NOTE=${2:-}; shift 2 ;;
+    --list | --pending) LIST=true; shift ;;
     --) shift; break ;;
     *) shift ;;
   esac
@@ -111,6 +169,172 @@ done
 # Only the characters that are safe in a filename. The key reaches the
 # filesystem, so it is sanitised rather than trusted.
 SAFE_KEY=$(printf '%s' "${KEY}" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-96)
+
+# ---------------------------------------------------------------------------
+# --ack and --list
+#
+# Placed BEFORE the stdin read below on purpose. That read consumes stdin
+# whenever it is not a terminal, so an --ack run from a script or a timer would
+# otherwise block or swallow unrelated input, and an acknowledgement command that
+# hangs is one an operator stops using.
+#
+# `pullfm-alert` is the only writer of this directory's layout, so the layout is
+# documented here rather than inferred anywhere else:
+#
+#   <key>         the dedupe stamp. ONE Unix timestamp. Never touched by an ack.
+#   <key>.first   the epoch this key was FIRST seen. Written once. Gives age.
+#   <key>.ack     an acknowledgement record: epoch, who, host, note.
+#
+# pullfm-heartbeat skips the two sibling suffixes when it counts, and skips any
+# key whose .ack exists. Those two rules are what make `pending` mean
+# "unacknowledged" rather than "ever fired".
+# ---------------------------------------------------------------------------
+ACK_SUFFIX=.ack
+FIRST_SUFFIX=.first
+
+# The one sanitiser, used everywhere a key becomes a filename. pullfm-heartbeat
+# carries an identical copy for the same reason: if the two ever disagree, an ack
+# is written under one spelling and looked up under another, and an
+# acknowledgement that is recorded but never read is worse than no ack verb.
+# The '-' is LAST in the set on purpose; anywhere else tr reads it as a range.
+safe_key() { printf '%s\n' "$(printf '%s' "${1}" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-96)"; }
+
+# Who is doing the acknowledging. SUDO_USER first, because these commands are
+# almost always run through sudo and recording "root" for every ack would make
+# the record useless for the one question it exists to answer.
+ack_who() {
+  printf '%s' "${PULLFM_ACK_WHO:-${SUDO_USER:-${USER:-$(id -un 2>/dev/null || echo unknown)}}}"
+}
+
+# Age of a key in seconds, from .first when it exists. Falls back to the dedupe
+# stamp and then to the file mtime, so a key created before .first existed still
+# reports an age rather than reporting nothing. An unknown age prints as -1 and
+# is never silently rendered as 0, because 0 reads as "brand new" and would make
+# an old condition look fresh.
+key_age_s() {
+  _ka_f="${STATE_DIR}/${1}${FIRST_SUFFIX}"
+  _ka_s="${STATE_DIR}/${1}"
+  _ka_e=""
+  if [ -f "${_ka_f}" ]; then
+    _ka_e=$(cat "${_ka_f}" 2>/dev/null || true)
+  elif [ -f "${_ka_s}" ]; then
+    _ka_e=$(cat "${_ka_s}" 2>/dev/null || true)
+  fi
+  case "${_ka_e}" in '' | *[!0-9]*)
+    if [ -e "${_ka_s}" ]; then
+      _ka_e=$(stat -c %Y "${_ka_s}" 2>/dev/null || stat -f %m "${_ka_s}" 2>/dev/null || true)
+    fi
+    ;;
+  esac
+  case "${_ka_e}" in '' | *[!0-9]*) printf '%s' -1; return 0 ;; esac
+  printf '%s' "$(($(date -u +%s) - _ka_e))"
+}
+
+# Every pending key, from BOTH sources the heartbeat counts, so --list and the
+# beat can never disagree about what is outstanding. A list that showed a
+# different set from the thing raising the alarm would send an operator looking
+# for a key that is not there.
+pending_keys() {
+  if [ -d "${STATE_DIR}" ]; then
+    for _pf in "${STATE_DIR}"/*; do
+      [ -e "${_pf}" ] || continue
+      case "${_pf}" in *"${ACK_SUFFIX}" | *"${FIRST_SUFFIX}") continue ;; esac
+      printf '%s\n' "$(basename "${_pf}")"
+    done
+  fi
+  systemctl list-units "${PULLFM_HEARTBEAT_UNIT_GLOB:-pullfm-*}" \
+    --state=failed --plain --no-legend --no-pager 2>/dev/null |
+    while read -r _pu _rest; do
+      [ -n "${_pu}" ] || continue
+      # tr is applied to ONE key with no newline in it, and the set ends with the
+      # literal '-'. Both matter: the first version piped a newline-terminated
+      # stream through `tr -c 'a-zA-Z0-9._-\n' '_'`, where `_-\n` is read as a
+      # RANGE, so tr refused the whole expression with "range-endpoints ... in
+      # reverse collating sequence order" and this function emitted nothing.
+      # --list then printed "(nothing pending)" while the beat correctly reported
+      # pending=1 - a listing tool disagreeing with the alarm it exists to
+      # explain. Found by running it against a real failed unit.
+      safe_key "unit:${_pu%.service}"
+    done
+}
+
+if [ "${LIST}" = true ]; then
+  _n=0
+  printf '%-46s %-10s %s\n' KEY AGE STATUS
+  for _k in $(pending_keys | sort -u); do
+    _n=$((_n + 1))
+    _age=$(key_age_s "${_k}")
+    if [ "${_age}" -lt 0 ]; then _agetxt="unknown"; else _agetxt="$((_age / 60))m"; fi
+    if [ -f "${STATE_DIR}/${_k}${ACK_SUFFIX}" ]; then
+      _st="ACKED by $(cut -f2 <"${STATE_DIR}/${_k}${ACK_SUFFIX}" 2>/dev/null || echo '?')"
+    else
+      _st="unacknowledged"
+    fi
+    printf '%-46s %-10s %s\n' "${_k}" "${_agetxt}" "${_st}"
+  done
+  [ "${_n}" -eq 0 ] && echo "(nothing pending)"
+  echo
+  echo "acknowledge with: pullfm-alert --ack <key> [--ack-note 'why']"
+  echo "a condition that is FIXED should be cleared with --resolve, or with"
+  echo "systemctl reset-failed for a unit: key. ack means seen, not fixed."
+  exit 0
+fi
+
+if [ "${ACK}" = true ]; then
+  if [ -z "${KEY}" ]; then
+    echo "pullfm-alert --ack needs a key. See what is pending with: pullfm-alert --list" >&2
+    exit 6
+  fi
+  # Is this key actually pending? Checked against the same two sources the
+  # heartbeat counts, so an ack can never appear to succeed against a key that
+  # nothing is reporting.
+  _found=false
+  for _k in $(pending_keys | sort -u); do
+    [ "${_k}" = "${SAFE_KEY}" ] && _found=true && break
+  done
+  if [ "${_found}" != true ]; then
+    echo "pullfm-alert: '${KEY}' is not pending, so nothing was acknowledged." >&2
+    echo "Pending keys:" >&2
+    pending_keys | sort -u | sed 's/^/  /' >&2
+    exit 6
+  fi
+
+  mkdir -p "${STATE_DIR}" 2>/dev/null || true
+  _who=$(ack_who)
+  _age=$(key_age_s "${SAFE_KEY}")
+  # -1 is the internal sentinel for "no first-seen is recorded", which is the
+  # normal case for a systemd-sourced unit: key. It is rendered as the word
+  # rather than as "-1s", because a negative duration in an incident record
+  # reads as a bug in the recorder and invites someone to distrust the rest.
+  if [ "${_age}" -lt 0 ]; then _agetxt=unknown; else _agetxt="${_age}s"; fi
+  # Tab separated and one line, so `cut -f2` reads the who without a parser and a
+  # note containing a quote cannot corrupt the record. Tabs and newlines are
+  # stripped from the note for the same reason.
+  _note=$(printf '%s' "${ACK_NOTE}" | tr '\t\n\r' '   ')
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u +%s)" "${_who}" "$(hostname 2>/dev/null || echo unknown)" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_note}" \
+    >"${STATE_DIR}/${SAFE_KEY}${ACK_SUFFIX}" 2>/dev/null || {
+    echo "pullfm-alert: could not write the acknowledgement record. NOT acknowledged." >&2
+    exit 6
+  }
+  chmod 0644 "${STATE_DIR}/${SAFE_KEY}${ACK_SUFFIX}" 2>/dev/null || true
+
+  # The journal gets the ack too. The acknowledgement is part of the incident
+  # record, and the spool is written by the alerting paths above; an ack that
+  # existed only as a file would be invisible to `journalctl -t pullfm-alert`,
+  # which is where every runbook already sends the reader.
+  echo "PULLFM-ALERT acknowledged key=${KEY} by=${_who} age=${_agetxt} note=${_note:-none}" >&2
+  logger -t pullfm-alert -p user.notice \
+    "acknowledged key=${KEY} by=${_who} age=${_agetxt} note=${_note:-none}" 2>/dev/null || true
+
+  echo "acknowledged ${KEY} (by ${_who})."
+  echo "The dedupe stamp is untouched, so the repeat window still applies, and this"
+  echo "will return to unacknowledged if the condition fires again."
+  # Refresh the beat so `pending` drops now rather than at the next timer tick.
+  command -v pullfm-heartbeat >/dev/null 2>&1 && pullfm-heartbeat >/dev/null 2>&1 || true
+  exit 0
+fi
 
 # stdin is accepted so a caller can pipe a long body without quoting it.
 if [ -z "${MESSAGE}" ] && [ ! -t 0 ]; then
@@ -157,6 +381,10 @@ if [ "${RESOLVE}" = true ]; then
   # owed. Staying silent here is what keeps the channel worth reading.
   [ -f "${STATE_FILE}" ] || exit 0
   rm -f "${STATE_FILE}" 2>/dev/null || true
+  # The siblings go with it. A resolved condition that left its .ack behind would
+  # come back already-acknowledged the next time it fired, which is the one state
+  # this design must never produce: a firing alert that nothing counts.
+  rm -f "${STATE_FILE}${ACK_SUFFIX}" "${STATE_FILE}${FIRST_SUFFIX}" 2>/dev/null || true
   PRIORITY=default
   TAGS=white_check_mark
   TITLE="RESOLVED: ${TITLE}"
@@ -276,6 +504,27 @@ spool "${DELIVERED}" "${DELIVERY}"
 # hour.
 if [ "${RESOLVE}" != true ]; then
   printf '%s' "${NOW}" >"${STATE_FILE}" 2>/dev/null || true
+
+  # First-seen, written ONCE and never rewritten. This is what gives an
+  # unacknowledged condition an age, and an age is what lets a stale one
+  # escalate instead of sitting at the same count forever.
+  [ -f "${STATE_FILE}${FIRST_SUFFIX}" ] ||
+    printf '%s' "${NOW}" >"${STATE_FILE}${FIRST_SUFFIX}" 2>/dev/null || true
+  chmod 0644 "${STATE_FILE}${FIRST_SUFFIX}" 2>/dev/null || true
+
+  # A REAL re-fire clears a previous acknowledgement, so the condition returns to
+  # unacknowledged and the switch counts it again.
+  #
+  # Reaching this line already means the alert was NOT suppressed as a duplicate:
+  # the dedupe branch above exits 5 long before here. So the repeat window has
+  # expired and this is news again, not the same page repeating. That distinction
+  # is the whole reason the ack lives in a sibling file rather than in the dedupe
+  # stamp - an ack silences the nagging without silencing the condition.
+  if [ -f "${STATE_FILE}${ACK_SUFFIX}" ]; then
+    _prev_ack=$(cut -f2 <"${STATE_FILE}${ACK_SUFFIX}" 2>/dev/null || echo unknown)
+    rm -f "${STATE_FILE}${ACK_SUFFIX}" 2>/dev/null || true
+    echo "PULLFM-ALERT key=${KEY} fired again after being acknowledged by ${_prev_ack}; ack cleared." >&2
+  fi
 fi
 
 # --- refresh the heartbeat so the external watcher sees this within its next

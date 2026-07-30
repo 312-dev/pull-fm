@@ -19,14 +19,25 @@
 > credential on the node at all.
 
 ```bash
-./install-alert-env.sh --check     # is this node able to tell anyone anything?
-                                  #   asks the NETWORK in three places. It used
+sudo ./install-alert-env.sh --check # is this node able to tell anyone anything?
+                                  #   asks the NETWORK in FOUR places. It used
                                   #   to read a file and say ARMED while every
-                                  #   publish was refused 403.
+                                  #   publish was refused 403. `sudo` because
+                                  #   question 2b needs the nginx access log.
 ./alert-selftest.sh                # prove the channel delivers, end to end
 ./watchdog-selftest.sh             # prove each synthetic trigger reaches ntfy
 make alerts                        # both of the above
+
+pullfm-alert --list                # what is outstanding, and HOW OLD it is
+pullfm-alert --ack <key> --ack-note 'looking at it'   # a human saw it
+pullfm-alert --resolve --key <key> # the condition actually went away
 ```
+
+> **`--ack` means seen. `--resolve` means fixed. They are different on purpose,
+> and neither is `rm`.** Before `--ack` existed the only way to clear a pending
+> condition was deleting its dedupe stamp under `/var/lib/pullfm/alerts/` by
+> hand, which is a reflex that does not distinguish a probe you recognise from a
+> real alert you have not read. See `DECISIONS.md` `SD-004`.
 
 ---
 
@@ -50,13 +61,28 @@ make alerts                        # both of the above
 
 **There are two paths and the order matters.**
 
-|                        | Primary                               | Secondary                            |
-| ---------------------- | ------------------------------------- | ------------------------------------ |
-| Direction              | **Pull.** An observer fetches from us | Push. The node posts outward         |
-| Runs on                | **GitHub's scheduler**, every 10 min  | the node, at the moment of the alert |
-| Credential on the node | **none**                              | one, if configured                   |
-| Latency                | one watcher interval, 10 to 20 min    | seconds                              |
-| Configured today       | **yes**                               | no                                   |
+|                          | Primary                                    | Secondary                            |
+| ------------------------ | ------------------------------------------ | ------------------------------------ |
+| Direction                | **Pull.** An observer fetches from us      | Push. The node posts outward         |
+| Runs on                  | GitHub's scheduler, cron says every 10 min | the node, at the moment of the alert |
+| Credential on the node   | **none**                                   | one, if configured                   |
+| Latency, as designed     | one watcher interval, 10 to 20 min         | seconds                              |
+| Latency, **as measured** | **one watcher GAP: 60 to 150+ min**        | seconds                              |
+| Configured today         | **yes**                                    | no                                   |
+
+> **THE MEASURED ROW IS THE TRUE ONE.** On 2026-07-30 the scheduled workflow had
+> run **three times in 4.5 hours** (gaps of 62, 81 and 153 minutes) against about
+> 27 expected ticks, and **every gap was longer than the 30-minute staleness
+> ceiling the watcher itself enforces**. Corroborated from nginx's access log,
+> which shows three fetches of the beat at exactly those times and none between.
+> GitHub's cron drops ticks, and the repository is **private**, so `SD-003`'s
+> "Actions minutes are unmetered on public repositories" no longer applies to it:
+> at GitHub's one-minute-per-job billing floor a true 10-minute cadence is ~4,320
+> minutes a month against the Team plan's 3,000. Recorded as `PULLFM-RISK-020`.
+>
+> This is the third time this project has found a control that was described
+> correctly and behaved differently, and the first two were found the same way:
+> **by asking the running system instead of the repository.**
 
 The primary path exists because of a finding that is worth stating in one line:
 
@@ -88,9 +114,17 @@ The beat is four scalars and a list of names:
   "ts": "2026-07-29T21:50:46Z",
   "epoch": 1785361846,
   "pending": 1,
+  "oldest": 3600,
   "keys": ["unit:pullfm-deadman-selftest"]
 }
 ```
+
+`oldest` is the age in seconds of the **longest-standing unacknowledged**
+condition, and 0 means nothing pending or no age known. It exists because a count
+cannot escalate: `pending:1` reads identically whether the condition started a
+minute ago or a week ago, and an alarm that never changes is one an operator stops
+reading. It is a scalar and names nothing, so it adds no disclosure over `pending`
+and `keys` (which is the question `PULLFM-RISK-017`'s review note asks).
 
 **It carries a count, never an alert.** No hostname, no unit path, no journal tail,
 because the file is public and those are reconnaissance material about a node that
@@ -111,9 +145,85 @@ so nothing new has to be kept in sync:
 
 The second is why **`pullfm-job-alert` needed no change at all** to reach the
 switch. It already left the failed unit failed and called that "a fourth surface
-that costs nothing"; that surface is now read by something off the node. And
-`reset-failed` was already the gesture an operator makes, so acknowledgement
-needed no new verb.
+that costs nothing"; that surface is now read by something off the node.
+
+### Acknowledgement, and the sentence this file used to end that paragraph with
+
+It used to say: _"and `reset-failed` was already the gesture an operator makes, so
+acknowledgement needed no new verb."_ **That was wrong, and the way it was wrong
+is instructive.** It is true for one of the two sources and false for the other.
+A `pullfm-alert` dedupe stamp has no `reset-failed`, so for every watchdog-raised
+condition the only way to clear a pending count was `rm` on a file under
+`/var/lib`, and that is what actually happened to two verification probes on the
+night the switch shipped.
+
+There are now three verbs and the distinction between them is the point:
+
+| Verb                     | Means                     | Does                                                               |
+| ------------------------ | ------------------------- | ------------------------------------------------------------------ |
+| `--ack <key>`            | **seen**, not yet fixed   | records who/when/where/why in `<key>.ack`; count drops; stamp kept |
+| `--resolve --key <key>`  | **fixed**, condition gone | removes the stamp and both siblings; sends one recovery notice     |
+| `systemctl reset-failed` | fixed, for a `unit:` key  | unchanged; still the right gesture for a failed unit               |
+
+Layout under `/var/lib/pullfm/alerts/`, whose only writer is `pullfm-alert`:
+
+```
+<key>         the dedupe stamp. ONE Unix timestamp. NEVER touched by an ack.
+<key>.first   the epoch the key was first seen. Written once. This is `oldest`.
+<key>.ack     epoch <TAB> who <TAB> host <TAB> iso8601 <TAB> note
+```
+
+**Three invariants, each of which was a bug before it was a rule:**
+
+1. **An ack never touches the dedupe stamp.** If it did, the next tick of a
+   once-a-minute watchdog would look like a brand new condition and page
+   immediately, so acknowledging would increase the noise.
+2. **A real re-fire clears the ack.** Suppressed repeats inside the window do not;
+   a fire after the window does. An ack silences the nagging, never the condition.
+3. **Acking a key that is not pending exits 6.** A silent success would leave an
+   operator believing they had acknowledged something that is still counting.
+
+`.first` is separate from the stamp because **a condition that re-fires hourly
+keeps a permanently fresh dedupe timestamp**, so that timestamp can never answer
+"how long has this been broken".
+
+The 11 assertions covering all of this are in `alert-selftest.sh`, including that
+the siblings are never themselves published as conditions - getting that wrong
+makes an acknowledgement _increase_ the count it was meant to reduce.
+
+### 2b. Is anything actually POLLING the beat
+
+Questions 1 and 2 of `--check` prove **our** half of the chain: the beat is
+written, and it is readable from outside. Neither says the watcher is reading it,
+and section 2's measured-latency box is what that gap looked like in practice.
+
+So `--check` asks a fourth question, from nginx's access log, against a one-hour
+ceiling (`PULLFM_POLL_CEILING_S`). Two properties make it honest, and **both were
+bugs first**:
+
+- **It excludes its own probe by user agent.** Question 2 fetches the public beat
+  seconds earlier and that request lands in the same log. Without the exclusion
+  `--check` sees itself, reports "polled 0s ago" and passes on every node forever.
+  **A check that cannot fail is not a check** - the exact defect `--check` was
+  rewritten to stop shipping, reintroduced by the fix for it.
+- **It reports presence without claiming attribution.** Requests arrive through
+  Cloudflare, so the watcher and your own `curl` are indistinguishable, and it
+  says so in its output. The asymmetry is deliberate: **it cannot prove a poll
+  came from the watcher, but it can prove nobody polled at all, and absence is
+  the alarm condition.**
+
+Proven able to fail, which is the only proof that counts here:
+
+```
+log with no polls of the beat  -> NOT ARMED: nothing has requested ... at all   exit 1
+newest poll 2 hours old        -> NOT ARMED: last fetched 7200s ago (ceiling 3600s)  exit 1
+```
+
+The authoritative record of the watcher is still GitHub's, and it is one command:
+
+```bash
+gh run list -R 312-dev/pullfm-heartbeat --event schedule   # look at the GAPS
+```
 
 ### Why the node holds no credential, which was forced and is better
 
@@ -254,7 +364,31 @@ absent, and the third was the watcher itself: its first version was invalid YAML
 which GitHub reports as "workflow file issue" while registering no triggers, so the
 repository looked armed and ran nothing.
 
-### TWO DIFFS ARE NEEDED IN FILES THIS DIRECTORY DOES NOT OWN
+### THE DESTINATION IS ALREADY A CONVERGE-RENDERED VALUE, AND NEEDS NO DIFF
+
+Worth stating because it is the thing most likely to be "helpfully" re-plumbed by
+somebody who assumes it is missing. `infra/staging-env.sh` already renders
+`/etc/pullfm/alert.env` during converge:
+
+```bash
+"${ROOT}/infra/observability/install-alert-env.sh" --stdout |
+  ssh ... "sudo install -m 0600 -o root -g root /dev/stdin /etc/pullfm/alert.env"
+```
+
+and it **warns** when that fails, with the words "the node will run its timers and
+notify nobody". So repointing Pull.fm's push destination at any provider is
+**one 1Password value plus a converge, and no code change**: set
+`pull-fm/{env}/ALERT_SINK_URL` (and `ALERT_SINK_TOKEN` if the provider needs one
+separately from the URL). `pullfm-alert` derives the wire format from the URL.
+
+**Never hand-edit `/etc/pullfm/alert.env` on a node.** The next converge
+overwrites it, so a hand edit is a change that disappears at the next deploy and
+takes the control with it. The file's own header says so.
+
+Items are referenced **by title**, never by item id: `tools/check-public-identifiers.mjs`
+fails CI on an item id, because an id is a direct object reference.
+
+### THREE DIFFS ARE NEEDED IN FILES THIS DIRECTORY DOES NOT OWN
 
 **Until both land, a converge produces a node with no heartbeat**, the watcher trips
 on `no-heartbeat`, and a permanently tripped switch gets muted. Tracked with a short
@@ -298,6 +432,44 @@ production template gets `prod.json` and the URL in
 the host rather than in a container here, so no compose change is needed;
 `/var/lib/pullfm` is `0755` and the beat is written `0644`, which `www-data` can
 read - confirmed with `sudo -u www-data cat`.
+
+**3. `.github/workflows/deadman.yml` in `312-dev/pullfm-heartbeat`**, which is a
+different repository and could not be committed to by the change that wrote this.
+The node now publishes `oldest`; **nothing reads it yet**, so an unacknowledged
+condition still sits at an unchanging count and never escalates. In the
+`else` branch that parses the beat, alongside the existing `pending` handling:
+
+```bash
+oldest=$(printf '%s' "${beat}" | jq -r '.oldest // 0' 2>/dev/null)
+case "${oldest}" in '' | *[!0-9]*) oldest=0 ;; esac
+
+if [ "${pending}" != "0" ] && [ "${pending}" != "?" ]; then
+  # Age in the SAME line as the count, so the escalation is visible in the issue
+  # title path rather than buried: a count that never changes is wallpaper.
+  add pending-alerts "The node reports **${pending} unacknowledged alert(s)** \
+(oldest **$((oldest / 60))m**), keys \`${keys:--}\`. Bodies deliberately stay on \
+the node: \`journalctl -t pullfm-alert -p err\` and \`/var/log/pullfm/alerts.jsonl\`."
+fi
+
+# A SEPARATE problem key, not a longer message. An operator who has been looking
+# at "3 unacknowledged" for two days needs the alarm to CHANGE, and a new key is
+# what makes the issue comment read differently instead of identically.
+if [ "${oldest}" -gt "${ESCALATE_SECONDS:-86400}" ]; then
+  add stale-unacknowledged "A condition has been unacknowledged for \
+**$((oldest / 3600))h**, ceiling $((${ESCALATE_SECONDS:-86400} / 3600))h. Either fix it, or \
+acknowledge it on the node with \`pullfm-alert --ack <key>\` so the record says who \
+accepted it and when."
+fi
+```
+
+with `ESCALATE_SECONDS: '86400'` added next to `STALE_SECONDS` in the job `env:`.
+
+**The residual this does not close, stated because it is the honest half:** an
+acknowledged condition drops out of `pending` and out of `oldest` entirely, so an
+operator who acks something and never fixes it has a permanently quiet switch.
+Closing that needs the beat to publish an acked count too, which is another field
+on a public document, and `PULLFM-RISK-017`'s review note asks specifically about
+field creep. It is deliberately left as the owner's decision rather than taken.
 
 ### The rest of what `bootstrap.sh` needs, unchanged
 

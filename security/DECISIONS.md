@@ -12,11 +12,12 @@ result.
 Each entry states what was decided, what was rejected, why, and **what it costs**, because a decision
 record with no downside in it is advocacy rather than a record.
 
-| ID       | Decision                                                                  | Status                                                                     |
-| -------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `SD-001` | Alerting runs on its own credential, not on the operator's personal ntfy  | **Superseded by `SD-002`.** Its premise was measurably wrong               |
-| `SD-002` | Alerting runs on a write-only ntfy credential scoped to `pullfm-staging*` | **Superseded by `SD-003`.** Its control was right, its destination was not |
-| `SD-003` | The alerting primary path is a PULL by an observer outside our estate     | Decided and implemented. Verified by breaking it in two different places   |
+| ID       | Decision                                                                       | Status                                                                     |
+| -------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| `SD-001` | Alerting runs on its own credential, not on the operator's personal ntfy       | **Superseded by `SD-002`.** Its premise was measurably wrong               |
+| `SD-002` | Alerting runs on a write-only ntfy credential scoped to `pullfm-staging*`      | **Superseded by `SD-003`.** Its control was right, its destination was not |
+| `SD-003` | The alerting primary path is a PULL by an observer outside our estate          | Decided and implemented. Verified by breaking it in two different places   |
+| `SD-004` | Acknowledgement is a recorded verb, and the observer's own cadence is measured | Decided and implemented. `SD-003` stands; two of its blind spots close     |
 
 ---
 
@@ -434,3 +435,181 @@ not tell anyone. **A watcher that has not been made to fire is not a watcher.**
 `infra/observability/README.md` sections 2 and 3, next to the scripts, plus
 `312-dev/pullfm-heartbeat`. If they disagree with this entry, the scripts and the workflow are the
 facts and this entry is wrong.
+
+---
+
+## `SD-004` Acknowledgement is a recorded verb, and the observer's own cadence is measured
+
+**Decided:** 2026-07-30
+**Owner:** `ope@312.dev`
+**Applies to:** every environment that can send an alert
+**Extends:** [`SD-003`](#sd-003-the-primary-alerting-path-is-a-pull-by-an-observer-outside-our-estate)
+
+`SD-003` is not superseded and nothing in it is reversed. The pull design held up under a second
+round of deliberate breakage. This entry closes two gaps that `SD-003` left, and one of them was
+invisible in the repository and only appeared when the running system was measured.
+
+### Gap 1: the switch demanded an acknowledgement it gave no way to make
+
+The beat publishes a count of **unacknowledged** conditions and the watcher raises "N unacknowledged
+alert(s)" from it. There was no `--ack`. The only way to clear a condition that had been seen and
+understood but not yet fixed was to delete its dedupe stamp under `/var/lib/pullfm/alerts/` by hand,
+and on the night `SD-003` landed that is exactly what happened to two verification probes.
+
+**That is a training defect, not an inconvenience.** A monitor that demands acknowledgement while
+offering only `rm` teaches its operator to delete files under `/var/lib` by reflex, and a reflex does
+not distinguish the probe you recognise from the real alert you have not read yet. The failure is not
+the deleted file; it is that nothing anywhere records that an alert was cleared unread.
+
+So `pullfm-alert --ack <key>` records **who, when, from where, and optionally why**, and
+`pullfm-alert --list` shows what is outstanding and how old it is, because a verb for acknowledging
+is useless without a supported way to see what there is to acknowledge.
+
+Three invariants, each of which is a bug that was hit while building it:
+
+| Invariant                                                 | Why it is not optional                                                                                                                                     |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| An ack **never touches the dedupe stamp**                 | The stamp holds one Unix timestamp and `exit 5` means suppressed. Clearing it would turn the next tick of a once-a-minute watchdog into a fresh page.      |
+| A **real re-fire clears the ack**                         | An ack must silence the nagging without silencing the condition. A problem that is still there has to come back, or acknowledging becomes forgetting.      |
+| Acking a key that is not pending **fails loudly, exit 6** | A silent success leaves an operator believing they acknowledged something that is still counting, which is this project's signature defect in a new place. |
+
+The state lives in two siblings, `<key>.ack` and `<key>.first`, so the dedupe marker's format is
+untouched. `.first` exists because **a condition that re-fires every hour keeps a permanently fresh
+dedupe timestamp**, so that timestamp cannot answer "how long has this been broken". Without a
+first-seen time an unacknowledged alert sits at the same count forever and never escalates, which is
+how a permanent alarm becomes wallpaper. The beat therefore also publishes `oldest`.
+
+### Gap 2, and the one that mattered: nobody was measuring the observer
+
+`SD-003` documents a 10-minute watcher cadence and a 30-minute staleness ceiling, and
+`infra/observability/README.md` repeats a 10-to-20-minute detection latency. **Measured on
+2026-07-30, about six hours after `SD-003` was written, the scheduled workflow had run three times in
+4.5 hours** - gaps of 62 and 81 minutes, then 153 minutes of nothing, against roughly 27 expected
+ticks. Corroborated independently from nginx's access log on the node, which shows three fetches of
+the beat at exactly those times and none in between.
+
+**Every observed gap was longer than the ceiling the watcher itself enforces.** So the documented
+latency was wrong by an order of magnitude, and the switch had been degraded for hours with a green
+last run.
+
+Two causes. GitHub's cron is best-effort and drops ticks, which the workflow's own comment
+anticipates. The second contradicts a cost argument `SD-003` leaned on: **the repository is private**,
+so "Actions minutes are unmetered on public repositories" no longer describes it. `312-dev` is on the
+Team plan (3,000 minutes a month) and GitHub bills a **one-minute minimum per job**, so a true
+10-minute cadence is about 4,320 billed minutes against a 3,000-minute allowance. The advertised
+cadence is not affordable on the current plan even if GitHub delivered it.
+
+This is recorded as `PULLFM-RISK-020`, and the way it was found is the part worth keeping:
+`PULLFM-RISK-018`'s own review note had said _check the Actions tab for gaps, not just for failures,
+because a green last run does not exclude a schedule that silently stopped_. It came true within
+hours. **A review note that names the measurement is worth more than one that names the conclusion.**
+
+### The project already knew this, in writing, and did not carry it across
+
+The sharpest part of this finding is that none of it was new information.
+[`docs/RUNBOOK-JOBS.md`](../docs/RUNBOOK-JOBS.md) section 2 rejects `GitHub Actions schedule:` as the
+mechanism for the scheduled **jobs**, and one of its three stated reasons is that _"scheduled
+workflows are best-effort and routinely run tens of minutes late, which breaks the 'worst case 25
+hours' arithmetic the retention windows rest on"_. That sentence was in the repository before `SD-003`
+was written.
+
+`SD-003` then chose the same mechanism for the **alerting watcher**, wrote a 10-minute cadence and a
+30-minute ceiling into two documents, and never reconciled either against the constraint the project
+had already recorded about that exact scheduler. The workflow's own comment even offsets the cron off
+the hour "because scheduled workflows are best-effort" - so the fact was known at the moment of
+writing and its consequence for the ceiling was not followed through.
+
+**The general lesson, which is the reason this subsection exists:** a constraint recorded against one
+use of a dependency does not travel to the next use by itself. When a component is adopted for a
+second purpose, its known limitations have to be re-read against the new purpose's numbers, because
+the numbers are what the limitation invalidates. Grepping this repository for the dependency's name
+before choosing it would have surfaced the objection in one command.
+
+### What was decided about it
+
+`install-alert-env.sh --check` gains a **fourth question: is anything actually polling the beat**,
+answered from nginx's access log against a one-hour ceiling. It is deliberately built to be able to
+fail, and was verified failing against a log with no polls and against a log whose newest poll is two
+hours old.
+
+**Two honesty properties are load-bearing, and both were bugs first:**
+
+- **It excludes its own probe by user agent.** Question 2 fetches the public beat seconds earlier and
+  that fetch lands in the same log. Without the exclusion, `--check` sees its own request, reports
+  "polled 0s ago", and passes on every node forever. **A check that cannot fail is not a check** -
+  the exact defect `--check` was rewritten to stop shipping, reintroduced by the fix for it.
+- **It reports presence without claiming attribution.** Requests arrive through Cloudflare, so the
+  watcher and an operator's own `curl` are indistinguishable. The check says so in its output. The
+  asymmetry is the point: **it cannot prove a poll came from the watcher, but it can prove nobody
+  polled at all, and absence is the alarm condition for a dead man's switch.**
+
+### What was rejected
+
+| Option                                                         | Why not                                                                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Raise the cron frequency**                                   | The ticks are being dropped, not delayed, so more of them does not help, and it makes the billing overage worse. Treating a throttle as a scheduling preference.                                                                                                                                                                    |
+| **Make the watcher repository public**                         | The cheapest real fix: it restores unmetered minutes and better scheduling. It also makes every switch ISSUE public, and those bodies carry the live pending count and firing keys, which is a deliberate widening of `PULLFM-RISK-017`. **That is the owner's call, not an agent's**, so it is written down here rather than done. |
+| **A second observer on other infrastructure**                  | The correct answer to "nothing watches the watcher", and it needs an account that could not be created without a payment method or an email confirmation. The same wall `SD-003` hit.                                                                                                                                               |
+| **Have the node alert on not being polled**                    | Considered and kept narrow. The node can only tell the operator through the sink that is unset, or through the beat that nobody is reading, so it would be an alarm inside the failure domain again. It is a `--check` question an operator runs, not an automated alert.                                                           |
+| **Give the node a GitHub credential to query its own watcher** | Re-creates exactly what `SD-003` removed. The node holding no alerting credential is the property that makes the design strong.                                                                                                                                                                                                     |
+| **Delete the ack requirement instead**                         | The switch could simply not count unacknowledged conditions. But then a real failure that nobody has looked at is indistinguishable from a quiet week, which is the finding this whole line of work exists to fix.                                                                                                                  |
+
+### The verification, because a verb that suppresses an alarm is the last place to trust a reading
+
+Run on the live staging node and against the real watcher on 2026-07-30, not reasoned about.
+
+| Step                                             | Evidence                                                                                         |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| A real job failure through the real `OnFailure=` | `journalctl -t pullfm-job-alert` classified `pullfm-acktest.service`, unit left `failed`         |
+| It reached the beat and the public origin        | `pending:3, keys:[...,"unit:pullfm-acktest"]`, `curl` from off-node -> `200`                     |
+| The watcher raised it                            | run `30512083169` **failed**, issue #1 reopened, `TRIPPED: pending-alerts`, "3 unacknowledged"   |
+| `--ack` recorded rather than unlinked            | `unit_pullfm-acktest.ack` -> `1785383002  pullfm  pullfm-staging-app-1  ...  verification probe` |
+| The ack dropped the count                        | beat went `pending:3` -> `pending:2`, key gone, dedupe stamp still present                       |
+| Acking a non-pending key failed                  | `'totally-made-up' is not pending`, **exit 6**                                                   |
+| Recovery closed the loop                         | run `30512134384` **success**, issue #1 commented `RECOVERED` and **auto-closed**                |
+| 11 new ack assertions in `alert-selftest.sh`     | 30/30 checks pass, including dedupe survival and sibling exclusion                               |
+
+**And the failure paths, which are the half that used to be silent.**
+
+| Deliberate breakage                         | Measured behaviour                                                                                       |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Invalid push-sink token, `--check`          | `SINK NOT ARMED: 401`, `RESULT: NOT ARMED`, **exit 1** against a real server's real 401                  |
+| Invalid push-sink token, alert fired        | **exit 4**, spool `"delivered":false,"delivery":"ntfy-failed"`, **and the alert still reached the beat** |
+| Access log with no polls of the beat        | `NOT ARMED: nothing has requested ... at all`, **exit 1**                                                |
+| Access log whose newest poll is 2 hours old | `NOT ARMED: the beat was last fetched 7200s ago (ceiling 3600s)`, **exit 1**                             |
+
+Three defects were found in this change by running it rather than reading it, and all three are the
+same species as the bug the change is about:
+
+1. `--list` printed "(nothing pending)" while the beat correctly reported `pending:1`, because a `tr`
+   character set ended `._-\n` and `_-\n` parses as a **range**, so `tr` refused the expression and
+   the function emitted nothing. **A listing tool silently disagreeing with the alarm it exists to
+   explain.**
+2. The poll-freshness check counted **its own probe**, so it passed unconditionally.
+3. The poll-freshness check **aborted the entire `--check` command** in the one case that matters
+   most - no polls at all - because `grep` exits 1 when it matches nothing and the script runs under
+   `set -euo pipefail`. It printed no verdict, skipped the sink check, and exited 1, which looked
+   enough like a failure verdict to be mistaken for one.
+
+### What this costs, stated rather than implied
+
+- **Detection is slower than any document previously said**, and the true figure is a gap rather than
+  an interval: two hours or more, not 10 to 20 minutes. `PULLFM-RISK-020` carries it with a date.
+- **The beat gained a field.** `oldest` is a scalar age that names nothing, so it adds no disclosure
+  beyond the existing `pending` and `keys`, but `PULLFM-RISK-017`'s review note asks specifically
+  whether the beat has acquired fields, and the answer is now yes, once, deliberately.
+- **An ack is a way to silence a real alarm**, and that is the point of it. The mitigations are that
+  it is recorded with a name, that a re-fire clears it, and that age keeps rising underneath it. What
+  is **not** mitigated: an operator who acks a condition and never fixes it has a permanently quiet
+  switch and a rising `oldest` that nothing yet escalates on. Closing that needs the watcher to trip
+  on age, which is a diff in a repository this change could not commit to and is written out in
+  `infra/observability/README.md` section 3.
+- **`--check`'s poll question needs the nginx log**, so it is skipped without root. It says SKIPPED
+  and never PASS, but a skipped check in a runbook someone hurries through still reads as absence of
+  bad news.
+
+### Where the operational detail lives
+
+`infra/observability/README.md` sections 2, 2b and 3, next to the scripts, plus the ack assertions in
+`alert-selftest.sh`. If they disagree with this entry, the scripts and the self-test are the facts and
+this entry is wrong.

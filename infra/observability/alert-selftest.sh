@@ -151,6 +151,116 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# acknowledgement
+#
+# `--ack` exists because the switch reports "N unacknowledged alert(s)" and the
+# only way to clear one used to be deleting a file under /var/lib by hand. These
+# assertions exist because a verb whose job is to suppress an alarm is the last
+# place to accept an untested implementation: every failure mode here is silent
+# by construction. Each one is a bug that was actually hit while building it.
+# ---------------------------------------------------------------------------
+echo
+echo "acknowledgement:"
+
+ALERTBIN="${HERE}/pullfm-alert"
+al() {
+  PULLFM_ALERT_ENV=/nonexistent \
+    PULLFM_ALERT_STATE_DIR="${WORK}/state" \
+    PULLFM_ALERT_SPOOL_DIR="${WORK}/spool" \
+    PULLFM_HEARTBEAT_FILE="${BEATFILE}" \
+    PULLFM_ALERT_ENV_LABEL=selftest \
+    PULLFM_HEARTBEAT_UNIT_GLOB='pullfm-selftest-nothing-matches-this-*' \
+    PULLFM_ACK_WHO=selftest \
+    "${ALERTBIN}" "$@"
+}
+
+al --key ack.probe --title "Ack probe" --message body >/dev/null 2>&1
+hb
+[ "$(beatfield pending)" = 1 ] &&
+  pass "a fired condition is pending before it is acknowledged" ||
+  fail "expected pending=1 before ack, got $(beatfield pending)"
+
+# Acking something that is not pending must FAIL. A silent success would leave an
+# operator believing they had acknowledged a condition that is still counting.
+al --ack no-such-key >/dev/null 2>&1
+[ "$?" = 6 ] &&
+  pass "acking a key that is not pending exits 6, not 0" ||
+  fail "acking an unknown key did not exit 6"
+
+al --ack ack.probe --ack-note "selftest" >/dev/null 2>&1
+if [ -f "${WORK}/state/ack.probe${ACK_SUFFIX:-.ack}" ]; then
+  pass "the ack is RECORDED as a file, not an unlink"
+else
+  fail "no acknowledgement record was written"
+fi
+
+# The record has to name a person. An ack that records nothing is `rm` with extra
+# steps, which is the entire defect this verb was added to remove.
+if cut -f2 <"${WORK}/state/ack.probe.ack" 2>/dev/null | grep -q selftest; then
+  pass "the record names who acknowledged it"
+else
+  fail "the ack record does not name an acknowledger"
+fi
+
+# THE DEDUPE STAMP MUST SURVIVE. If an ack cleared it, the next tick of a
+# once-a-minute watchdog would be treated as a brand new condition and page
+# immediately, so acknowledging would make the noise worse.
+if [ -f "${WORK}/state/ack.probe" ]; then
+  pass "the dedupe stamp is untouched by an ack"
+else
+  fail "the ack deleted the dedupe stamp; the repeat window is now broken"
+fi
+al --key ack.probe --title "Ack probe" >/dev/null 2>&1
+[ "$?" = 5 ] &&
+  pass "a repeat after an ack is still suppressed (exit 5)" ||
+  fail "an acknowledged condition re-paged instead of being suppressed"
+
+hb
+[ "$(beatfield pending)" = 0 ] &&
+  pass "an acknowledged condition drops out of pending" ||
+  fail "pending stayed at $(beatfield pending) after an ack"
+
+# A sibling file must never be counted as a condition in its own right. Getting
+# this wrong makes an acknowledgement INCREASE the count it was meant to reduce.
+if grep -q '\.ack' "${BEATFILE}" || grep -q '\.first' "${BEATFILE}"; then
+  fail "the beat published a sibling metadata file as a condition"
+else
+  pass "the .ack and .first siblings are not published as conditions"
+fi
+
+# Escalation: age must be published, or an unacknowledged condition sits at the
+# same count forever and nothing ever tells the operator it is getting old.
+printf '%s' "$(($(date -u +%s) - 86400))" >"${WORK}/state/ack.probe.first"
+rm -f "${WORK}/state/ack.probe.ack"
+hb
+if [ "$(beatfield oldest)" -ge 86400 ]; then
+  pass "the beat publishes the age of the oldest unacknowledged condition"
+else
+  fail "expected oldest>=86400, got $(beatfield oldest)"
+fi
+
+# A real re-fire after the window clears the ack, so a problem that is still
+# there comes back instead of staying acknowledged forever.
+al --ack ack.probe >/dev/null 2>&1
+printf '%s' "$(($(date -u +%s) - 7200))" >"${WORK}/state/ack.probe"
+al --key ack.probe --title "Ack probe" >/dev/null 2>&1
+hb
+if [ ! -f "${WORK}/state/ack.probe.ack" ] && [ "$(beatfield pending)" = 1 ]; then
+  pass "a re-fire after the repeat window clears the ack and re-counts"
+else
+  fail "an acknowledged condition that fired again stayed acknowledged"
+fi
+
+# --resolve must take the siblings with it, or a resolved condition returns
+# already-acknowledged next time it fires: a firing alert nothing counts.
+al --resolve --key ack.probe --title "Ack probe" >/dev/null 2>&1
+if [ -f "${WORK}/state/ack.probe.first" ] || [ -f "${WORK}/state/ack.probe.ack" ]; then
+  fail "--resolve left an ack or first-seen sibling behind"
+else
+  pass "--resolve removes the dedupe stamp and both siblings"
+fi
+
+# ---------------------------------------------------------------------------
 # Local mode: a real ntfy, a real publish, a real read-back.
 command -v docker >/dev/null 2>&1 || {
   echo "  SKIP  docker is not available; cannot start a local ntfy."

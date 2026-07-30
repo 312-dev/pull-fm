@@ -9,9 +9,24 @@
 > Until 2026-07-29 there was no notification channel anywhere in this project,
 > and the accurate summary was "when something fails it is written to a log on a
 > node and nobody is told". That is no longer true. `infra/observability/`
-> contains one sender, one watchdog, and an `/etc/pullfm/alert.env` written from
-> 1Password, and the path has been fired end to end into a real ntfy server and
-> the message read back.
+> contains one sender, one watchdog, a heartbeat emitter, and an
+> `/etc/pullfm/alert.env` written from 1Password at converge time, and the path has
+> been fired end to end and read back.
+>
+> **The PRIMARY path is no longer ntfy, and no longer a push at all.** Since
+> `SD-003` the node publishes a content-free heartbeat, a scheduled workflow in
+> `312-dev/pullfm-heartbeat` reads it from outside every machine we own, and a
+> GitHub issue plus a red run notify the operator. **The node holds no alerting
+> credential.** The push sink below is optional, provider-agnostic and **unset
+> today**; where this document says "ntfy" about the delivery mechanism, read "the
+> push sink, when one is configured". The ntfy-specific verifications are still
+> valid evidence that the sender works, because they were run against a real ntfy.
+>
+> **A measured correction to the latency claims in this file:** the watcher's cron
+> is best-effort and was observed running 3 times in 4.5 hours on 2026-07-30, so
+> real detection latency for anything that depends on the pull path is **tens of
+> minutes to hours, not 60 seconds**. See `PULLFM-RISK-020`. The 60-second Gate 5
+> budget describes the push sink, which is the path that is currently unset.
 >
 > Of the thirty rows in section 6:
 >
@@ -33,12 +48,17 @@
 > "Configured" is not "proven": a channel nobody has fired is the same class of
 > defect as a backup nobody has restored, and this project has been bitten by
 > exactly that pattern twice (section 10). And "delivered to the ntfy server" is
-> not "a human read it": the operator must still subscribe to the topic, which
-> is the one step nothing in this repository can perform or verify.
+> not "a human read it": the operator must still be subscribed to whichever sink
+> is configured, which is the one step nothing in this repository can perform or
+> verify. On the primary path this is weaker than it used to be, because a GitHub
+> issue assigned to the operator notifies through two independent reasons plus a
+> red workflow run, none of which needs a subscription to be set up by hand.
 >
 > ```bash
-> make alerts-armed   # can this machine notify anyone at all?
-> make alerts         # prove it, end to end, against a real ntfy
+> sudo ./infra/observability/install-alert-env.sh --check   # FOUR network questions
+> make alerts                                              # prove it end to end
+> gh run list -R 312-dev/pullfm-heartbeat --event schedule  # look at the GAPS
+> pullfm-alert --list                                      # what is outstanding
 > ```
 
 ---
@@ -60,9 +80,17 @@ the system is built to **degrade automatically instead of paging**:
 | Paging on a database problem  | Read-only degraded mode: reads served, mutations refused with a clear error                                                       |
 | Paging on a runaway cost      | `./infra/staging-env.sh down` is a hard cap that needs no human at 3am to be effective the next morning                           |
 
-**Notifications still exist**, and they go to ntfy. Their purpose is to tell the
-operator what already happened and what already degraded, not to summon a
-response inside a time budget nobody can keep.
+**Notifications still exist.** They reach the operator as a GitHub issue raised by
+an observer outside all of our infrastructure, and additionally as an immediate
+push if a sink is configured. Their purpose is to tell the operator what already
+happened and what already degraded, not to summon a response inside a time budget
+nobody can keep.
+
+**Clearing one is a verb, not a `rm`.** `pullfm-alert --list` shows what is
+outstanding and how old it is; `--ack <key>` records that a human saw it;
+`--resolve --key <key>` says it is fixed. Deleting a spool file under
+`/var/lib/pullfm/alerts/` also works and leaves no record that an alert was
+cleared, which is why it is not the documented gesture. See `SD-004`.
 
 ### The published SLO
 

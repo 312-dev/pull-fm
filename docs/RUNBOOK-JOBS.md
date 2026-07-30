@@ -209,36 +209,65 @@ of these happened rather than "something failed":
 | `timeout`                      | `timed-out`     | Killed at `RuntimeMaxSec`. Treat the run as incomplete.    |
 | `signal` or `core-dump`        | `killed`        | Check the OOM killer first.                                |
 
-**Arming a node is one command**, and it installs a bearer token as well as an
-endpoint. Since 2026-07-29 the channel is the operator's self-hosted ntfy running
-`auth-default-access: deny-all`, and the credential Pull.fm holds is **write-only
-on `pullfm-staging*` and nothing else** - proven by attempting to read its own
-topic, to read and publish to the personal fleet's `security-*` topics, and to
-publish to `pullfm-prod`, all of which are refused 403. The reasoning and the
-full verification are in [`../security/DECISIONS.md`](../security/DECISIONS.md)
-`SD-002`; the reason it is not simply an anonymous public topic any more is that
-anonymous access to a public ntfy is read-write on **every** topic on that
-instance, which was measured rather than assumed.
+**The node holds no alerting credential at all, and that is deliberate.** This
+paragraph used to describe a write-only ntfy token scoped to `pullfm-staging*` on
+the operator's self-hosted instance. That was `SD-002` and it is **no longer how
+this works**: `SD-003` moved the primary path off the operator's personal
+infrastructure entirely and made it a **pull**. The node publishes a content-free
+heartbeat, nginx serves it at `/.well-known/pullfm-heartbeat`, and a scheduled
+workflow in `312-dev/pullfm-heartbeat` reads it from outside every machine we own
+and opens a GitHub issue when it stops. Nothing on the node can suppress that,
+because there is no credential to steal and nothing to write to.
 
-Both values stay in 1Password and out of this repository. The topic name is no
-longer itself the access control, but the token is, so `alert.env` is still 0600
-root-owned and `--check` still prints the endpoint host while stripping the path.
+The push sink is now **optional, provider-agnostic and unset today**. One
+1Password value (`pull-fm/{env}/ALERT_SINK_URL`) points it at ntfy, Discord, Slack
+or any JSON webhook with no code change. Unset costs latency, not coverage: every
+alert still reaches the external watcher through the heartbeat. Reasoning and full
+verification in [`../security/DECISIONS.md`](../security/DECISIONS.md) `SD-003`
+and `SD-004`.
 
 ```bash
-# From the operator's machine, with `op` signed in:
+# From the operator's machine, with `op` signed in. Converge does this for you;
+# see infra/staging-env.sh. NEVER hand-edit alert.env: the next converge wins.
 PULLFM_ALERT_ENV_LABEL=staging ./infra/observability/install-alert-env.sh --stdout |
   ssh root@NODE 'install -m 0600 -o root -g root /dev/stdin /etc/pullfm/alert.env'
 
-# On the node, prove it rather than assume it:
-/usr/local/bin/pullfm-alert --key arm-test --title 'Pull.fm channel test' \
-  --message "armed at $(date -u +%FT%TZ)"
+# On the node, prove it rather than assume it. Four network questions, not a file.
+sudo ./install-alert-env.sh --check
 ```
 
-Until that file exists on a given node, **an exit 1 is recorded there and nobody
-is told**. `make alerts-armed` answers that question directly, and it asks the
-FILE rather than 1Password, because "can my laptop reach the vault" and "can
-this node tell anyone anything" are different questions and only the second one
-matters at 3am.
+Until the heartbeat is running on a given node, **an exit 1 is recorded there and
+nobody is told**. `--check` answers that by asking the network, including whether
+anything is actually _polling_ the beat, because a switch nobody polls is not a
+switch. It used to read a file and print `ARMED` while every publish was refused
+403, which is why it now reports each question separately and says `NOT PROBED` or
+`SKIPPED` rather than anything that reads like proof.
+
+### Clearing an alert: `--ack` means seen, `--resolve` means fixed
+
+The heartbeat publishes a count of **unacknowledged** conditions, and the watcher
+raises "N unacknowledged alert(s)" from it. There are three supported ways to
+clear one and **none of them is `rm`**:
+
+```bash
+pullfm-alert --list                       # what is outstanding, and HOW OLD
+pullfm-alert --ack <key> --ack-note 'why' # seen, not yet fixed. RECORDS who+when
+pullfm-alert --resolve --key <key>        # the condition actually went away
+systemctl reset-failed <unit>             # for a unit: key, still the right gesture
+```
+
+**Do not delete files under `/var/lib/pullfm/alerts/` to clear a count.** It works,
+and that is the problem: it leaves no record that an alert was cleared, and the
+habit does not distinguish a probe you recognise from a real alert you have not
+read yet. `--ack` records who acknowledged, when, from which host and optionally
+why, and it deliberately leaves the dedupe stamp in place so the repeat window
+keeps working.
+
+An ack is **not** permanent amnesty: if the condition fires again after the repeat
+window it returns to unacknowledged, and the beat publishes `oldest` so a
+long-standing condition can escalate on age instead of sitting at the same count.
+Acking a key that is not pending **fails with exit 6** rather than pretending to
+succeed. `pullfm-alert --list` is the supported way to find the exact key to type.
 
 This is also still the reason `purge:audit` carries its own in-band freshness
 signal: the `stale` field of its run outcome reports that nothing was anonymized

@@ -67,18 +67,74 @@ UNIT_GLOB=${PULLFM_HEARTBEAT_UNIT_GLOB:-pullfm-*}
 NOW=$(date -u +%s)
 WHEN=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# ---------------------------------------------------------------------------
+# ACKNOWLEDGEMENT AND AGE
+#
+# `pending` means UNACKNOWLEDGED, not "ever fired". A key is excluded from the
+# count when `pullfm-alert --ack <key>` has written a sibling record for it. The
+# layout, whose only writer is pullfm-alert:
+#
+#   <key>         the dedupe stamp, one Unix timestamp
+#   <key>.first   the epoch the key was first seen, written once
+#   <key>.ack     an acknowledgement record: epoch, who, host, iso, note
+#
+# The two suffixes are SKIPPED as keys in their own right. Getting that wrong
+# would publish "mykey.ack" as a separate condition, so an acknowledgement would
+# have INCREASED the count it was meant to reduce.
+#
+# `oldest` is published alongside the count because a count alone cannot
+# escalate: an unacknowledged condition sits at pending=1 forever whether it
+# started a minute ago or a week ago, and an alarm that never changes is one an
+# operator stops reading. It is a scalar age in seconds and names nothing, so it
+# adds no disclosure beyond what `pending` and `keys` already carry.
+# ---------------------------------------------------------------------------
+ACK_SUFFIX=.ack
+FIRST_SUFFIX=.first
+
+# THE SAME SANITISER pullfm-alert applies before a key reaches the filesystem.
+# It has to be the same, and this is the subtle part: a `unit:` key is PUBLISHED
+# with its colon, because that is what the runbooks and the beat have always
+# shown and it is what an operator types, but a colon is not in the safe set, so
+# the FILE is `unit_foo.ack`. Looking the ack up under the published spelling
+# would silently never find it, and an acknowledgement that appears to be
+# recorded and is never read is worse than no ack verb at all.
+safe() { printf '%s' "${1}" | tr -c 'a-zA-Z0-9._-' '_' | cut -c1-96; }
+
 keys=""
 add_key() {
+  # An acknowledged key is still a real condition; it is simply one a human has
+  # said they have seen. It is dropped from the beat entirely rather than
+  # published with a flag, because the beat is public and the count is the whole
+  # contract with the watcher.
+  [ -f "${STATE_DIR}/$(safe "${1}")${ACK_SUFFIX}" ] && return 0
   case " ${keys} " in
     *" $1 "*) ;;
     *) keys="${keys}${keys:+ }$1" ;;
   esac
 }
 
+# Oldest first-seen epoch across everything still counted, so the watcher can
+# report how long the longest-standing condition has been outstanding.
+oldest_epoch=0
+note_age() {
+  _ne_f="${STATE_DIR}/$(safe "${1}")${FIRST_SUFFIX}"
+  _ne_e=""
+  [ -f "${_ne_f}" ] && _ne_e=$(cat "${_ne_f}" 2>/dev/null || true)
+  # No .first (a systemd failed unit, or a key predating this field) contributes
+  # no age rather than contributing zero. Zero would read as "started just now"
+  # and would make the oldest condition on the node look brand new.
+  case "${_ne_e}" in '' | *[!0-9]*) return 0 ;; esac
+  if [ "${oldest_epoch}" -eq 0 ] || [ "${_ne_e}" -lt "${oldest_epoch}" ]; then
+    oldest_epoch=${_ne_e}
+  fi
+}
+
 # --- source 1: live dedupe stamps ------------------------------------------
 if [ -d "${STATE_DIR}" ]; then
   for f in "${STATE_DIR}"/*; do
     [ -e "${f}" ] || continue
+    # The sibling metadata files are not conditions.
+    case "${f}" in *"${ACK_SUFFIX}" | *"${FIRST_SUFFIX}") continue ;; esac
     add_key "$(basename "${f}")"
   done
 fi
@@ -95,7 +151,17 @@ $(systemctl list-units "${UNIT_GLOB}" --state=failed --plain --no-legend --no-pa
 EOF
 
 PENDING=0
-for _k in ${keys}; do PENDING=$((PENDING + 1)); done
+for _k in ${keys}; do
+  PENDING=$((PENDING + 1))
+  note_age "${_k}"
+done
+
+# Seconds since the longest-standing unacknowledged condition was FIRST seen.
+# 0 means "nothing pending, or no age is known for anything pending", and the
+# watcher treats it as no-age rather than as zero-age for that reason.
+OLDEST=0
+[ "${oldest_epoch}" -gt 0 ] && OLDEST=$((NOW - oldest_epoch))
+[ "${OLDEST}" -lt 0 ] && OLDEST=0
 
 # JSON assembled by hand rather than with a library, for the same reason
 # metrics.ts has no client library: the shape is four scalars and a list of
@@ -118,8 +184,8 @@ mkdir -p "$(dirname "${BEAT}")" 2>/dev/null || true
 chmod 0755 "$(dirname "${BEAT}")" 2>/dev/null || true
 
 TMP="${BEAT}.tmp.$$"
-printf '{"v":1,"env":"%s","ts":"%s","epoch":%s,"pending":%s,"keys":[%s]}\n' \
-  "${ENVLABEL}" "${WHEN}" "${NOW}" "${PENDING}" "${klist}" >"${TMP}" 2>/dev/null || {
+printf '{"v":1,"env":"%s","ts":"%s","epoch":%s,"pending":%s,"oldest":%s,"keys":[%s]}\n' \
+  "${ENVLABEL}" "${WHEN}" "${NOW}" "${PENDING}" "${OLDEST}" "${klist}" >"${TMP}" 2>/dev/null || {
   echo "pullfm-heartbeat: could not write ${TMP}" >&2
   exit 1
 }
