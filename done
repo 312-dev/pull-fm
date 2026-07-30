@@ -6,35 +6,53 @@ corrected: it is a handoff, so it is written as one.
 
 ---
 
-## READ THIS FIRST: THE TREE IS MID-EDIT, WITH TWO LIVE AGENTS IN IT
+## STATE AT CLOSE: TREE CLEAN, EVERYTHING PUSHED, ALL GATES GREEN
 
-At the moment of writing, `git status` shows:
+Updated after the two in-flight agents landed. The earlier version of this section
+warned about a mid-edit tree with live agents in it; that is no longer the case.
 
 ```
- M apps/bff/src/config.ts                        <- partial, has an unused import
- M apps/bff/src/lib/errors.ts                    <- complete
-?? apps/bff/src/lib/registration-allowlist.ts    <- complete, 271 lines
+git status --porcelain          -> empty
+git log origin/main..HEAD       -> empty
+git stash list                  -> empty
 ```
 
-`parseRegistrationAllowlist` is imported into `config.ts` and not yet used. That
-is a **partial edit in flight, not a defect.** Do not "fix" it by deleting the
-import.
+Verified at close, in one pass:
 
-**Two agents are running right now.** Both were killed earlier by a transient API
-connection error and resumed from their transcripts:
+| Gate | Result |
+| --- | --- |
+| `pnpm typecheck` | 0 |
+| `pnpm lint` | 0 |
+| `pnpm test` | **1,243 passed** (863 BFF, 327 upstream, 31 discovery, 22 crypto) |
+| `pnpm format:check` | clean |
+| `node tools/check-public-identifiers.mjs` | 0 |
+| `node security/private/check-accepted-risks.mjs --file ...` | 18 valid, none expired |
+| `node legal/check-publication-blockers.mjs` | 19 markers, **expected**, all client or publication side |
 
-| Agent | Task | Owns | State |
-| --- | --- | --- | --- |
-| `a2df349a6620d455e` | Registration email allowlist | `config.ts`, `routes/v1/auth.ts`, `lib/errors.ts`, `lib/schemas.ts`, `lib/registration-allowlist.ts`, `apps/bff/test/**`, `infra/lib/secrets.sh` | ~70% |
-| `a504d7c8a4093b653` | Serve the legal documents over HTTP | a new `routes/v1/legal.ts`, `routes/v1/index.ts`, `lib/legal-documents.ts`, NEW migrations, `security/zap/upstream-scope.tsv`, `docs/api/**` | nothing written yet |
+**Both CI gates were red on `main` and both are now fixed.** Neither was
+pre-existing despite being reported that way. `check-public-identifiers` had seven
+live findings, now in `ALLOW` with reasons, and the baseline shrank by 15 stale
+entries. `format:check` listed twelve files, **every one created or modified during
+this session**. `legal/` was verified untouched after formatting, because Prettier
+reflowing a legal document would silently invalidate every digest the consent
+registry records.
 
-**Do not edit their files.** If you must, read fresh immediately before and make
-minimal targeted edits. This session lost work once to a `git add -A` that swept
-in a live agent's changes and tripped a pre-commit hook that stashed and
-reverted.
+### The two tasks that landed last
 
-**Everything committed is pushed.** `git log origin/main..HEAD` is empty. So
-anything uncommitted in the tree belongs to those two agents.
+**Registration email allowlist.** `AUTH_REGISTRATION_ALLOWLIST`, enforced at
+`preHandler` on `/auth/start` and `/auth/verify` and in the handler on
+`/auth/callback`. Empty means open. This is the interim enforcement of the
+single-End-User premise that keeps SeatGeek clause 4.3 out of scope, and
+**emptying it is gated on a client that presents the Terms.**
+
+**Legal document serving.** Three public routes under `/v1/legal`, serving the
+normalised text so the client contract is sha256-of-what-arrived with no
+preprocessing. Historical text is stored in `legal_document_revisions.content`
+because the runtime image has no `.git`. A `CHECK` refuses to store text whose
+digest disagrees with its own row. The `apps/bff/Dockerfile` `COPY legal /app/legal`
+is load-bearing: without it `content` publishes NULL, every document endpoint
+503s, and the consent gate refuses every new user with nothing able to show them
+what to accept.
 
 ---
 
@@ -141,7 +159,9 @@ deliberate to whoever finds it next.
   bucket" in **four places**. There is no EU bucket.
 - `legal/privacy-policy.md` processor table still carries `[OPEN]` and `[CONFIRM]`
   against Cloudflare, WorkOS and Hetzner. **All four DPAs are now executed and
-  dated**; see the 1Password items. Cloudflare's §6.1 also has a **CCPA limb**, so
+  dated**, filed as 1Password documents under `pull-fm/legal/`: Neon signed both
+  sides (2024-11-22 and 2026-07-29), Hetzner executed 2026-07-30 with 312.dev LLC
+  as controller, WorkOS and Cloudflare auto-binding with dated PDF snapshots. Cloudflare's §6.1 also has a **CCPA limb**, so
   it binds with zero European users, which is stronger than the "conditional"
   language currently in the document.
 - `infra/backup/restore-drill.sh` says `pull-fm-ledger-drill` "still exists and is
@@ -180,7 +200,18 @@ deliberate to whoever finds it next.
   a pending alert means deleting a spool file under `/var/lib` by hand (task 32).
 
 **Needs the human**
-- The **allowlist env value**, once that agent reports the variable name.
+- **Set the allowlist**, which is the one action that turns today's legal position
+  from defensible-if-questioned into simply correct. On the node in
+  `/etc/pullfm/bff.env`, or via a converge so it survives the next `up`:
+
+  ```
+  AUTH_REGISTRATION_ALLOWLIST=gray@grayada.ms
+  ```
+
+  Deliberately not committed anywhere: `check-public-identifiers` blocks the
+  operator's address in tracked files, so `config.ts` and `secrets.sh` carry
+  placeholders and the real value exists only in the shell and the rendered env
+  file. With it set, the events route can be enabled and tested freely.
 - **One counsel question**: is a backend-only deployment an "Application" under
   SeatGeek's definitions? Their definition includes "or is designed to access or
   use" the APIs. If yes, clause 4.3's display and acceptance duties are breached
