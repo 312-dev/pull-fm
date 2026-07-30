@@ -185,14 +185,14 @@ export const CONSENT_DOCUMENTS: readonly LegalDocument[] = [
   consentDocument({
     id: "terms-of-service",
     path: "legal/terms-of-service.md",
-    version: "DRAFT-0",
+    version: "DRAFT-1",
     consentEpoch: 1,
     material: true,
     contentSha256:
-      "cead3bec4b7fa6a8b2044cb83d50a00699f51935b3eda90c6aeccf8d02f0abeb",
+      "58801e48df45b3682454f64efe05e7174cce2ff8d14f60fdd8b38d9fd54f5a57",
     effectiveAt: null,
     notes:
-      "First recorded revision. Epoch 1 is the baseline: every user must accept it and no earlier acceptance exists to carry over. The document is still DRAFT-0 and NOT YET EFFECTIVE (it has not been reviewed by a lawyer), which is why effectiveAt is null.",
+      "DRAFT-1 rewrites section 17 (Changes to these Terms). MATERIAL: it changes how an amendment binds, which is as substantive as a clause gets. DRAFT-0 said 'Continuing to use Pull.fm after a change takes effect means you accept it', which failed on two counts. It is the arrangement rejected in Sgouros v. TransUnion Corp., 817 F.3d 1029 (7th Cir. 2016), binding over Illinois and therefore over these Terms. And it described a WEAKER mechanism than the code implements: the consent epoch in this registry refuses writes until a material revision is affirmatively accepted, so the service never infers agreement from continued use. The clause simultaneously leaned on a rejected theory and understated the control that makes the theory unnecessary. EPOCH STAYS 1 because DRAFT-0 was never published: both live databases hold zero revisions and zero consents, so there is no acceptance to invalidate and no predecessor for this to supersede. The BEFORE INSERT guard in migration 0008 requires a document's first revision to be epoch 1 and material, which this is. Raising it to 2 would assert this supersedes a publication users accepted, and the guard would refuse. Still NOT YET EFFECTIVE pending legal review, hence effectiveAt null.",
   }),
   consentDocument({
     id: "privacy-policy",
@@ -261,10 +261,10 @@ export const CONSENT_PRESENTATION: LegalDocument = consentDocument({
   consentEpoch: 1,
   material: true,
   contentSha256:
-    "43822a8c07b001715756a4cad97754e177c16410b7c39639ce4dea979fd985b0",
+    "e46cd3ea8965b58d96e4eb59929f7e86539c3b54b662af5f75db0d454a670b68",
   effectiveAt: null,
   notes:
-    "First recorded revision of the consent screen copy: what is displayed, what the affirmative act is, what the button says, what a decline does, and what a returning user is told after a material revision. Epoch 1 and material because it is the first revision of this document, which the epoch guard in migration 0008 requires and which is also the fact - nothing preceded it. NOT A DOCUMENT ANYBODY ACCEPTS: it is published and recorded so that a change to the words around the button is a versioned, reviewable decision rather than a client string edit, and so that the words live on a given date are retrievable afterwards. The materiality rubric for THIS document is in its own section 2 and is narrower than the other two: the question is whether the change alters whether, or to what, assent was communicated.",
+    "First recorded revision of the consent screen copy: what is displayed, what the affirmative act is, what the button says, what a decline does, and what a returning user is told after a material revision. Epoch 1 and material because it is the first revision of this document, which the epoch guard in migration 0008 requires and which is also the fact - nothing preceded it. NOT A DOCUMENT ANYBODY ACCEPTS: it is published and recorded so that a change to the words around the button is a versioned, reviewable decision rather than a client string edit, and so that the words live on a given date are retrievable afterwards. The materiality rubric for THIS document is in its own section 2 and is narrower than the other two: the question is whether the change alters whether, or to what, assent was communicated. HELD AT DRAFT-0 THROUGH THE 2026-07-30 TERMS REVISION, and the asymmetry with terms-of-service is deliberate. Section 3.1 quotes the liability caps, so the 'Highlights checked against' line had to advance from terms-of-service@DRAFT-0 to DRAFT-1, which moved this file's digest. That edit is COSMETIC under this document's own rubric: it records that a human re-read the highlights and found the quoted figures unchanged, and it alters neither what a user is shown nor what they are asked, which is the only question that makes a change to this document material. The version is held rather than bumped because DRAFT-0 has never been published anywhere: it was written on 2026-07-30, both live databases hold zero revisions, and ensureRevisions only refuses REDEFINING a published version. Editing an unpublished draft in place is not a revision. terms-of-service was bumped to DRAFT-1 instead because its DRAFT-0 has existed across many commits and may sit in a developer database, where redefining it would fail. Note also that a cosmetic bump here would be REFUSED by the epoch guard: the first revision of any document must be epoch 1 AND material, so a DRAFT-1 marked cosmetic could not be the first row.",
 });
 
 /**

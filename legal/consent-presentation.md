@@ -49,7 +49,7 @@
 **Version:** DRAFT-0 (unpublished)
 **Last updated:** 2026-07-30
 **Effective:** not yet effective
-**Highlights checked against:** `terms-of-service@DRAFT-0`, `privacy-policy@DRAFT-1`
+**Highlights checked against:** `terms-of-service@DRAFT-1`, `privacy-policy@DRAFT-1`
 
 The `Highlights checked against` line above is **machine-checked**, not
 decorative. `apps/bff/test/integration/legal-versions.test.ts` compares it to the

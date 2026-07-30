@@ -68,8 +68,8 @@
 > was the shortest of the three, which had dropped the protectiveness standard
 > entirely.
 
-**Version:** DRAFT-0 (unpublished)
-**Last updated:** 2026-07-29
+**Version:** DRAFT-1 (unpublished)
+**Last updated:** 2026-07-30
 **Effective:** not yet effective
 
 ---
@@ -742,9 +742,44 @@ We may update these Terms. When we do, we will change the "Last updated" date an
 publish the new version at the same stable URL, and the change history is visible
 in this repository's git log, which is public.
 
-For a **material** change we will give notice in the application before it takes
-effect. Continuing to use Pull.fm after a change takes effect means you accept
-it. If you do not accept it, delete your account.
+**A material change requires you to accept it. We do not treat continuing to use
+Pull.fm as acceptance of one.** When we publish a material revision, Pull.fm asks
+you to read it and accept it, and until you do:
+
+- **you keep read access.** Your account is not suspended and nothing is deleted.
+  A revision is our act, not yours, and locking you out of your own data because
+  we rewrote a document would be a penalty for something you did not do.
+- **changes you make are refused.** You may not add to your wishlist, mint a
+  token, or connect an account, because those are the things the Terms govern and
+  we do not have your agreement to the version that would govern them.
+- **you may always leave.** Export and deletion keep working. They are never
+  conditioned on accepting anything, which is stated in
+  [`privacy-policy.md`](privacy-policy.md) and enforced in the code.
+
+A change that is **not** material does not ask anything of you. That distinction
+is not ours to make loosely: every published revision is recorded with a version,
+a digest of its exact text, and a flag saying whether it was material, in an
+append-only table whose rows cannot be edited afterwards. Marking a material
+change as cosmetic to avoid asking you is therefore a thing we would have to do on
+the record.
+
+> **This clause used to read: "Continuing to use Pull.fm after a change takes
+> effect means you accept it."** It was replaced for two reasons, and the second
+> is the one that matters.
+>
+> First, that is the arrangement that failed in `Sgouros v. TransUnion Corp.`, 817
+> F.3d 1029 (7th Cir. 2016), which is Seventh Circuit law over Illinois and
+> therefore over these Terms. A court declined to find a contract there even
+> though the terms were displayed and the user completed a paid purchase, because
+> the interface did not communicate that proceeding was assent. Continued use
+> communicates less than that, not more.
+>
+> Second, **it described a weaker mechanism than the one Pull.fm actually
+> implements**, which made the sentence untrue about our own system. The service
+> does not infer your agreement from continued use; it stops accepting your
+> changes and asks. So the old clause simultaneously relied on a theory a court
+> rejected and understated the control that makes the theory unnecessary. Both
+> halves are fixed by describing what the code does.
 
 ---
 

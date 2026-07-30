@@ -108,7 +108,7 @@
  *
  *   node packages/db/scripts/consent-evidence.mjs --out DIR [options]
  *     --subject <uuid|email>     add a dossier for one subject
- *     --revision <id@vA..vB>     add a diff between two published versions and the
+ *     --revision <id:vA..vB>     add a diff between two published versions and the
  *                                list of subjects who re-consented after it
  *     --unredact --reason TEXT    include ip, user_agent, session_id and email in
  *                                the subject dossier. Both flags or neither.
@@ -267,7 +267,7 @@ function usage(problem) {
       "    node packages/db/scripts/consent-evidence.mjs --out DIR [options]",
       "",
       "  --subject <uuid|email>    add a dossier for one subject",
-      "  --revision <id@vA..vB>    add a diff and the re-consent list for it",
+      "  --revision <id:vA..vB>    add a diff and the re-consent list for it",
       "  --unredact --reason TEXT  include ip, user_agent, session_id, email",
       "  --required a,b            required documents, if the registry is unreadable",
       "  --max-roster N            cap the outstanding roster (default 10000)",
@@ -767,7 +767,7 @@ async function collectSubject(client, outDir, identifier, unredact, revisions) {
     // to another directory" is how an auditor is made to do our work.
     let acceptedTextFile = null;
     if (revision?.textFile != null) {
-      acceptedTextFile = `subject/accepted/${row.document_id}@${row.document_version}.md`;
+      acceptedTextFile = `subject/accepted/${row.document_id}--${row.document_version}.md`;
       writeBundleFile(
         outDir,
         acceptedTextFile,
@@ -851,10 +851,10 @@ function copyCurrentAt(revisions, when) {
 
 /** Question 4: what changed between two versions, and who re-consented after. */
 async function collectRevisionDiff(client, outDir, spec, revisions) {
-  const parsed = /^([a-z][a-z0-9-]{2,63})@(.+?)\.\.(.+)$/.exec(spec);
+  const parsed = /^([a-z][a-z0-9-]{2,63}):(.+?)\.\.(.+)$/.exec(spec);
   if (parsed === null) {
     usage(
-      `--revision must look like documentId@fromVersion..toVersion, got ${spec}`,
+      `--revision must look like documentId:fromVersion..toVersion, got ${spec}`,
     );
   }
   const [, documentId, from, to] = parsed;
@@ -1286,7 +1286,7 @@ ${opts.unredact ? `\n**Reason given for unredaction:** ${opts.reason}\n` : ""}
 | \`documents/<id>@<version>.md\` | The exact text of each, as the bytes its digest covers. |
 | \`schema/append-only.sql\` | The append-only triggers and constraints, read out of the LIVE database. |
 | \`outstanding.json\` | Who has not accepted the current epoch, per required document. |
-${manifest.scope.subject === null ? "" : "| `subject/consents.json` | One subject's full consent history. |\n| `subject/accepted/<id>@<version>.md` | The text that subject agreed to, at the version they agreed to. |\n"}${manifest.scope.revision === null ? "" : "| `revision/<id>/<a>..<b>.diff` | What changed between two published versions. |\n| `revision/<id>/<a>..<b>.json` | Who re-consented after it, and who did not. |\n"}
+${manifest.scope.subject === null ? "" : "| `subject/consents.json` | One subject's full consent history. |\n| `subject/accepted/<id>--<version>.md` | The text that subject agreed to, at the version they agreed to. |\n"}${manifest.scope.revision === null ? "" : "| `revision/<id>/<a>..<b>.diff` | What changed between two published versions. |\n| `revision/<id>/<a>..<b>.json` | Who re-consented after it, and who did not. |\n"}
 ## Verifying this without trusting us
 
 \`\`\`bash
