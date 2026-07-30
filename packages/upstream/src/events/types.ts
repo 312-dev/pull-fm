@@ -29,9 +29,16 @@
  *        link target instead of a string.
  *   4.4  No Personal Data may be sent to the API. `EventsQuery` therefore takes
  *        a coarse place name and has no coordinate or postal-code field at all.
- *   7.13 No systematic downloading or storage, and no exposure to a search
+ *   4.7  No systematic downloading or storage, and no exposure to a search
  *        engine, directory, or AI/ML system. That bounds our caching and, more
  *        awkwardly, bounds who we may expose this data to downstream.
+ *
+ * The last one was cited as "7.13" throughout this package until 2026-07-29.
+ * There is no clause 7.13: section 7 of SeatGeek's terms is Suspension and
+ * Termination, and the prohibitions are in 4.7, Rules of Conduct. The wrong
+ * number came from a paraphrase written when the live terms 403'd every
+ * automated fetch, and it propagated to eleven files. Cite against the section
+ * map in the vendor-spec file, which exists so that cannot happen twice.
  */
 
 /** Where a vendor's catalogue is actually good. Drives an honest empty state. */
@@ -147,7 +154,7 @@ export interface EventsProviderMetadata {
   readonly pricingUnavailable: true;
   /**
    * True when the vendor's terms forbid exposing their material to a search
-   * engine, directory, or AI/ML system (SeatGeek terms 7.13).
+   * engine, directory, or AI/ML system (SeatGeek terms 4.7).
    *
    * Consumers MUST NOT place this data behind a general-purpose API token, a
    * public feed, or anything a crawler or model can reach. Surfaced on the

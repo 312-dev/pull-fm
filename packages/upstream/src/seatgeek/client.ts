@@ -40,6 +40,12 @@
  * violation throws before the request is built. An allow-list rather than a
  * deny-list because the parameter that leaks a user is the one nobody thought
  * to ban.
+ *
+ * The value checks were widened on 2026-07-29: the original coordinate pattern
+ * was anchored to the whole value, so `venue.city=41.8781` was refused and
+ * `venue.city=41.8781,-87.6298` was sent. See `COORDINATE_PAIR_RE` below for the
+ * full account. The allow-list itself was never the weak half; the assumption
+ * that a leak arrives as a bare number was.
  */
 
 import { UpstreamError } from "../errors.js";
@@ -234,6 +240,73 @@ const EMAIL_RE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
 /** US ZIP or ZIP+4, and the UK/CA shapes, in case one is ever passed through. */
 const POSTAL_RE = /^(?:\d{5}(?:-\d{4})?|[A-Z]\d[A-Z] ?\d[A-Z]\d)$/i;
 
+/**
+ * A coordinate PAIR anywhere inside a value, in any of the usual separators.
+ *
+ * ---------------------------------------------------------------------------
+ * THIS CLOSES A REAL HOLE IN THE 4.4 GUARD, FOUND 2026-07-29 AUDITING THE
+ * CLAUSE-BY-CLAUSE COMPLIANCE OF THIS PACKAGE.
+ *
+ * WHAT WAS WRONG. `COORDINATE_RE` is anchored `^...$`, so it only fired when the
+ * WHOLE parameter value was a single decimal number. The route at
+ * `GET /v1/artists/:mbid/events` accepts `city` as a free string up to 128
+ * characters and passes it straight to `venue.city`. So:
+ *
+ *     ?city=41.8781            -> rejected  (whole value matches)
+ *     ?city=41.8781,-87.6298   -> ACCEPTED, and sent to SeatGeek
+ *
+ * The second form is a user's exact location, arriving at the vendor as a query
+ * parameter, which is precisely what 4.4 forbids and precisely what this function
+ * was written to prevent. It is also the MORE likely shape: a client holding a
+ * geolocation fix concatenates the pair, it does not send one axis.
+ *
+ * WHY THIS SHAPE. Three checks, layered, because each catches something the
+ * others structurally cannot:
+ *
+ *   COORDINATE_RE       whole value is one axis. Applies to every parameter,
+ *                       including ones where free text is not expected.
+ *   COORDINATE_PAIR_RE  two axes anywhere in the value. Applies to every
+ *                       parameter. Safe against the ISO timestamp in
+ *                       `datetime_utc.gte` ("...T00:00:00.000Z" contains a
+ *                       decimal-looking run but no comma-separated second one).
+ *   EMBEDDED            one axis anywhere in the value, but ONLY for parameters
+ *                       that legitimately carry free text. Unanchored on
+ *                       `datetime_utc.gte` this WOULD false-positive on the
+ *                       milliseconds, which is why it is key-scoped rather than
+ *                       global. A city, state, country or performer slug never
+ *                       contains a number with three or more decimal places.
+ *
+ * The postal-code check is scoped the same way and for a sharper reason: a
+ * SeatGeek performer or event id can be five digits, so an unscoped ZIP check
+ * would reject `id=60614` as a postal code and break ordinary lookups. That is
+ * why `POSTAL_RE` is applied to the free-text place parameters only.
+ *
+ * Throwing on a coordinate pair means a caller that ever assembles one gets a
+ * loud failure at the boundary instead of a silent breach. See the header of
+ * this file for why an allow-list plus value inspection, rather than either
+ * alone.
+ */
+const COORDINATE_PAIR_RE = /-?\d{1,3}\.\d{3,}\s*[,;|/]\s*-?\d{1,3}\.\d{3,}/;
+
+/** One coordinate axis anywhere in the value. Only safe on free-text params. */
+const EMBEDDED_COORDINATE_RE = /-?\d{1,3}\.\d{3,}/;
+
+/**
+ * Parameters whose values are human place names or search text, so a number with
+ * three or more decimal places in one is never legitimate.
+ *
+ * Deliberately NOT `id`, `page`, `per_page`, `taxonomies.id`, `performers.id` or
+ * either `datetime_utc` bound: those carry numbers and timestamps that a
+ * coordinate- or postal-shaped test would reject for looking like themselves.
+ */
+const SEATGEEK_FREE_TEXT_PARAMS: ReadonlySet<string> = new Set([
+  "q",
+  "venue.city",
+  "venue.state",
+  "venue.country",
+  "performers.slug",
+]);
+
 export class PersonalDataRejectedError extends Error {
   public override readonly name = "PersonalDataRejectedError";
   constructor(detail: string) {
@@ -261,9 +334,23 @@ export function assertNoPersonalData(
       );
     }
     const asString = typeof value === "number" ? String(value) : value;
-    if (COORDINATE_RE.test(asString.trim())) {
+    const trimmed = asString.trim();
+    if (COORDINATE_RE.test(trimmed)) {
       throw new PersonalDataRejectedError(
         `parameter "${key}" looks like a precise coordinate`,
+      );
+    }
+    if (COORDINATE_PAIR_RE.test(asString)) {
+      throw new PersonalDataRejectedError(
+        `parameter "${key}" contains a precise coordinate pair`,
+      );
+    }
+    if (
+      SEATGEEK_FREE_TEXT_PARAMS.has(key) &&
+      EMBEDDED_COORDINATE_RE.test(asString)
+    ) {
+      throw new PersonalDataRejectedError(
+        `parameter "${key}" contains a precise coordinate`,
       );
     }
     if (EMAIL_RE.test(asString)) {
@@ -271,7 +358,7 @@ export function assertNoPersonalData(
         `parameter "${key}" looks like an email address`,
       );
     }
-    if (key.startsWith("venue.") && POSTAL_RE.test(asString.trim())) {
+    if (SEATGEEK_FREE_TEXT_PARAMS.has(key) && POSTAL_RE.test(trimmed)) {
       throw new PersonalDataRejectedError(
         `parameter "${key}" looks like a postal code; use a city name instead`,
       );
@@ -407,7 +494,32 @@ export class SeatGeekClient implements Provider {
   }
 }
 
-/** Exposed for the bulk-dump backfill path; see seatgeek/bulk-performers.ts. */
+/**
+ * Unwraps a `{ performer: {...} }` envelope, or parses a bare performer record.
+ *
+ * ---------------------------------------------------------------------------
+ * THE COMMENT ON THIS FUNCTION USED TO POINT AT A MODULE THAT WAS DELETED FOR
+ * BEING A LICENCE BREACH, AND IT READ AS AN INVITATION TO RECREATE IT.
+ *
+ * It said: "Exposed for the bulk-dump backfill path; see
+ * seatgeek/bulk-performers.ts". That module was deleted deliberately, not
+ * misplaced. It parsed SeatGeek's hourly whole-catalogue JSONL performers dump,
+ * and ingesting a whole-catalogue dump into local storage is close to the
+ * definition of the "systematically downloading or storing SeatGeek Materials"
+ * that terms 4.7 prohibits. The vendor-spec file records the deletion and its
+ * reasoning, including the sentence "dormant code with a 'do not enable' note is
+ * an invitation" - and then a stale doc comment left exactly that invitation
+ * behind, naming the deleted file as though it were the intended consumer.
+ *
+ * The function itself is harmless and stays: it is a shape-tolerance helper, and
+ * the live `/performers/{id}` endpoint is the reason to keep it. What is removed
+ * is the pointer that told the next reader a bulk path was planned.
+ *
+ * IF A BULK PATH IS EVER WANTED, it needs a licensed bulk agreement with
+ * SeatGeek first, not a parser. Re-adding one should require the conversation the
+ * vendor-spec file records, and the deleted module is in git history at `705a3d8`
+ * for whoever has had that conversation.
+ */
 export function performerRecordOf(payload: unknown): SeatGeekPerformer | null {
   const record = optRecord(payload, "performer") ?? payload;
   return parsePerformer(record);

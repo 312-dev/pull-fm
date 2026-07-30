@@ -393,12 +393,30 @@ that checks this gate.
 **Gate L stopped being paperwork and became a shipping blocker.** SeatGeek's API
 terms make both documents contractual preconditions:
 
-| Clause  | Requires                                                                                                                                                                                                            |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **4.4** | A Privacy Policy that accurately discloses what we collect, store, use and disclose                                                                                                                                 |
-| **4.3** | An Application EULA with terms **at least as protective of SeatGeek as their own API terms**, **expressly designating the SeatGeek Entities as third-party beneficiaries entitled to enforce it against end users** |
+| Clause   | Requires                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **4.4**  | A Privacy Policy that accurately discloses what we collect, store, use and disclose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **4.3**  | An Application EULA that the Application displays and that each End User must accept before using it, containing terms - expressly including warranty disclaimers and limitations of liability - **at least as protective of the SeatGeek Entities as SeatGeek's own API Terms**, complying with any third-party app-store requirements, and **expressly designating the SeatGeek Entities as third-party beneficiaries entitled to enforce it against End Users directly**; plus (i) all reasonable efforts to enforce it and (ii) no action on behalf of, collection of information from or regarding, or device access for any End User without that End User's affirmative authorisation |
+| **4.2**  | SeatGeek may review the Application and **require changes to it**. No engineering mitigation exists; it is a standing condition of access, so the client needs a working update path before events are enabled                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| **12.2** | Their terms are governed by **New York** law with exclusive venue in New York County, and any cause of action **by us** must be brought **within six months**. A dispute with SeatGeek therefore has a short and easily missed clock                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-Until both exist, `GET /v1/artists/:mbid/events` cannot be enabled at all.
+Until the first two exist, `GET /v1/artists/:mbid/events` cannot be enabled at
+all.
+
+> **The 4.3 row is quoted from the real terms and is now identical in three
+> places** - here, in `docs/PLAN.md` §11.7, and in `legal/terms-of-service.md`'s
+> banner - against the canonical rendering in
+> [`../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md`](../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md).
+>
+> **It was not, until 2026-07-29.** The terms 403 every automated fetch, so every
+> analysis in this repository had worked from a paraphrase in which 4.3 was not
+> marked verbatim. This scorecard carried the protectiveness standard, `PLAN.md`
+> reduced it to the beneficiary designation alone, and the vendor-spec digest
+> dropped the standard entirely. Three renderings of one shipping gate meant
+> nobody could check it, and the consequence was concrete: `terms-of-service.md`
+> section 13 capped the SeatGeek Entities at USD 100 while SeatGeek's own clause
+> 8.2 caps them at USD 50, so the clause written to satisfy 4.3 breached it. That
+> is fixed. **If this row is ever edited, edit all three or none.**
 
 **What blocks publication is code, not drafting.** The privacy policy carries an
 appendix of `[OPEN]` items where the system does not do what a policy would have

@@ -11,12 +11,51 @@
  * most daily. Caching them together would force a name resolution every time an
  * event list expired, which is exactly the cost the id cache exists to remove.
  *
- * Both TTLs are bounded by terms 7.13 (no systematic downloading or storage),
- * not by how volatile the data is. See vendor-specs/seatgeek-api-terms.
- *
  * A resolution miss is a normal empty result, not an error: most artists in a
  * discovery feed are not on tour, and a plausible number are simply not in
  * SeatGeek's catalogue at all.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT CLAUSE 4.7 ACTUALLY CONSTRAINS, AND WHAT THESE TTLS ACTUALLY BUY
+ *
+ * WHAT WAS WRONG. This header said "Both TTLs are bounded by terms 7.13 (no
+ * systematic downloading or storage)" and the constants below said the seven days
+ * "is a compliance boundary". Two errors in one sentence.
+ *
+ * The clause is 4.7 (Rules of Conduct), not 7.13. Section 7 of SeatGeek's terms
+ * is Suspension and Termination and has no subsection 13; the wrong number came
+ * from a paraphrase and was copied into eleven files. Corrected 2026-07-29 when
+ * the terms were read in full.
+ *
+ * And the clause CONTAINS NO DURATION. 4.7 prohibits "systematically downloading
+ * or storing" SeatGeek Materials and prohibits placing them into "a search
+ * engine, directory, or AI or machine learning application or model". There is no
+ * number in it, so no TTL can be derived from it, and claiming otherwise made a
+ * defensible engineering margin look like a quoted contractual limit. Anyone
+ * auditing this against the real clause would have found the citation empty and
+ * had reason to distrust the rest.
+ *
+ * WHAT IS ACTUALLY LOAD-BEARING under 4.7 is the SHAPE of what we store, not how
+ * long we keep it:
+ *
+ *   1. Every row is fetched in response to one user asking about one artist.
+ *      Nothing enumerates their catalogue. The bulk performers-dump parser was
+ *      DELETED for exactly this reason, and that deletion, not a TTL, is the
+ *      control that matters. See the vendor-spec file.
+ *   2. No scheduled job pre-fetches SeatGeek. `apps/bff/src/services/cache-warmer.ts`
+ *      warms MusicBrainz and iTunes only. A warmer that walked a list of artists
+ *      calling SeatGeek would be systematic downloading at ANY TTL, including
+ *      zero, and would be the thing to stop - not the cache.
+ *   3. Nothing downstream may redistribute it: session auth only, no token
+ *      surface, no export, no public feed.
+ *
+ * So the TTLs are a deliberate margin rather than a boundary: short enough that
+ * the store reads as an operational cache of answers we were asked for rather
+ * than as an accumulating copy of their data. DO NOT RAISE THEM as an
+ * "optimisation" - the saving is a handful of requests per artist per week, and
+ * the margin is the cheapest evidence of good faith we have if 4.5 (their audit
+ * right) is ever exercised. Equally, do not treat a TTL cut as compliance work:
+ * if this file ever grows a catalogue sweep, no TTL saves it.
  */
 
 import { isUpstreamError } from "../errors.js";
@@ -40,22 +79,23 @@ import type {
 import { sanitizeOutboundUrl } from "./types.js";
 
 /**
- * Performer ids are stable, but the TTL is set by their terms, not by how often
- * the data changes.
+ * Performer ids are stable for far longer than a week. The TTL is short because
+ * of terms 4.7, not because the data goes stale.
  *
- * Terms 7.13 forbid systematically downloading and/or storing SeatGeek
- * Materials. A cache long enough to amount to a local copy of their performer
- * catalogue is what that clause is aimed at, so this is deliberately short of
- * what the data would technically tolerate. DO NOT raise it as an
- * "optimisation": the seven days is a compliance boundary, and the saving from
- * a longer TTL is a handful of requests per artist per week.
+ * 4.7 forbids systematically downloading or storing SeatGeek Materials. A cache
+ * long enough to amount to a local copy of their performer catalogue is what that
+ * clause is aimed at, so this is deliberately short of what the data would
+ * technically tolerate. It is a MARGIN, not a boundary: the clause states no
+ * number, and the header of this file explains what is actually load-bearing.
+ * DO NOT raise it as an "optimisation" - the saving is a handful of requests per
+ * artist per week.
  */
 export const PERFORMER_ID_TTL_SECONDS = 7 * 24 * 60 * 60;
 /**
  * Event data changes daily at most, so six hours is generous and cheap.
  *
- * Short enough to read as ordinary operational caching rather than the
- * systematic storage terms 7.13 prohibits.
+ * Short enough to read as ordinary operational caching of answers a user asked
+ * for, rather than as the systematic storage terms 4.7 prohibits.
  */
 export const EVENTS_TTL_SECONDS = 6 * 60 * 60;
 
@@ -121,7 +161,7 @@ export class SeatGeekEventsProvider implements EventsProvider {
     primaryCoverage: SEATGEEK_PRIMARY_COVERAGE,
     attribution: SEATGEEK_ATTRIBUTION,
     pricingUnavailable: true,
-    // Terms 7.13: no exposure to a search engine, directory, or AI/ML system.
+    // Terms 4.7: no exposure to a search engine, directory, or AI/ML system.
     // Consumers must keep this data off any general-purpose token API surface.
     redistributionRestricted: true,
   };
@@ -141,7 +181,7 @@ export class SeatGeekEventsProvider implements EventsProvider {
    * SeatGeek's catalogue costs a name search on every single request, which is
    * most of the artists in a discovery catalogue. A cached zero also stores
    * none of their material, which is the cheapest kind of cache to justify
-   * under terms 7.13.
+   * under terms 4.7.
    */
   async performerIdFor(
     artistMbid: string,

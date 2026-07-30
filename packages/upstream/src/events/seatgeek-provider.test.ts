@@ -81,9 +81,11 @@ describe("sanitizeOutboundUrl (non-commercial: no affiliate parameters)", () => 
 });
 
 describe("SeatGeekEventsProvider", () => {
-  it("bounds the performer-id cache to a week (terms 7.13)", () => {
+  it("bounds the performer-id cache to a week (terms 4.7)", () => {
     // Not a tuning knob: a cache long enough to be a local copy of their
-    // performer catalogue is what "systematic storage" means.
+    // performer catalogue is what "systematic storage" means. 4.7 states no
+    // number, so these ceilings are our margin rather than a quoted limit -
+    // the test guards the margin against being raised silently.
     expect(PERFORMER_ID_TTL_SECONDS).toBeLessThanOrEqual(7 * 24 * 60 * 60);
     expect(EVENTS_TTL_SECONDS).toBeLessThanOrEqual(24 * 60 * 60);
   });
@@ -113,7 +115,7 @@ describe("SeatGeekEventsProvider", () => {
   it("declares that this data may not be exposed to a crawler or a model", () => {
     const http = new FakeHttp().enqueue(performersResponse());
     const { provider } = build(http);
-    // Terms 7.13. Visible at the integration point so the token-API surface
+    // Terms 4.7. Visible at the integration point so the token-API surface
     // cannot include it by accident.
     expect(provider.metadata.redistributionRestricted).toBe(true);
   });

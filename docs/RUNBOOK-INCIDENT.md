@@ -178,8 +178,13 @@ rotation is the only incident response available for a suspected KEK
 disclosure. Rehearse it before it is needed.]`
 5. **Tell the users whose third-party credentials may be affected, and tell them
    to revoke at the provider**, not just at Pull.fm. Disconnecting here deletes
-   our copy; it does not invalidate the credential.
-6. **Notify.** See section 5.
+   our copy; it does not invalidate the credential. A direct message to an
+   affected person is not a public communication, so nothing in section 5a gates
+   it - but read section 5a before publishing anything broadcast.
+6. **Notify.** See section 5, and **start the SeatGeek clock in section 5a at the
+   moment of first suspicion**, which is before this step in wall-clock time even
+   though it appears after it in this list. Twenty-four hours is short enough that
+   it has to be started, not remembered.
 
 ### What does not help
 
@@ -191,23 +196,107 @@ disclosure. Rehearse it before it is needed.]`
 
 ## 5. Notification obligations, with the deadlines
 
-| Who                                | When                                                                                      | Why                                                                                                                                              |
-| ---------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **SeatGeek**                       | **Within 24 hours of a suspected Security Incident**                                      | **Contractual.** SeatGeek API terms clause 5.3. This is the tightest deadline we are under and it is easy to miss because it is not a regulator. |
-| **Supervisory authority (GDPR)**   | Within 72 hours of becoming aware, where the breach is likely to risk rights and freedoms | Art. 33                                                                                                                                          |
-| **Affected users**                 | Without undue delay, where the risk is high                                               | Art. 34                                                                                                                                          |
-| **State attorneys general / CCPA** | Per state law                                                                             | Varies                                                                                                                                           |
-| **Cloudflare, Hetzner, WorkOS**    | As their terms require                                                                    | Processor contracts                                                                                                                              |
+| Who                                | When                                                                                                                                                              | Why                                                                                                                                                                                                                                                                |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **SeatGeek**                       | **As soon as possible, and no later than 24 hours after a SUSPECTED Security Incident.** They must also be **consulted before any public communication** about it | **Contractual.** SeatGeek API terms clause 5.3. This is the tightest deadline we are under and it is easy to miss because it is not a regulator. Worked as numbered steps with a clock in [section 5a](#5a-the-seatgeek-24-hour-clock-as-steps-with-times-on-them) |
+| **Supervisory authority (GDPR)**   | Within 72 hours of becoming aware, where the breach is likely to risk rights and freedoms                                                                         | Art. 33                                                                                                                                                                                                                                                            |
+| **Affected users**                 | Without undue delay, where the risk is high                                                                                                                       | Art. 34                                                                                                                                                                                                                                                            |
+| **State attorneys general / CCPA** | Per state law                                                                                                                                                     | Varies                                                                                                                                                                                                                                                             |
+| **Cloudflare, Hetzner, WorkOS**    | As their terms require                                                                                                                                            | Processor contracts                                                                                                                                                                                                                                                |
 
 **The SeatGeek clock is 24 hours and it starts at "suspected", not "confirmed".**
 It applies while we hold their API credentials, whether or not the events route
-is enabled, because clause 8.1 makes those credentials Confidential Information
-and 5.3 attaches to a suspected incident rather than a proven one. Contact path
-is their developer support; obtain and record the current address the same way
-the terms were obtained, since their portal 403s automated fetches.
+is enabled, because **section 5 of their terms (Security and Confidentiality)**
+makes those credentials Confidential Information and **5.3** attaches to a
+suspected incident rather than a proven one. Contact path is their developer
+support; obtain and record the current address the same way the terms were
+obtained, since their portal 403s automated fetches.
 
 **Do not wait for certainty to start drafting.** A 24-hour deadline consumed by
 investigation leaves no time to write.
+
+---
+
+## 5a. The SeatGeek 24-hour clock, as steps with times on them
+
+> **WHY THIS IS A PROCEDURE AND NOT THE PARAGRAPH ABOVE.** Until 2026-07-29 this
+> obligation existed in this runbook as one table row and one paragraph of prose.
+> Prose is what an operator reads calmly, in advance; a deadline is what they miss
+> at 2am. Every other deadline in this document (the 15 minutes in section 3, the
+> ordering in section 4) is a numbered step, and this is the tightest deadline we
+> are under. It is also the only one enforced by a counterparty who can terminate
+> our access rather than by a regulator who will send a letter.
+>
+> **Two things about the clause were also wrong or missing** and both are fixed
+> here. The obligation was cited to "clause 8.1" for confidentiality; section 8 of
+> SeatGeek's terms is Disclaimers and Limitation of Liability, and confidentiality
+> is section 5. And **5.3 requires them to be consulted before any public
+> communication about the incident**, which had never been recorded anywhere in
+> this repository at all. That duty conflicts with the instinct in section 4 step
+> 5, so the conflict is resolved below rather than discovered live.
+
+**Verbatim obligation (5.3, as relayed by the operator):** notify SeatGeek of a
+Security Incident "as soon as possible, and in no event later than 24 hours
+thereafter", and consult them before any public communication about it.
+
+**T+0 is the moment you first SUSPECT.** Not the moment you confirm, not the
+moment you finish triage. Write that timestamp down before doing anything else -
+it is the only number in this procedure you cannot reconstruct later.
+
+> **RECIPIENT, RESOLVED 2026-07-29. SEND TO BOTH, AND THE REASON IS THAT THEY ARE
+> TWO DIFFERENT CHANNELS FOR TWO DIFFERENT PURPOSES.**
+>
+> | To                                                                                                             | Why                                                                                                                                                                                                       |
+> | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+> | `legal@seatgeek.com`, Attention: General Counsel                                                               | **This is the contractual notice channel.** Their clause 12.4 (Notices) requires notices to SeatGeek to be addressed to SeatGeek, Inc., 902 Broadway, Floor 10, New York, NY 10010, Attention: Legal Team, "with email copies to legal@seatgeek.com, Attention: General Counsel". A notification sent anywhere else is not a notice under their terms. |
+> | `tech-architecture@seatgeek.com`                                                                               | **This is the operational contact**, given under their Contact Us clause for questions about the APIs. It is the address a human is likely to read quickly, which is what a 24 hour clock needs.            |
+>
+> **WHY NOT tech-architecture ALONE, which was the operator's first instinct.**
+> It is the address published for API questions, so it is the obvious guess and it
+> is the fast one, but 12.4 is explicit about where a *notice* goes. Discharging a
+> contractual notification duty through a support mailbox invites the argument that
+> the notice was never given. Sending both costs one extra line in the To field and
+> removes the argument entirely.
+>
+> Their 12.4 also says notices to us "will be effective... on the day sent (if by
+> email)", so send early and correct later rather than waiting to be certain. Step
+> 3 below is written for the 24 hour deadline; the postal copy is belt and braces
+> and can follow.
+>
+> **This duty is already owed and does not wait for the events route.** We hold
+> their API credentials today, those credentials are Confidential Information under
+> section 5 of their terms, and 5.3 attaches to a *suspected* incident whether or
+> not `SEATGEEK_ENABLED` is set.
+
+| Step | Deadline  | Action                                                                                                                                                                                                                                                                                       |
+| ---- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | **T+0**   | Record the UTC timestamp of first suspicion in the incident note, and compute T+24 explicitly as a clock time. `date -u -d '+24 hours'` on the node, or `date -u -v+24H` on macOS. A deadline expressed as "tomorrow" is how this gets missed.                                               |
+| 2    | **T+0**   | Decide whether SeatGeek credentials or SeatGeek-derived data are in scope **at all**. If neither is, 5.3 does not attach and the rest of this section is not owed. Record the reasoning either way; "we decided it was out of scope" with no note is indistinguishable from never deciding.  |
+| 3    | **T+1h**  | Send the first notification. It does **not** need scope, cause, or remediation - it needs to exist. "We are investigating a suspected security incident that may involve credentials or data associated with the SeatGeek API. We will follow up within 24 hours." That discharges the duty. |
+| 4    | **T+1h**  | **Before** any public statement, status page update, GitHub advisory, release note, or user email, contact SeatGeek and say what you intend to publish. 5.3 requires consultation, not merely notice. See the conflict note below.                                                           |
+| 5    | **T+24h** | Hard deadline for a substantive notification: what happened, what data or credentials were involved, what has been done. If the investigation is unfinished, send what is known and say it is unfinished. **Late and complete is a breach; on-time and partial is not.**                     |
+| 6    | **T+24h** | Rotate the SeatGeek credential if it was in scope, and record the rotation in the incident note. It is a Confidential Information obligation under their section 5, independent of the events route being disabled.                                                                          |
+| 7    | **T+7d**  | Write the follow-up. Also re-read their terms: section 1 lets them change at any time with continued use as acceptance, and an incident is exactly when a changed obligation would matter.                                                                                                   |
+| 8    | **T+6mo** | **The outer limit on any claim of ours against them.** Their clause 12.2 requires any cause of action we bring to be filed within six months, under New York law with exclusive venue in New York County. If the incident originated on their side, this is the date to diary.               |
+
+**The conflict in step 4, stated so it is decided in advance rather than at
+2am.** GDPR Article 34 and the instinct in [section 4](#4-sev-1-suspected-credential-exposure)
+step 5 both say to tell affected users without undue delay. SeatGeek's 5.3 says
+to consult them before public communication. These pull in opposite directions
+and the resolution is:
+
+- **A direct, private notification to an affected user is not a public
+  communication.** Send it. Telling one person their Last.fm session key may be
+  exposed is not an announcement, and no vendor clause can gate a user's
+  safety notification.
+- **Anything broadcast is.** A status page, a release note, a GitHub security
+  advisory, a post, a mass email. Consult first, and if the consultation is not
+  answered inside the window that user safety allows, publish anyway and record
+  the attempt with its timestamp. A documented unanswered consultation is a
+  defensible position; silence toward users is not.
+- **If those two ever genuinely collide, user safety wins and the note says so.**
+  The maximum exposure on the SeatGeek side of that trade is a contract dispute
+  in which their own liability to us is capped at fifty dollars.
 
 ---
 

@@ -270,10 +270,48 @@ describe("SeatGeek personal data (terms 4.4)", () => {
     }).toThrow(/coordinate/);
   });
 
+  it("rejects a coordinate PAIR smuggled through the city parameter", () => {
+    // The regression this guards. The coordinate check used to be anchored to
+    // the whole value, so one axis was refused and the pair a real geolocation
+    // fix produces was sent to the vendor. `city` is a free 128-character string
+    // on GET /v1/artists/:mbid/events, so this was reachable from a query string.
+    for (const pair of [
+      "41.8781,-87.6298",
+      "41.8781, -87.6298",
+      "41.8781;-87.6298",
+      "41.8781|-87.6298",
+      "41.8781/-87.6298",
+    ]) {
+      expect(() => {
+        assertNoPersonalData({ "venue.city": pair });
+      }).toThrow(/coordinate/);
+    }
+  });
+
+  it("rejects a coordinate embedded in otherwise plausible free text", () => {
+    expect(() => {
+      assertNoPersonalData({ "venue.city": "near 41.8781" });
+    }).toThrow(/coordinate/);
+    expect(() => {
+      assertNoPersonalData({ q: "Radiohead 41.8781 -87.6298" });
+    }).toThrow(/coordinate/);
+  });
+
   it("rejects a postal code offered as a city", () => {
     expect(() => {
       assertNoPersonalData({ "venue.city": "60614" });
     }).toThrow(/postal code/);
+  });
+
+  it("rejects a postal code offered as a search term", () => {
+    // Scoped to the free-text parameters on purpose: a five-digit SeatGeek id is
+    // postal-shaped, so an unscoped check would refuse `id=60614`.
+    expect(() => {
+      assertNoPersonalData({ q: "60614" });
+    }).toThrow(/postal code/);
+    expect(() => {
+      assertNoPersonalData({ id: 60614, "performers.id": 60614 });
+    }).not.toThrow();
   });
 
   it("rejects an email address anywhere in the query", () => {

@@ -7,8 +7,15 @@
 > [`../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md`](../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md).
 >
 > **This is not legal advice.** The clause references are the operator's reading
-> of the published terms as recorded in this repository on 2026-07-28. Re-read
-> the terms before launch and quarterly after; clause numbers move.
+> of the published terms as recorded in this repository. Re-read the terms before
+> launch and quarterly after; clause numbers move.
+>
+> **"Clause numbers move" turned out to be literal.** The SeatGeek numbers in
+> section 5 were wrong from 2026-07-28 to 2026-07-29 because they came from a
+> paraphrase of terms that 403 every automated fetch. They are now checked against
+> a transcription. Every other section on this page still rests on a reading, not a
+> transcription, so treat a citation here as a pointer to the source rather than as
+> the source.
 
 The backend cannot discharge any obligation on this page. It can only refuse to
 hand back a shape that lets a client think it has. What it does hand back is
@@ -123,30 +130,69 @@ side has no such constraint, so it is a review item.
 
 ## 5. SeatGeek (live events)
 
-**Binding clauses:** 3.1 (logo attribution), 7.13 (no systematic storage, no
-exposure to search engines, directories, or AI/ML systems), 7.15 (no competitive
-use, no secondary marketplace).
+**Binding clauses:** 3.1 (logo attribution), 4.7 (Rules of Conduct: no systematic
+downloading or storage, no exposure to search engines, directories, or AI/ML
+systems, no competitive use, no secondary marketplace), 4.3 (the EULA must be
+displayed and accepted before use, and the client must take no action on behalf
+of a user, collect no information from or about them, and touch no part of their
+device without their affirmative authorisation).
+
+> **Clause numbers corrected 2026-07-29.** This section cited "7.13" and "7.15".
+> Neither exists: section 7 of SeatGeek's terms is Suspension and Termination, and
+> both prohibitions are in **4.7, Rules of Conduct**. The wrong numbers came from
+> a paraphrase written while the live terms 403'd every automated fetch, and they
+> had been copied into eleven files. The terms have now been read in full and the
+> section map is in
+> [`../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md`](../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md).
+> Check a citation against that map before repeating it.
 
 This is the strictest attribution obligation in the product, and the only one
 where **a text credit is a breach**.
 
-| #    | Check                                                                                                                                                                                                        | Done |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---- |
-| SG-1 | The **SeatGeek logo** is rendered wherever event data appears. Not the word "SeatGeek". A text credit does not satisfy clause 3.1.                                                                           | [ ]  |
-| SG-2 | The logo asset was obtained from **<https://seatgeek.com/press>** and the Brand Guidelines at that page were read before use. Do not hotlink their CDN; their terms do not grant it.                         | [ ]  |
-| SG-3 | **Every instance** of the logo links to **<https://seatgeek.com>**. Every one, not the first, not one per screen.                                                                                            | [ ]  |
-| SG-4 | The logo is modified **only** by proportional resizing. No recolouring, cropping, rotation, opacity change, drop shadow, mask, or tinting - including whatever a dark-mode filter would do to it.            | [ ]  |
-| SG-5 | The client renders **no price** for an event, and does not invent, estimate, or infer one. SeatGeek returns none, and the interface has no price field by design.                                            | [ ]  |
-| SG-6 | No price comparison, no aggregation of SeatGeek events against another ticket source, no resale surface. Clause 7.15.                                                                                        | [ ]  |
-| SG-7 | Event data is not written to any client-side persistent store beyond an in-memory session cache, and is not included in any crash report, analytics payload, or shared/exported artifact.                    | [ ]  |
-| SG-8 | The event view sends **no coordinate and no postal code** to Pull.fm's events route. A city name only. Clause 4.4 forbids Personal Data reaching their API, and the backend rejects coordinate-shaped input. | [ ]  |
+> ### Clause 3.1 cannot be satisfied today, and is not being breached today
+>
+> either. Read both halves.
+>
+> **There is no Pull.fm client.** The product is a backend, `GET /v1/artists/:mbid/events`
+> returns 501, no events provider is enabled, and no SeatGeek Material is
+> displayed anywhere to anyone. 3.1 obliges us to display their logo "in every
+> place in your Application where SeatGeek Materials are being accessed, used, or
+> displayed". There are no such places, so there is nothing to breach. **Do not
+> record 3.1 as an open compliance gap**: it is a dormant obligation, and treating
+> a dormant obligation as a live breach is how a real one gets lost in the noise.
+>
+> **It becomes live, in full, at the first frame of UI that renders an event.**
+> Not at the first release, not at beta: the instant one event is on one screen,
+> every box in the table below is a term of the licence, and a client that renders
+> the string "SeatGeek" instead of the mark is in breach from that frame onward.
+> There is no partial-credit state and no grace period in the clause.
+>
+> **The backend has done everything it can, and it is deliberately not enough.**
+> `ProviderAttribution` refuses to hand back a bare credit string: it carries
+> `logoRequired: true`, the asset page, the link target and the permitted
+> modification, so a frontend that renders `text` as a label is visibly wrong
+> rather than quietly non-compliant. That is a tripwire, not compliance. **Only a
+> person looking at a running screen can discharge 3.1**, which is what the
+> sign-off table at the bottom of this file is for.
+
+| #    | Check                                                                                                                                                                                                                                                           | Done |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
+| SG-1 | The **SeatGeek logo** is rendered wherever event data appears. Not the word "SeatGeek". A text credit does not satisfy clause 3.1.                                                                                                                              | [ ]  |
+| SG-2 | The logo asset was obtained from **<https://seatgeek.com/press>** and the Brand Guidelines at that page were read before use. Do not hotlink their CDN; their terms do not grant it.                                                                            | [ ]  |
+| SG-3 | **Every instance** of the logo links to **<https://seatgeek.com>**. Every one, not the first, not one per screen.                                                                                                                                               | [ ]  |
+| SG-4 | The logo is modified **only** by proportional resizing. No recolouring, cropping, rotation, opacity change, drop shadow, mask, or tinting - including whatever a dark-mode filter would do to it.                                                               | [ ]  |
+| SG-5 | The client renders **no price** for an event, and does not invent, estimate, or infer one. SeatGeek returns none, and the interface has no price field by design.                                                                                               | [ ]  |
+| SG-6 | No price comparison, no aggregation of SeatGeek events against another ticket source, no resale surface. Clause 4.7.                                                                                                                                            | [ ]  |
+| SG-7 | Event data is not written to any client-side persistent store beyond an in-memory session cache, and is not included in any crash report, analytics payload, or shared/exported artifact.                                                                       | [ ]  |
+| SG-8 | The event view sends **no coordinate and no postal code** to Pull.fm's events route. A city name only. Clause 4.4 forbids Personal Data reaching their API, and the backend rejects coordinate-shaped input, including a coordinate PAIR inside the city field. | [ ]  |
+| SG-9 | The client **displays the Terms of Service and requires the user to accept them before the app is usable**, and records what was accepted and when. Clause 4.3, and it is not an attribution item: no event may be rendered by a build that lacks this screen.  | [ ]  |
 
 **SG-4 is the dark-mode trap.** A CSS `filter: invert()` applied to a theme, or
 an `opacity` on a footer, is a modification of the mark. If the logo is
 illegible on the dark background, use whichever variant SeatGeek publish for
 that case, not a filter.
 
-**SG-7 restates a backend rule at the client.** Clause 7.13 prohibits making
+**SG-7 restates a backend rule at the client.** Clause 4.7 prohibits making
 SeatGeek Materials available to "a search engine, directory, or AI or machine
 learning application or model". A client that ships event data into an analytics
 pipeline or an LLM-backed feature reaches exactly that prohibition, by a path the
