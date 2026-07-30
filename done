@@ -73,10 +73,15 @@ shape, and **not one was found by reading the repository.** Every one needed the
 thing to run against real infrastructure and be pushed until it failed. If you
 take one working habit from this handoff, take that one.
 
-**Where I would go next, in order.** Finish the two in-flight tasks. Then the
+**Where I would go next, in order.** The two in-flight tasks landed, so: the
 stale-claim sweep below, because those are false statements sitting in published
 documents right now. Then the deploy gaps. The counsel question can wait; the
 false statements cannot.
+
+*(That sentence originally read "finish the two in-flight tasks", and was left
+stale for one commit after they landed. Corrected, and noted rather than quietly
+overwritten, because a handoff note that contradicts its own status section is the
+same defect it spends forty lines warning about.)*
 
 ---
 
