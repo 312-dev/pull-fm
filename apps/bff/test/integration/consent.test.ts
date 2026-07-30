@@ -31,7 +31,10 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import type { LegalDocument } from "../../src/lib/legal-documents.js";
+import {
+  CONSENT_PRESENTATION,
+  type LegalDocument,
+} from "../../src/lib/legal-documents.js";
 import { buildTestApp, type TestApp } from "../helpers/app.js";
 import { jsonOf } from "../helpers/json.js";
 import {
@@ -885,6 +888,53 @@ describe("the version and the digest must match what is published", () => {
 // ---------------------------------------------------------------------------
 // The credential asymmetry. A script must not be able to form a contract.
 // ---------------------------------------------------------------------------
+describe("the consent screen copy cannot be accepted", () => {
+  /**
+   * THE CIRCULARITY, REFUSED RATHER THAN ARGUED.
+   *
+   * `legal/consent-presentation.md` is published, versioned, digest-locked and
+   * served exactly like the two documents, and it is deliberately NOT in the set a
+   * subject can owe: asking a person to accept the words with which they are being
+   * asked to accept needs its own presentation, which needs its own acceptance.
+   *
+   * The comment in lib/legal-documents.ts says so. This is what makes it true. A
+   * client that read `GET /v1/legal` and submitted every published document it
+   * found - which is the obvious mistake, because the copy is discoverable at the
+   * same endpoint - is refused with the same 422 as an invented slug.
+   */
+  test("naming it in an acceptance is a 422, like any document we do not gate on", async () => {
+    const s = await provisionSubject(ctx, "acceptthecopy", { consent: false });
+    const res = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/me/consent",
+      headers: auth(s),
+      payload: {
+        accept: [
+          {
+            documentId: CONSENT_PRESENTATION.id,
+            version: CONSENT_PRESENTATION.version,
+            // The CORRECT digest, which is the point: this is refused because the
+            // document is not one we ask anybody to accept, not because the client
+            // got the bytes wrong. A 409 here would tell a client to re-fetch and
+            // try again forever.
+            contentSha256: CONSENT_PRESENTATION.contentSha256,
+          },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toContain(CONSENT_PRESENTATION.id);
+  });
+
+  test("no row for it can exist, so it cannot satisfy or block the gate", async () => {
+    const { rows } = await ctx.services.db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM legal_consents WHERE document_id = $1`,
+      [CONSENT_PRESENTATION.id],
+    );
+    expect(rows[0]?.n).toBe("0");
+  });
+});
+
 describe("a personal API token can read the status but cannot accept", () => {
   test("a token holding read:me can read GET /v1/me/consent", async () => {
     // Deliberately readable. A script whose calls started failing with 403 needs

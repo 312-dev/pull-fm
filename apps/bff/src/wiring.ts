@@ -17,6 +17,7 @@ import { AuditLog } from "./lib/audit.js";
 import { Database } from "./lib/db.js";
 import {
   CONSENT_DOCUMENTS,
+  CONSENT_PRESENTATION,
   type LegalDocument,
 } from "./lib/legal-documents.js";
 import { fileSystemLegalSource } from "./lib/legal-source.js";
@@ -203,6 +204,12 @@ export function buildServices(
         );
       },
     }),
+    // The consent screen copy: published and served, never accepted. Not folded
+    // into the list above, and not skipped when `legalDocuments` is overridden:
+    // the screen a test's synthetic documents would be presented on is the same
+    // screen, and a suite that published a different one would be certifying a
+    // presentation that does not ship. See CONSENT_PRESENTATION for the argument.
+    [CONSENT_PRESENTATION],
   );
 
   /**

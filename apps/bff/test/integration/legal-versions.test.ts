@@ -44,7 +44,10 @@ import { describe, expect, test } from "vitest";
 
 import {
   CONSENT_DOCUMENTS,
+  CONSENT_PRESENTATION,
   NON_CONSENT_LEGAL_FILES,
+  PUBLISHED_DOCUMENTS,
+  declaredHighlightSources,
   declaredVersion,
   legalDigest,
   normalizeLegalText,
@@ -58,7 +61,7 @@ const read = (relative: string): string =>
 
 describe("the legal document registry", () => {
   test("every registered document exists on disk", () => {
-    for (const doc of CONSENT_DOCUMENTS) {
+    for (const doc of PUBLISHED_DOCUMENTS) {
       expect(
         existsSync(join(REPO, doc.path)),
         `${doc.id} points at ${doc.path}, which does not exist`,
@@ -66,7 +69,7 @@ describe("the legal document registry", () => {
     }
   });
 
-  test.each(CONSENT_DOCUMENTS)(
+  test.each(PUBLISHED_DOCUMENTS)(
     "$id has not changed without a version decision",
     (doc) => {
       const actual = legalDigest(read(doc.path));
@@ -89,7 +92,7 @@ describe("the legal document registry", () => {
     },
   );
 
-  test.each(CONSENT_DOCUMENTS)(
+  test.each(PUBLISHED_DOCUMENTS)(
     "$id declares the same version in its own header",
     (doc) => {
       // The registry and the document a reader opens must not disagree. A
@@ -104,7 +107,7 @@ describe("the legal document registry", () => {
   );
 
   test("epochs are positive integers and a first revision is material", () => {
-    for (const doc of CONSENT_DOCUMENTS) {
+    for (const doc of PUBLISHED_DOCUMENTS) {
       expect(Number.isInteger(doc.consentEpoch)).toBe(true);
       // Epoch 0 would mean "no acceptance required", which is not a state a
       // required document may be in; the database CHECK says the same thing.
@@ -123,7 +126,7 @@ describe("the legal document registry", () => {
     // `legal_consents_digest_shape_chk` both require exactly this, and a
     // registry entry that fails them would 500 at first publish rather than at
     // review.
-    for (const doc of CONSENT_DOCUMENTS) {
+    for (const doc of PUBLISHED_DOCUMENTS) {
       expect(doc.contentSha256).toMatch(/^[0-9a-f]{64}$/);
       expect(doc.id).toMatch(/^[a-z][a-z0-9-]{2,63}$/);
       expect(doc.version).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
@@ -134,7 +137,7 @@ describe("the legal document registry", () => {
     // The client hashes what it fetches from here and the API refuses an
     // acceptance whose digest does not match, so a relative path or an http URL
     // would make consent unrecordable rather than merely untidy.
-    for (const doc of CONSENT_DOCUMENTS) {
+    for (const doc of PUBLISHED_DOCUMENTS) {
       expect(doc.url.startsWith("https://"), `${doc.id} url is not https`).toBe(
         true,
       );
@@ -148,10 +151,13 @@ describe("the legal document registry", () => {
     // in the repository unpresented, and a registry entry for a deleted file
     // fails too.
     const onDisk = readdirSync(join(REPO, "legal")).sort();
-    const consentPaths = new Set(
-      CONSENT_DOCUMENTS.map((d) => d.path.replace(/^legal\//, "")),
+    // PUBLISHED_DOCUMENTS rather than CONSENT_DOCUMENTS, so the consent screen
+    // copy counts as declared. It is the third category: published, versioned and
+    // digest-locked, and never accepted.
+    const publishedPaths = new Set(
+      PUBLISHED_DOCUMENTS.map((d) => d.path.replace(/^legal\//, "")),
     );
-    const declared = new Set([...consentPaths, ...NON_CONSENT_LEGAL_FILES]);
+    const declared = new Set([...publishedPaths, ...NON_CONSENT_LEGAL_FILES]);
 
     const unclassified = onDisk.filter((f) => !declared.has(f));
     expect(
@@ -167,6 +173,75 @@ describe("the legal document registry", () => {
       missing,
       `declared legal file(s) that no longer exist: ${missing.join(", ")}`,
     ).toEqual([]);
+  });
+});
+
+/**
+ * The consent screen copy is the third category, and it is only worth having if
+ * both halves of that hold: versioned like a document, never accepted like one.
+ */
+describe("the consent screen copy", () => {
+  test("is published but is NOT a document anybody is asked to accept", () => {
+    // The circularity, asserted rather than trusted to the comment that argues
+    // it. A person cannot be asked to accept the words with which they are being
+    // asked to accept, and if this entry ever reached CONSENT_DOCUMENTS every
+    // existing user would owe an acceptance of the consent screen and the screen
+    // would list itself among the documents it was presenting.
+    expect(PUBLISHED_DOCUMENTS).toContain(CONSENT_PRESENTATION);
+    expect(
+      CONSENT_DOCUMENTS.map((d) => d.id),
+      "the consent screen copy must never be in the set the gate compares against",
+    ).not.toContain(CONSENT_PRESENTATION.id);
+  });
+
+  test("declares which versions of the other documents its highlights quote", () => {
+    // THE INTERLOCK THE DIGEST CANNOT PROVIDE. Section 3.1 of the copy quotes the
+    // USD 100 and USD 50 liability caps out of Terms section 13, and names
+    // sections 2, 9, 13 and 16 by number. A Terms revision that moved either
+    // figure or renumbered either section leaves this file byte-identical, so its
+    // digest still matches, while the screen it specifies now states a false
+    // figure to every new user at the moment a contract forms.
+    //
+    // So the file declares what it read, and this compares the declaration to the
+    // registry. Bumping the Terms turns the copy red until somebody has re-read
+    // section 3.1 against the new text.
+    const declared = declaredHighlightSources(read(CONSENT_PRESENTATION.path));
+    expect(
+      declared,
+      `${CONSENT_PRESENTATION.path} has no "**Highlights checked against:**" line. ` +
+        `It must name every document its highlights quote, as \`id@version\`.`,
+    ).not.toBeNull();
+
+    const expected = Object.fromEntries(
+      CONSENT_DOCUMENTS.map((doc) => [doc.id, doc.version]),
+    );
+    expect(
+      declared,
+      `\n\n${CONSENT_PRESENTATION.path} quotes figures and section numbers out of ` +
+        `the documents below, and the versions it was checked against are no longer ` +
+        `the current ones.\n\n` +
+        `  declared: ${JSON.stringify(declared)}\n` +
+        `  current:  ${JSON.stringify(expected)}\n\n` +
+        `Do NOT just update the line. Re-read section 3.1 of ` +
+        `${CONSENT_PRESENTATION.path} against the new text, then decide:\n\n` +
+        `  A renumbered section or a reworded citation is COSMETIC here: bump this ` +
+        `document's version, keep consentEpoch, set material: false.\n` +
+        `  A changed figure, a changed protection, or a highlight that is now ` +
+        `wrong is MATERIAL: bump the version, raise consentEpoch, set ` +
+        `material: true, because the words a person is shown at the moment of ` +
+        `formation would otherwise be false.\n`,
+    ).toEqual(expected);
+  });
+
+  test("says out loud that no client presents it yet", () => {
+    // The `[OPEN]` marker is the document declining to claim something the system
+    // does not do, and `make legal` counts it. Asserted here so that deleting it
+    // to make the publication check quieter fails a test as well, which is the
+    // rule legal/README.md states and the one that is easiest to break by
+    // accident.
+    expect(read(CONSENT_PRESENTATION.path)).toContain(
+      "No Pull.fm client presents this screen",
+    );
   });
 });
 

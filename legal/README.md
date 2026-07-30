@@ -65,11 +65,42 @@ half of the same discipline: it refuses account creation rather than blocking
 access, and it is address-based geolocation rather than proof of residence, so
 neither document claims that no European resident can hold an account.
 
-| Document                                     | What it is                                                                                                               | Blocks                                                                                                                                                                                                                                              |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`privacy-policy.md`](privacy-policy.md)     | What Pull.fm collects, stores, uses, and discloses, written from the schema and the handlers rather than from a template | **Gate L.** Also required by SeatGeek API terms 4.4                                                                                                                                                                                                 |
-| [`terms-of-service.md`](terms-of-service.md) | Terms of Service and Application EULA, including the SeatGeek third-party-beneficiary clause                             | **Gate L.** Required by SeatGeek API terms 4.3, which makes it a hard prerequisite of shipping live events at all. 4.3 is quoted in full in that document's banner and verbatim in the vendor-spec file; do not paraphrase it here or anywhere else |
-| [`attribution.md`](attribution.md)           | The attribution each upstream requires, as a checklist a UI engineer executes                                            | A frontend build requirement, and a licence condition of Last.fm, MusicBrainz, Apple, Deezer, and SeatGeek                                                                                                                                          |
+| Document                                             | What it is                                                                                                               | Blocks                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`privacy-policy.md`](privacy-policy.md)             | What Pull.fm collects, stores, uses, and discloses, written from the schema and the handlers rather than from a template | **Gate L.** Also required by SeatGeek API terms 4.4                                                                                                                                                                                                                                                     |
+| [`terms-of-service.md`](terms-of-service.md)         | Terms of Service and Application EULA, including the SeatGeek third-party-beneficiary clause                             | **Gate L.** Required by SeatGeek API terms 4.3, which makes it a hard prerequisite of shipping live events at all. 4.3 is quoted in full in that document's banner and verbatim in the vendor-spec file; do not paraphrase it here or anywhere else                                                     |
+| [`consent-presentation.md`](consent-presentation.md) | The consent screen copy: what a person is shown and asked, plus the rules the interface must satisfy                     | **Nothing, and it is not a document anybody accepts.** Published, versioned and digest-locked like the two above, because the sentence above the button and the label on it are the evidence that assent was communicated (`Sgouros v. TransUnion`, 817 F.3d 1029), so a change to them can be material |
+| [`attribution.md`](attribution.md)                   | The attribution each upstream requires, as a checklist a UI engineer executes                                            | A frontend build requirement, and a licence condition of Last.fm, MusicBrainz, Apple, Deezer, and SeatGeek                                                                                                                                                                                              |
+
+## Three categories, and adding a file means choosing one
+
+`apps/bff/test/integration/legal-versions.test.ts` reconciles this directory
+against the registry in `apps/bff/src/lib/legal-documents.ts` **in both
+directions**, so a new file here is a red build until it is classified. There are
+three places it can go, and they are not interchangeable:
+
+| Category                                        | Where it is declared                        | What it gets                                                                                                                                |
+| ----------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| A document a user must accept                   | `CONSENT_DOCUMENTS`                         | Version, epoch, digest lock, stored text, a served URL, and **the gate**. Adding one makes it mandatory for every existing user immediately |
+| A document that is published but never accepted | `PUBLISHED_DOCUMENTS`, via its own constant | Everything above **except** the gate. `consent-presentation.md` is the only one                                                             |
+| Not a published document at all                 | `NON_CONSENT_LEGAL_FILES`                   | Nothing. No version, no digest, no record. `attribution.md` and this file                                                                   |
+
+**The middle category exists because of the consent screen copy and it is worth
+understanding before reusing it.** The copy has to be versioned and digest-locked
+for the reason the documents are: a change to the words around the button can be
+as material as a change to a clause. But it cannot be a `CONSENT_DOCUMENTS` entry,
+because asking somebody to accept the words with which they are being asked to
+accept is circular, and the screen would list itself among the documents it was
+presenting. And it must not be a `NON_CONSENT_LEGAL_FILES` entry, because that list
+records nothing, so the copy could change with nobody deciding what the change
+meant.
+
+`consent-presentation.md` also carries a `**Highlights checked against:**` line
+that the same test compares to the registry, because it quotes figures and section
+numbers out of the Terms. **Bumping the Terms turns that document red** until
+somebody has re-read its section 3.1 against the new text. That is the one
+dependency in this directory the digest lock cannot see, so it is checked
+separately.
 
 ## How to read the markers
 
@@ -107,27 +138,35 @@ New York SHIELD Act, because a materially similar duty survives the change of
 jurisdiction with no threshold attached. Removing that one would have been the
 lazy version of the same edit.
 
-### A known blind spot in the checker: keep every marker on one line
+### The checker's old blind spot, which was in the script and is now fixed
 
-`MARKER` in `check-publication-blockers.mjs` is matched **line by line**, and the
-pattern cannot span a newline. **A marker whose brackets open on one line and
-close on another is invisible to the gate.** Three in `terms-of-service.md` were,
-for as long as the file has existed: the compiled-binaries question in §3, the
-third-party-beneficiary question in §9 and the arbitration question in §16, all
-three of which are real unresolved counsel decisions that `make legal` was not
-counting. With the governing-law placeholders filled, that would have left the
-terms reporting **zero** blockers while carrying three, which is the false green
-this gate exists to prevent.
+**This section used to say that `MARKER` is matched line by line and cannot span a
+newline. That is no longer true, and it was left stale.** The pattern in
+`check-publication-blockers.mjs` is now
 
-They are now written on a single long line each, which is why those paragraphs do
-not wrap like their neighbours. **Do not re-wrap them.** Prettier will not, since
-its markdown prose wrapping is left at `preserve`.
+```js
+/\[(CONFIRM|OPEN)\b(?:[^\]\n]|\n(?!\s*\n))*\]/g;
+```
 
-The better fix is in the script rather than in the documents: join continuation
-lines before matching, and the `CLASSIFIED` table entries that can currently
-never fire (`CONFIRM with counsel: ...`, `CONFIRM: a postal address is required`)
-would start working. Until then, a green count means every marker **on one line**
-was seen.
+applied to the whole file. A marker may wrap across a line break; it may not cross
+a blank line, and an unclosed bracket fails to match rather than swallowing the
+rest of the section. So the `CLASSIFIED` entries that could previously never fire
+(`CONFIRM with counsel: ...`, `CONFIRM: a postal address is required`) do fire, and
+they are why the current count is what it is.
+
+The history is worth keeping, because it is the exact failure this directory guards
+against arriving inside the guard. Three markers in `terms-of-service.md` were
+invisible for as long as the file had existed: the compiled-binaries question in
+§3, the third-party-beneficiary question in §9 and the arbitration question in §16,
+all three real unresolved counsel decisions that `make legal` was not counting.
+With the governing-law placeholders filled, the terms would have reported **zero**
+blockers while carrying three.
+
+Those three are still written on a single long line each, which is why those
+paragraphs do not wrap like their neighbours. **Do not re-wrap them** - it is no
+longer load-bearing, but re-wrapping them is a diff that changes the digest of a
+legal document for no reason, which forces a materiality decision nobody needed to
+make. Prettier will not, since its markdown prose wrapping is left at `preserve`.
 
 ## Why the accuracy standard is higher here than in ordinary documentation
 

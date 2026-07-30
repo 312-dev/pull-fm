@@ -134,3 +134,13 @@ desktop.ini
 .envrc.local
 .nomad-token
 .docker/
+
+# --- Consent evidence bundles -----------------------------------------------
+# `make consent-evidence` writes a directory of consent records, the exact text
+# each was recorded against, and (with --unredact) IP addresses, user agents and
+# session ids. It is personal data with an operator's justification attached, so it
+# must never reach a commit in a public repository. The default OUT is the first
+# pattern; the glob covers anyone who names their own.
+/consent-evidence/
+/evidence-*/
+/consent-evidence-*/

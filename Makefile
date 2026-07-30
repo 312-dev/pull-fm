@@ -4,7 +4,7 @@
 # The Makefile is a discovery surface, not a build system: `pnpm` owns the
 # application build and `terraform` owns the infrastructure.
 
-.PHONY: help cost cost-json staging-up staging-down staging-status risks jobs identifiers legal infra-guards alerts alerts-armed
+.PHONY: help cost cost-json staging-up staging-down staging-status risks jobs identifiers legal consent-evidence infra-guards alerts alerts-armed
 
 help:
 	@echo "make cost           run rate + billing-alert check (Gate \$$)"
@@ -16,6 +16,7 @@ help:
 	@echo "make jobs           assert the background-job schedule matches the runbook"
 	@echo "make identifiers    fail if a live infrastructure identifier is in a tracked file"
 	@echo "make legal          fail if legal/ still has an unresolved placeholder"
+	@echo "make consent-evidence  produce an auditable consent evidence bundle"
 	@echo "make infra-guards   prove the scale guard and the origin config (terraform, docker)"
 	@echo "make alerts         PROVE the alert channel delivers, end to end (Gate 5)"
 	@echo "make alerts-armed   is this machine able to notify anyone at all?"
@@ -66,6 +67,36 @@ identifiers:
 # lawyer still has to read the documents.
 legal:
 	@node legal/check-publication-blockers.mjs
+
+# The only way to get consent evidence out of the database, and the shape it has to
+# be in for somebody who does not trust us to check it. Everything else here is a
+# check that passes or fails; this one produces an artefact, so it takes arguments.
+#
+# It answers the five questions a dispute or an audit actually asks: one subject's
+# whole history, the exact text they agreed to at the version they agreed to, who
+# has not accepted the current epoch, what changed between two versions and who
+# re-consented after it, and what can be re-verified about whether the records were
+# altered. The bundle carries `SHA256SUMS` in coreutils format and the append-only
+# triggers read out of the LIVE database, so the recipient checks it with
+# `sha256sum -c` and their own eyes rather than with a tool of ours.
+#
+# READ-ONLY, asserted by Postgres: the whole bundle is produced inside one
+# REPEATABLE READ, READ ONLY transaction, so producing the evidence cannot alter it.
+#
+# Exit 1 means a bundle WAS written and something is wrong in it - an append-only
+# protection missing from the live database, or a stored text that does not hash to
+# its recorded digest. The bundle is kept, because a finding is evidence too.
+#
+# IP addresses, user agents and session ids are redacted to presence flags by
+# default. `--unredact` needs `--reason`, and the reason is written into the bundle.
+# See docs/compliance/consent-evidence.md, which is copied into every bundle.
+#
+#   make consent-evidence OUT=./evidence-run
+#   make consent-evidence OUT=./ev ARGS='--subject someone@example.test'
+OUT ?= ./consent-evidence
+consent-evidence:
+	@PGURL_ITEM="$${PGURL_ITEM:-pull-fm/staging/DATABASE_URL}" \
+		node packages/db/scripts/consent-evidence.mjs --out "$(OUT)" $(ARGS)
 
 # Two proofs that need tooling rather than a checkout: that raising the node
 # count without externalizing Redis fails a terraform plan, and that the origin

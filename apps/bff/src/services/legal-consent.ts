@@ -126,6 +126,7 @@ export type RevisionText =
 export class LegalConsentService {
   readonly #db: Database;
   readonly #documents: readonly LegalDocument[];
+  readonly #publishedDocuments: readonly LegalDocument[];
   readonly #source: LegalTextSource;
   #published: Promise<void> | null = null;
 
@@ -141,15 +142,51 @@ export class LegalConsentService {
      * wiring.ts.
      */
     source: LegalTextSource = noLegalTextSource,
+    /**
+     * Documents this deployment PUBLISHES but does not require acceptance of.
+     *
+     * Exactly one thing is in here today: `CONSENT_PRESENTATION`, the copy of the
+     * consent screen. See `lib/legal-documents.ts` for why it is published and
+     * recorded like a document and never accepted like one.
+     *
+     * A SEPARATE LIST RATHER THAN A FLAG ON `LegalDocument`, and the reason is
+     * that `documents` is read by `gapFor`, by the gate in plugins/auth.ts, by
+     * `GET /v1/me/consent` and by most of the consent suite, all of which mean
+     * "the set a subject can owe". A boolean on the entries would leave every one
+     * of those call sites correct only as long as each remembered to filter. An
+     * additive second list cannot be forgotten, because forgetting it means the
+     * document is not published at all, which is loud.
+     *
+     * Defaults to empty, so a test registry publishes precisely what it declares.
+     */
+    alsoPublished: readonly LegalDocument[] = [],
   ) {
     this.#db = db;
     this.#documents = documents;
+    this.#publishedDocuments = [...documents, ...alsoPublished];
     this.#source = source;
   }
 
-  /** The documents this deployment requires. Read by the routes and the gate. */
+  /**
+   * The documents this deployment requires ACCEPTANCE of.
+   *
+   * Read by the gate, by `gapFor`, and by `GET /v1/me/consent`. Deliberately
+   * narrower than `publishedDocuments`: a document in the wider set can never put
+   * a subject into an outstanding state, because this is the only list
+   * `consentGap` is ever given.
+   */
   get documents(): readonly LegalDocument[] {
     return this.#documents;
+  }
+
+  /**
+   * Every document this deployment PUBLISHES, accepted or not.
+   *
+   * What the document routes resolve a slug against, and what `ensureRevisions`
+   * writes. A superset of `documents`.
+   */
+  get publishedDocuments(): readonly LegalDocument[] {
+    return this.#publishedDocuments;
   }
 
   /**
@@ -169,7 +206,7 @@ export class LegalConsentService {
   }
 
   async #publish(): Promise<void> {
-    for (const doc of this.#documents) {
+    for (const doc of this.#publishedDocuments) {
       // The canonical bytes, if this deployment can produce them. Null is not a
       // failure: the digest is what the gate enforces and it comes from the
       // registry, so a deployment with no `legal/` directory still refuses
@@ -324,7 +361,7 @@ export class LegalConsentService {
     // it is that one. `fileSystemLegalSource` compares its digest to the
     // registry's before returning anything, so this cannot serve a mounted copy of
     // `legal/` in place of a version it is not.
-    const current = findLegalDocument(this.#documents, documentId);
+    const current = findLegalDocument(this.#publishedDocuments, documentId);
     const text =
       row.content ??
       (current?.version === version ? this.#source(current) : null);

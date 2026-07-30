@@ -248,10 +248,22 @@ export function registerLegalRoutes(
               },
               documents: {
                 type: "array",
+                description:
+                  "The documents acceptance is REQUIRED of. Every one of these must be accepted before Pull.fm can be used; GET /v1/me/consent says which of them a given subject still owes.",
                 items: legalDocumentSchema,
               },
+              presentation: {
+                ...legalDocumentSchema,
+                description:
+                  "The copy of the consent screen itself: what is displayed, what the affirmative act is, what the button says, what a decline does, and what a returning user is told after a material revision. PUBLISHED AND VERSIONED LIKE A DOCUMENT AND NOT ACCEPTED LIKE ONE, so it is a separate member rather than an entry in `documents`: nothing is ever owed for it and POST /v1/me/consent refuses it as an unknown document. A client fetches it, verifies the digest the same way, and renders it, so that the words a person was asked are a published fact rather than a claim about which build they had installed.",
+              },
             },
-            required: ["canonicalMediaType", "digest", "documents"],
+            required: [
+              "canonicalMediaType",
+              "digest",
+              "documents",
+              "presentation",
+            ],
           },
           304: notModifiedResponse,
           ...problemResponses(429, 503),
@@ -262,6 +274,7 @@ export function registerLegalRoutes(
     async (request, reply) => {
       await services.legal.ensureRevisions();
       const published = await services.legal.publishedAt();
+      const presentation = requirePresentation(services);
 
       const body = {
         canonicalMediaType: LEGAL_CONTENT_TYPE,
@@ -277,6 +290,15 @@ export function registerLegalRoutes(
         },
         documents: services.legal.documents.map((doc) =>
           toWireDocument(doc, published[`${doc.id}@${doc.version}`] ?? null),
+        ),
+        // A member of its own rather than a third entry in `documents`, and the
+        // distinction is load-bearing in both directions: a client that iterated
+        // `documents` and asked a person to accept all of them would ask for
+        // assent to the words with which it was asking, and POST /v1/me/consent
+        // would answer 422 because the gate has never heard of this slug.
+        presentation: toWireDocument(
+          presentation,
+          published[`${presentation.id}@${presentation.version}`] ?? null,
         ),
       };
 
@@ -345,7 +367,10 @@ export function registerLegalRoutes(
     },
     async (request, reply) => {
       const { documentId } = request.params as { documentId: string };
-      const doc = requireDocument(services.legal.documents, documentId);
+      const doc = requireDocument(
+        services.legal.publishedDocuments,
+        documentId,
+      );
       const resolved = await services.legal.textFor(doc.id, doc.version);
       return sendDocument(reply, request.headers["if-none-match"], resolved, {
         cacheControl: REVALIDATE_CACHE,
@@ -418,6 +443,11 @@ export function registerLegalRoutes(
  * route asks is "is this a document Pull.fm currently publishes", and a document
  * withdrawn from the registry should stop having a current version even though its
  * revisions remain retrievable by version.
+ *
+ * Given `publishedDocuments` and not `documents`, so the consent screen copy is
+ * reachable at its own URL. That is the whole point of publishing it: a third
+ * party reading a consent row dated in March needs the words that were live in
+ * March, and "ask the operator which build was deployed" is not an answer.
  */
 function requireDocument(
   documents: readonly LegalDocument[],
@@ -434,6 +464,40 @@ function requireDocument(
     );
   }
   return doc;
+}
+
+/**
+ * The consent screen copy, or a 503 that says the screen cannot be presented.
+ *
+ * WHY THIS REFUSES RATHER THAN OMITTING THE MEMBER. `GET /v1/legal` is the one
+ * call a client makes before it has an account, and the answer it needs is "here
+ * are the documents, and here are the words to ask with". A response that silently
+ * dropped `presentation` would leave a client with two documents and no
+ * instruction, and the most likely thing a client would then do is fall back to
+ * copy of its own - which is the failure this document exists to prevent, arriving
+ * as a graceful degradation.
+ *
+ * Only reachable if a deployment constructs the service without the presentation
+ * document at all, which wiring.ts does not do. It is a wiring fault, so it reads
+ * as one.
+ */
+function requirePresentation(services: Services): LegalDocument {
+  const accepted = new Set(services.legal.documents.map((doc) => doc.id));
+  const presentation = services.legal.publishedDocuments.find(
+    (doc) => !accepted.has(doc.id),
+  );
+  /* c8 ignore next 8 -- wiring.ts always supplies CONSENT_PRESENTATION */
+  if (presentation === undefined) {
+    throw new ApiError(
+      503,
+      "legal-text-unavailable",
+      "Service Unavailable",
+      "This deployment publishes no consent screen copy, so a client cannot be told " +
+        "what to ask. The documents themselves are unaffected and every recorded " +
+        "acceptance remains valid. This is a wiring fault, not a missing document.",
+    );
+  }
+  return presentation;
 }
 
 interface SendOptions {

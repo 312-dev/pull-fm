@@ -78,8 +78,30 @@ curl -sS https://api.pull.fm/v1/legal
     },
     // ... privacy-policy
   ],
+  "presentation": {
+    "documentId": "consent-presentation",
+    "version": "DRAFT-0",
+    "consentEpoch": 1,
+    "contentSha256": "43822a8c07b001715756a4cad97754e177c16410b7c39639ce4dea979fd985b0",
+    "url": "https://api.pull.fm/v1/legal/consent-presentation/versions/DRAFT-0",
+    "effectiveAt": null,
+    "publishedAt": "2026-07-30T00:00:00.000Z",
+  },
 }
 ```
+
+**`presentation` is not a third entry in `documents`, and the difference is load-bearing.** It is the
+copy of the consent screen itself: what is displayed, what the affirmative act is, what the button
+says, what a decline does, and what a returning user is told after a material revision. It is
+published, versioned and digest-locked exactly like a document, and **nobody accepts it** - naming it
+in `accept` is answered `422`, because asking a person to agree to the words with which they are being
+asked to agree is circular.
+
+Fetch it, verify its digest the same way, and render it. Do not hard-code this copy: a client with its
+own wording produces users who were asked a different question, with nothing in any record to say
+which one any of them was asked. Because it is fetched, a wording correction reaches users without a
+release, and **what the screen was told to say on a given date is a published fact with a retrievable
+text** rather than a question about which build somebody had installed.
 
 ```bash
 # 2. After sign-in: what does THIS account still owe? Same document shape, plus
@@ -118,6 +140,11 @@ shasum -a 256 terms.md   # must equal contentSha256, byte for byte
 #    No server can do this step and it is the step that decides whether an
 #    agreement was formed at all. A pre-ticked box or a "by continuing you agree"
 #    footer is not an affirmative act.
+#
+#    You are not left to invent the wording. Fetch the `presentation` document
+#    named in step 1 and render it: it carries the copy verbatim, the button
+#    label, the decline path, the re-consent screen, and the rules the interface
+#    must satisfy. Verify its digest exactly as in step 3.
 ```
 
 ```bash
@@ -245,6 +272,44 @@ Two consequences worth building on:
   not always the current one. `GET /v1/legal/{documentId}/versions/{that version}` shows them exactly
   what they agreed to, which is a better answer than showing them today's text.
 - A versioned URL is immutable, so it is cacheable indefinitely.
+
+## What the record proves, and what it only asserts
+
+Read this before quoting a consent record as establishing anything, and read
+[`../compliance/consent-evidence.md`](../compliance/consent-evidence.md) if you need the full version:
+it is the authoritative statement, and it is what an auditor is handed.
+
+**A server that records an acceptance it was told about cannot know a human saw anything.** The
+`POST` proves that a request arrived carrying the right version and the right digest, on an
+interactive session, at a time the database set, and that nothing has rewritten the row since. It does
+not prove that a screen was rendered, that the published words were on it, that a person read them, or
+that a person rather than the client's own code initiated the request. A client that fetched the
+document, hashed it, and displayed nothing would produce a record indistinguishable from one where
+somebody read every word.
+
+Under Illinois law - which section 16 of the Terms selects - the interface is the whole question
+(`Sgouros v. TransUnion Corp.`, 817 F.3d 1029 (7th Cir. 2016), which found no contract formed for a
+**paid** purchase on a page that **displayed** the terms, because the interface did not communicate
+that proceeding was assent). So the part that decides whether an agreement exists is the part the
+server cannot witness, and that is a property of the architecture rather than a gap awaiting a patch.
+
+Three consequences for a client implementer:
+
+- **`client.build` and `client.platform` are recorded and are not evidence about your client,** because
+  your client supplies them. They are a lead for an investigation, not a fact established. Send them
+  accurately anyway: if a formation challenge is ever made about what a particular release displayed,
+  they are what names the release.
+- **No field exists, or will be added, for "the user scrolled to the end" or "the screen was shown for
+  N seconds".** Both would be client assertions wearing the appearance of measurement, and a record
+  that overstates what it establishes is worse in a dispute than one that is candid about its limits.
+  Do not ask for one.
+- **The consent row does not carry which copy you displayed,** for the same reason. What the server can
+  say, and does, is which version of the copy it had published at the instant the acceptance arrived,
+  derived from two timestamps the database set on two append-only rows. That is "the copy that was
+  current", not "the copy that was shown", and the evidence bundle labels it with exactly that wording.
+
+**Which is why step 4 of the sequence is yours and cannot be delegated.** Everything the API does is
+worth precisely as much as the screen in front of it.
 
 ## Caching
 

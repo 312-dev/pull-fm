@@ -41,6 +41,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import {
   CONSENT_DOCUMENTS,
+  CONSENT_PRESENTATION,
   legalDigest,
   normalizeLegalText,
   LEGAL_CONTENT_TYPE,
@@ -203,6 +204,89 @@ describe("the served bytes are the digested bytes", () => {
     // makes "a newly registered document cannot be silently unserved" true.
     expect(ctx.services.legal.documents.map((d) => d.id)).toEqual(
       CONSENT_DOCUMENTS.map((d) => d.id),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b. The consent screen copy. Published and served like a document, and absent
+//     from the set a subject can owe.
+//
+// Every claim below is one legal/consent-presentation.md section 1.1 makes about
+// itself. An unserved copy would make that document's own description of its
+// mechanism false, which is the failure legal/README.md's accuracy standard exists
+// to prevent, arriving inside the file that states the standard.
+// ---------------------------------------------------------------------------
+describe("the consent screen copy is published, served, and never owed", () => {
+  test("GET /v1/legal names it as `presentation`, not as a document to accept", async () => {
+    const res = await ctx.app.inject({ method: "GET", url: "/v1/legal" });
+    expect(res.statusCode).toBe(200);
+    const body = jsonOf<
+      IndexBody & {
+        presentation: { documentId: string; contentSha256: string };
+      }
+    >(res);
+
+    expect(body.presentation.documentId).toBe(CONSENT_PRESENTATION.id);
+    expect(body.presentation.contentSha256).toBe(
+      CONSENT_PRESENTATION.contentSha256,
+    );
+    // A SEPARATE MEMBER, and this is the assertion that matters. A client that
+    // iterated `documents` and asked a person to accept every entry would be
+    // asking for assent to the words with which it was asking.
+    expect(body.documents.map((d) => d.documentId)).not.toContain(
+      CONSENT_PRESENTATION.id,
+    );
+  });
+
+  test("the served bytes hash to the recorded digest, with no preprocessing", async () => {
+    // Same strong form as the documents: the route serves pre-normalised text, so
+    // a client in another language hashes the response body as received.
+    for (const url of [
+      `/v1/legal/${CONSENT_PRESENTATION.id}`,
+      `/v1/legal/${CONSENT_PRESENTATION.id}/versions/${CONSENT_PRESENTATION.version}`,
+    ]) {
+      const res = await ctx.app.inject({ method: "GET", url });
+      expect(res.statusCode, `${url} did not resolve`).toBe(200);
+      expect(res.headers["content-type"]).toBe(LEGAL_CONTENT_TYPE);
+      expect(sha256(res.body), `${url} served bytes off its digest`).toBe(
+        CONSENT_PRESENTATION.contentSha256,
+      );
+    }
+  });
+
+  test("the durable copy is in the database, so a superseded version survives", async () => {
+    // The point of publishing it at all. The words that were live on a given date
+    // have to be retrievable after they stop being current, or a consent row dated
+    // then cannot be read against the screen that produced it.
+    const { rows } = await ctx.services.db.query<{ content: string | null }>(
+      `SELECT content FROM legal_document_revisions
+        WHERE document_id = $1 AND version = $2`,
+      [CONSENT_PRESENTATION.id, CONSENT_PRESENTATION.version],
+    );
+    expect(rows[0]?.content).not.toBeNull();
+    expect(rows[0]?.content).not.toBeUndefined();
+    expect(legalDigest(rows[0]?.content ?? "")).toBe(
+      CONSENT_PRESENTATION.contentSha256,
+    );
+  });
+
+  test("it does not appear in what a subject owes", async () => {
+    // The other half of "published but never accepted". If it leaked into this
+    // list, every user would owe an acceptance of the consent screen and the
+    // screen would list itself among the documents it was presenting.
+    const subject = await provisionSubject(ctx, "presentationowed", {
+      consent: false,
+    });
+    const res = await ctx.app.inject({
+      method: "GET",
+      url: "/v1/me/consent",
+      headers: { authorization: `Bearer ${subject.token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = jsonOf<{ documents: { documentId: string }[] }>(res);
+    expect(body.documents.map((d) => d.documentId)).not.toContain(
+      CONSENT_PRESENTATION.id,
     );
   });
 });

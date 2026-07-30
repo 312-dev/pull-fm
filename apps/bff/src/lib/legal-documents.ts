@@ -209,11 +209,84 @@ export const CONSENT_DOCUMENTS: readonly LegalDocument[] = [
 ];
 
 /**
- * The files under `legal/` that are NOT consent documents.
+ * The copy of the consent screen itself: what a person is shown and asked.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A THIRD CATEGORY AND NOT ONE OF THE TWO THAT ALREADY EXISTED
+ *
+ * `Sgouros v. TransUnion Corp.`, 817 F.3d 1029 (7th Cir. 2016) found no contract
+ * formed under Illinois law - the law section 16 of the Terms selects - for a PAID
+ * purchase on a page that DISPLAYED the terms, because the interface did not
+ * communicate that proceeding was assent. So the sentence above the button and the
+ * label on the button are the evidence that assent was communicated, and
+ * "Continue" and "I agree to the Terms" are not legally equivalent. A change to
+ * that copy can therefore be as material as a change to a clause, and it has to be
+ * versioned, digest-locked and recorded on the same terms rather than living in a
+ * client's string table where nobody would ever decide what a change meant.
+ *
+ * Neither existing shape does that:
+ *
+ *   CONSENT_DOCUMENTS        Circular. Asking a person to accept the words with
+ *                            which they are being asked to accept needs its own
+ *                            presentation, which needs its own acceptance. It
+ *                            would also put every existing user into an
+ *                            outstanding state and make the screen list itself
+ *                            among the documents it was presenting.
+ *   NON_CONSENT_LEGAL_FILES  An escape hatch meaning "not part of the gate, ignore
+ *                            it". It records no version, no digest and no epoch,
+ *                            so the copy could change with nobody deciding what
+ *                            the change meant. That is the failure to avoid, not a
+ *                            way of avoiding it.
+ *
+ * So: PUBLISHED AND RECORDED LIKE A DOCUMENT, NEVER ACCEPTED LIKE ONE. It is
+ * absent from `CONSENT_DOCUMENTS`, so `consentGap` never counts it and no subject
+ * can ever owe it; it is present in `PUBLISHED_DOCUMENTS`, so `ensureRevisions`
+ * writes it into `legal_document_revisions` and it inherits the append-only
+ * trigger, the epoch guard, and the digest CHECK from migration 0009. It is served
+ * at its own versioned URL forever, which is what lets a third party read the
+ * exact words that were live on a given date without repository access and without
+ * trusting us about them.
+ *
+ * FIRST REVISION, SO EPOCH 1 AND MATERIAL, which the epoch guard requires of any
+ * document's first row and which is also just true: there is no earlier
+ * publication of this copy for an acceptance to carry over from. The epoch is
+ * recorded and is deliberately never compared, because nothing is gated on it; it
+ * exists so that the NEXT revision has something to be material relative to.
+ * ---------------------------------------------------------------------------
+ */
+export const CONSENT_PRESENTATION: LegalDocument = consentDocument({
+  id: "consent-presentation",
+  path: "legal/consent-presentation.md",
+  version: "DRAFT-0",
+  consentEpoch: 1,
+  material: true,
+  contentSha256:
+    "43822a8c07b001715756a4cad97754e177c16410b7c39639ce4dea979fd985b0",
+  effectiveAt: null,
+  notes:
+    "First recorded revision of the consent screen copy: what is displayed, what the affirmative act is, what the button says, what a decline does, and what a returning user is told after a material revision. Epoch 1 and material because it is the first revision of this document, which the epoch guard in migration 0008 requires and which is also the fact - nothing preceded it. NOT A DOCUMENT ANYBODY ACCEPTS: it is published and recorded so that a change to the words around the button is a versioned, reviewable decision rather than a client string edit, and so that the words live on a given date are retrievable afterwards. The materiality rubric for THIS document is in its own section 2 and is narrower than the other two: the question is whether the change alters whether, or to what, assent was communicated.",
+});
+
+/**
+ * Every document this deployment publishes, whether or not it must be accepted.
+ *
+ * The set `ensureRevisions` writes and the document routes serve. It is a
+ * SUPERSET of `CONSENT_DOCUMENTS`, and keeping the two separate is what makes
+ * "published" and "must be accepted" different properties rather than the same
+ * one by accident. `consentGap` is only ever given `CONSENT_DOCUMENTS`, so a
+ * document added here cannot make a subject owe anything.
+ */
+export const PUBLISHED_DOCUMENTS: readonly LegalDocument[] = [
+  ...CONSENT_DOCUMENTS,
+  CONSENT_PRESENTATION,
+];
+
+/**
+ * The files under `legal/` that are NOT published documents at all.
  *
  * Enumerated so that adding a legal document is a decision rather than a file
  * appearing. `legal-versions.test.ts` reconciles the directory against this list
- * plus `CONSENT_DOCUMENTS` in both directions, so a new `legal/eula.md` that
+ * plus `PUBLISHED_DOCUMENTS` in both directions, so a new `legal/eula.md` that
  * nobody wired into the gate fails the build instead of sitting there
  * unpresented.
  */
@@ -271,6 +344,44 @@ export function legalDigest(raw: string): string {
 export function declaredVersion(raw: string): string | null {
   const match = /^\*\*Version:\*\*\s*(\S+)/m.exec(raw);
   return match?.[1] ?? null;
+}
+
+/**
+ * The `**Highlights checked against:**` line, parsed into `id@version` pairs.
+ *
+ * WHY THIS EXISTS AND WHY IT IS PARSED RATHER THAN TRUSTED
+ *
+ * `legal/consent-presentation.md` section 3.1 quotes specific figures and specific
+ * section numbers out of the Terms: the USD 100 and USD 50 caps from section 13,
+ * the beneficiary grant in section 9, the venue in section 16, the territory in
+ * section 2. That makes it the one document in `legal/` that is DERIVATIVE OF A
+ * SPECIFIC VERSION OF ANOTHER ONE, and it introduces a failure the digest lock
+ * cannot see: a Terms revision that moved the cap or renumbered a section leaves
+ * this file byte-identical, so its digest still matches, while the copy it
+ * specifies now states a false figure to every new user at the moment of
+ * formation.
+ *
+ * So the file declares which versions its highlights were read against, and
+ * `legal-versions.test.ts` compares that declaration to the registry. Bumping the
+ * Terms turns this document red until somebody has re-read section 3.1 against the
+ * new text, which is the same interlock the digest provides, applied to a
+ * dependency the digest cannot reach.
+ *
+ * Returns null when the line is absent, so the test can say so specifically rather
+ * than failing on an empty comparison.
+ */
+export function declaredHighlightSources(
+  raw: string,
+): Readonly<Record<string, string>> | null {
+  const line = /^\*\*Highlights checked against:\*\*\s*(.+)$/m.exec(raw);
+  if (line === null) return null;
+  const out: Record<string, string> = {};
+  for (const [, id, version] of line[1]?.matchAll(
+    /`([a-z][a-z0-9-]{2,63})@([A-Za-z0-9][A-Za-z0-9._-]{0,63})`/g,
+  ) ?? []) {
+    if (id !== undefined && version !== undefined) out[id] = version;
+  }
+  return out;
 }
 
 /** The highest epoch a subject has accepted, per document id. */
