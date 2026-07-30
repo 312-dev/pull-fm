@@ -22,6 +22,19 @@ export interface ProblemDetails {
   instance?: string;
   /** Field-level validation failures, when applicable. */
   errors?: readonly { field: string; message: string }[];
+  /**
+   * RFC 9457 extension members, for a problem class where the client needs data
+   * as well as an explanation.
+   *
+   * There is exactly one today (`consent`), and it has to be DECLARED in
+   * `problemSchema` as well as set here. That is not documentation: Fastify
+   * serialises problem bodies with fast-json-stringify against the route's
+   * declared 4xx schema, so an extension member the schema does not know about is
+   * silently dropped on the wire. An undeclared extension is therefore a missing
+   * field rather than an undocumented one, which is the same M12 property the
+   * success schemas rely on, applied to failures.
+   */
+  consent?: unknown;
 }
 
 const TYPE_BASE = "https://pull.fm/problems";
@@ -38,6 +51,8 @@ export class ApiError extends Error {
   readonly type: string;
   readonly title: string;
   readonly fieldErrors?: readonly { field: string; message: string }[];
+  /** Declared extension members. See `ProblemDetails.consent`. */
+  readonly extensions?: Readonly<Pick<ProblemDetails, "consent">>;
 
   constructor(
     status: number,
@@ -45,6 +60,7 @@ export class ApiError extends Error {
     title: string,
     detail?: string,
     fieldErrors?: readonly { field: string; message: string }[],
+    extensions?: Readonly<Pick<ProblemDetails, "consent">>,
   ) {
     super(detail ?? title);
     this.status = status;
@@ -52,6 +68,9 @@ export class ApiError extends Error {
     this.title = title;
     if (fieldErrors !== undefined) {
       this.fieldErrors = fieldErrors;
+    }
+    if (extensions !== undefined) {
+      this.extensions = extensions;
     }
   }
 
@@ -64,6 +83,9 @@ export class ApiError extends Error {
     if (this.message !== this.title) problem.detail = this.message;
     if (instance !== undefined) problem.instance = instance;
     if (this.fieldErrors !== undefined) problem.errors = this.fieldErrors;
+    if (this.extensions?.consent !== undefined) {
+      problem.consent = this.extensions.consent;
+    }
     return problem;
   }
 }
@@ -143,6 +165,54 @@ export const errors = {
       "Unavailable For Legal Reasons",
       "Pull.fm is not offered in your region, so this request was not carried out. " +
         "No message was sent and no account was created.",
+    ),
+
+  /**
+   * The caller has not accepted the current legal documents.
+   *
+   * 403 RATHER THAN 401, 409 OR 428, AND THE CHOICE IS ARGUED RATHER THAN
+   * INHERITED.
+   *
+   *   NOT 401. The credential is perfectly valid and re-authenticating changes
+   *            nothing. A client that receives 401 refreshes its token or bounces
+   *            the user through sign-in, which here is an infinite loop that ends
+   *            with the user reinstalling the app. Same reasoning as
+   *            `regionUnavailable` refusing to be a 403.
+   *   NOT 409. Nothing about the request conflicts with server state. The
+   *            request is well formed and the caller simply is not permitted to
+   *            make it yet, which is what 403 means.
+   *   NOT 428. `Precondition Required` is about conditional requests and
+   *            If-Match, and reusing it here would put a legal gate in the same
+   *            bucket as an ETag mismatch for every intermediary and library that
+   *            handles 428 specially.
+   *
+   * The distinct `type` URI is what the client actually switches on, and the
+   * `consent` extension member carries the documents to display, so a cold-started
+   * client learns what to render from the refusal itself rather than needing a
+   * second round trip to discover it.
+   *
+   * The message names the two ways out - accept, or delete the account - because
+   * a refusal that offers no exit is a trap, and refusing to accept the Terms has
+   * to remain a real option. `DELETE /v1/me` and `GET /v1/me/export` are never
+   * gated by this; see the exemptions in plugins/auth.ts.
+   */
+  consentRequired: (
+    reason: "never-accepted" | "revision-pending",
+    outstanding: unknown,
+  ) =>
+    new ApiError(
+      403,
+      "consent-required",
+      "Forbidden",
+      reason === "never-accepted"
+        ? "You have not accepted the Pull.fm Terms of Service and Privacy Policy. Accept them at " +
+            "POST /v1/me/consent, or delete your account at DELETE /v1/me. Reading your own account and " +
+            "exporting or deleting your data are not gated by this."
+        : "The Terms of Service or Privacy Policy have changed materially since you last accepted them, " +
+            "so this write was refused. Reading still works. Accept the current versions at " +
+            "POST /v1/me/consent, or delete your account at DELETE /v1/me.",
+      undefined,
+      { consent: { reason, outstanding } },
     ),
 
   /**

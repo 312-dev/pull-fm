@@ -55,6 +55,13 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import type { Redis } from "ioredis";
 
 import { errors } from "../lib/errors.js";
+import {
+  consentGap,
+  toWireDocument,
+  type AcceptedEpochs,
+  type LegalDocument,
+} from "../lib/legal-documents.js";
+import { ANNOTATION_KEY, type PullfmAnnotations } from "../lib/openapi.js";
 import { incrementWindow } from "../lib/redis.js";
 import { readCookie, type SessionCookieCipher } from "../lib/session-cookie.js";
 import type { TokenService } from "../services/tokens.js";
@@ -89,6 +96,15 @@ export interface Subject {
   readonly scopes: readonly string[];
   /** Unix seconds at which this credential was issued (JWT `iat`). */
   readonly authenticatedAt: number;
+  /**
+   * The highest legal-document epoch this subject has accepted, per document.
+   *
+   * Resolved by the same statement that resolved the subject, so the consent gate
+   * costs no extra round trip. Exposed on the subject rather than fetched by the
+   * routes because two of them report it and the gate enforces it, and three
+   * independent reads of one fact is how they end up disagreeing.
+   */
+  readonly acceptedEpochs: AcceptedEpochs;
 }
 
 /**
@@ -198,6 +214,15 @@ export interface AuthPluginOptions {
     readonly cipher: SessionCookieCipher;
     readonly name: string;
   };
+  /**
+   * The documents a user must accept, in the versions this build publishes.
+   *
+   * REQUIRED rather than optional, and an empty array is the way to say "no
+   * consent gate on this deployment". An optional option would make forgetting to
+   * pass it indistinguishable from deciding not to have a gate, and the two have
+   * very different consequences for whether a contract exists.
+   */
+  readonly legalDocuments: readonly LegalDocument[];
 }
 
 /** Prefix under which locally revoked session ids are held. */
@@ -327,6 +352,7 @@ async function authPlugin(
         typeof payload.iat === "number"
           ? payload.iat
           : Math.floor(Date.now() / 1000),
+      acceptedEpochs: user.acceptedEpochs,
     };
   }
 
@@ -423,6 +449,7 @@ async function authPlugin(
       tokenId: authenticated.tokenId,
       scopes: authenticated.scopes,
       authenticatedAt: Math.floor(Date.now() / 1000),
+      acceptedEpochs: user.acceptedEpochs,
     };
   }
 
@@ -525,6 +552,7 @@ async function authPlugin(
           );
         }
         request.subject = subject;
+        enforceConsent(request, opts.legalDocuments);
         return;
       }
 
@@ -532,10 +560,111 @@ async function authPlugin(
         throw errors.unauthorized();
       }
       request.subject = await fromSession(credential);
+      enforceConsent(request, opts.legalDocuments);
     };
 
     return handler;
   });
+}
+
+/**
+ * Methods that cannot change state, so a stale-consent subject may still use
+ * them. HEAD and OPTIONS are here because Fastify synthesises them from a GET.
+ */
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * The consent gate.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY IT IS HERE AND NOT IN A PLUGIN OF ITS OWN
+ *
+ * Every authenticated route in this API passes through `requireAuth`, and that is
+ * the only thing in the system true of all of them. A separate `preHandler`
+ * plugin would apply to unauthenticated routes as well, which it must not, and a
+ * per-route call would be a control a new route can silently omit - the exact
+ * failure mode `annotate()` and `upstream-scope.tsv` were both written to end. Put
+ * differently: a route cannot be authenticated and un-gated by accident, because
+ * the code that authenticates it is the code that gates it.
+ * ---------------------------------------------------------------------------
+ * WHY TWO TIERS, AND WHAT WAS REJECTED
+ *
+ * Three designs were considered.
+ *
+ *   REFUSE EVERYTHING          Rejected as a blanket rule for one reason that is
+ *                              not about convenience: `GET /v1/me/export` and
+ *                              `DELETE /v1/me` are data-subject rights under GDPR
+ *                              Articles 20 and 17 and their CCPA equivalents, and
+ *                              conditioning a statutory right on agreeing to a
+ *                              contract is not defensible. Deletion is also the
+ *                              only honest exit for a user who has read the Terms
+ *                              and declined them; a gate with no exit is a trap,
+ *                              and the Terms themselves tell such a user to delete
+ *                              their account.
+ *
+ *   REPORT AND ALLOW           Rejected outright. It is what the product already
+ *                              did, and it is what section 1 of the Terms records
+ *                              as its most consequential gap. SeatGeek's API Terms
+ *                              clause 4.3 requires that each End User be REQUIRED
+ *                              TO ACCEPT before using the Application, so an
+ *                              advisory field in a response body is a breach of
+ *                              their terms as well as a formation failure. A
+ *                              requirement nothing refuses is not a requirement.
+ *
+ *   TWO TIERS                  Chosen. The two cases are legally different and
+ *                              treating them the same is wrong in one direction or
+ *                              the other.
+ *
+ *   never-accepted    NO CONTRACT EXISTS. Nothing this subject does is licensed,
+ *                     the catalogue they would read is third-party data we may
+ *                     only serve under an accepted EULA, and clause 4.3's "before
+ *                     using your Application" covers reads as squarely as writes.
+ *                     Everything is refused except the exemptions below.
+ *
+ *   revision-pending  A CONTRACT EXISTS and still governs; what is missing is
+ *                     assent to its replacement. Locking this user out of their
+ *                     own wishlist punishes them for OUR revision, and it would
+ *                     make every material amendment a self-inflicted outage - which
+ *                     is precisely the pressure that leads to amendments being
+ *                     quietly classified as cosmetic. So reads continue and writes
+ *                     stop: enough that the screen cannot be dismissed forever,
+ *                     little enough that publishing a revision is not frightening.
+ *
+ * The exemptions are declared on the route, in `annotate({ consent })`, and read
+ * from there rather than from a path list here. A list in this file would be a
+ * second place a route's classification lives, and consent.test.ts enumerates the
+ * exempt set out of the generated OpenAPI document so that adding to it is a
+ * visible diff in a test rather than a line nobody reviews.
+ */
+function enforceConsent(
+  request: FastifyRequest,
+  documents: readonly LegalDocument[],
+): void {
+  if (documents.length === 0) return;
+
+  // Absent annotation means `enforced`. See ConsentGate: the direction of this
+  // default is the control.
+  const schema = request.routeOptions.schema as
+    | (Record<string, unknown> & { [ANNOTATION_KEY]?: PullfmAnnotations })
+    | undefined;
+  const gate = schema?.[ANNOTATION_KEY]?.consent ?? "enforced";
+  if (gate !== "enforced") return;
+
+  const subject = request.subject;
+  /* c8 ignore next -- called immediately after the subject is assigned */
+  if (subject === null) return;
+
+  const gap = consentGap(documents, subject.acceptedEpochs);
+  if (gap.satisfied) return;
+
+  const mutating = !SAFE_METHODS.has(request.method.toUpperCase());
+  if (gap.reason === "revision-pending" && !mutating) return;
+
+  throw errors.consentRequired(
+    /* c8 ignore next -- an unsatisfied gap always carries a reason */
+    gap.reason ?? "never-accepted",
+    gap.outstanding.map((doc) => toWireDocument(doc)),
+  );
 }
 
 export default fp(authPlugin, { name: "pullfm-auth" });

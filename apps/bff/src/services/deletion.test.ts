@@ -26,6 +26,7 @@ import type { Queryable } from "../lib/db.js";
 import { ApiError } from "../lib/errors.js";
 import { DeletionService, type DeletionDatabase } from "./deletion.js";
 import type { ErasureDurability, ErasureLedger } from "./erasure-ledger.js";
+import type { ConsentRecord } from "./legal-consent.js";
 import type { WorkOsClient } from "./workos.js";
 
 const USER = "11111111-2222-3333-4444-555555555555";
@@ -100,6 +101,25 @@ interface FakeLedger extends ErasureLedger {
   /** Records the order the cascade did things in, shared with the db fake. */
 }
 
+/**
+ * The consent-receipt reader.
+ *
+ * Defaults to an empty history, which is the state of every user who signed in
+ * before the consent gate existed, and returns records when a test needs to prove
+ * the receipt reaches `deletion_log.consents`.
+ */
+function fakeLegal(
+  records: readonly ConsentRecord[] = [],
+  opts: { fail?: boolean } = {},
+): { receiptFor: (userId: string) => Promise<readonly ConsentRecord[]> } {
+  return {
+    receiptFor: () =>
+      opts.fail === true
+        ? Promise.reject(new Error("read failed"))
+        : Promise.resolve(records),
+  };
+}
+
 function fakeLedger(opts: {
   configured?: boolean;
   outcome?: ErasureDurability;
@@ -132,6 +152,7 @@ function service(
     cacheRedis: fakeRedis(),
     quotaRedis: fakeRedis(),
     ledger,
+    legal: fakeLegal(),
   });
 }
 
@@ -164,6 +185,7 @@ describe("the ordering the cascade depends on", () => {
       cacheRedis: fakeRedis(),
       quotaRedis: fakeRedis(),
       ledger,
+      legal: fakeLegal(),
     });
 
     await svc.deleteAccount(USER, WORKOS_USER);
@@ -233,10 +255,10 @@ describe("a configured ledger that fails", () => {
     const db = fakeDb();
     const broken: FakeDb = {
       ...db,
-      query: ((text: string, values?: readonly unknown[]) =>
+      query: (text: string, values?: readonly unknown[]) =>
         text.includes("UPDATE deletion_log")
           ? Promise.reject(new Error("read only transaction"))
-          : db.query(text, values)),
+          : db.query(text, values),
     };
 
     const err = (await service(broken, fakeLedger({ fail: true }))
@@ -278,7 +300,9 @@ describe("a deployment with no ledger configured", () => {
       USER,
       WORKOS_USER,
     );
-    expect(db.notes().join(" ")).toMatch(/Erasure ledger written before deletion/);
+    expect(db.notes().join(" ")).toMatch(
+      /Erasure ledger written before deletion/,
+    );
   });
 });
 
@@ -312,6 +336,7 @@ describe("the failures that must NOT abort the erasure", () => {
       cacheRedis: broken,
       quotaRedis: broken,
       ledger: fakeLedger({}),
+      legal: fakeLegal(),
     }).deleteAccount(USER, WORKOS_USER);
 
     expect(outcome.redisKeysDeleted).toBe(0);

@@ -15,6 +15,10 @@ import type { FetchLike } from "@pull-fm/upstream";
 import type { Config } from "./config.js";
 import { AuditLog } from "./lib/audit.js";
 import { Database } from "./lib/db.js";
+import {
+  CONSENT_DOCUMENTS,
+  type LegalDocument,
+} from "./lib/legal-documents.js";
 import { SigningKeys } from "./lib/keys.js";
 import { createMaintenanceGate } from "./lib/maintenance.js";
 import { Registry } from "./lib/metrics.js";
@@ -48,6 +52,7 @@ import {
 import { DiscoveryService } from "./services/discovery.js";
 import { EventsService } from "./services/events.js";
 import { ExportService } from "./services/export.js";
+import { LegalConsentService } from "./services/legal-consent.js";
 import { TokenService } from "./services/tokens.js";
 import { UserService } from "./services/users.js";
 import { WishlistService } from "./services/wishlist.js";
@@ -98,6 +103,21 @@ export interface WiringOverrides {
    * the happy path of the only irreversible operation in the API.
    */
   readonly erasureLedger?: ErasureLedger;
+  /**
+   * The legal documents this application requires acceptance of.
+   *
+   * A seam, and a necessary one for the same reason the erasure ledger is: the
+   * behaviour that has to be proved is "a MATERIAL revision makes an existing user
+   * accept again, and a corrected typo does not", and the only way to exercise it
+   * is to run one subject against two different registries. There is no way to do
+   * that by editing a markdown file mid-test, and a suite that cannot do it is a
+   * suite that certifies the first-launch path of a control whose whole point is
+   * what happens on the second launch.
+   *
+   * Defaults to `CONSENT_DOCUMENTS`, so a deployment gets the real set without
+   * naming it.
+   */
+  readonly legalDocuments?: readonly LegalDocument[];
 }
 
 export function buildServices(
@@ -153,6 +173,11 @@ export function buildServices(
   });
 
   const users = new UserService(db);
+
+  const legal = new LegalConsentService(
+    db,
+    overrides.legalDocuments ?? CONSENT_DOCUMENTS,
+  );
 
   /**
    * The erasure ledger, and the one warning that has to be loud.
@@ -319,12 +344,18 @@ export function buildServices(
     }),
     connections,
     wishlist: new WishlistService(db, keys),
+    legal,
     deletion: new DeletionService({
       db,
       workos,
       cacheRedis,
       quotaRedis,
       ledger: erasureLedger,
+      // Reads the acceptance rows before the cascade destroys them, so the
+      // receipt in deletion_log.consents outlives the account the way the proof
+      // of the erasure itself does. See migration 0008 for why the full row
+      // cascades and this summary does not.
+      legal,
       log,
     }),
     exports: new ExportService(db, keys, quotaRedis, {

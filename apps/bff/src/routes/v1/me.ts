@@ -55,6 +55,11 @@ export function registerMeRoutes(
         ...annotate({
           authz: "user-scoped",
           dast: "include",
+          // NOT gated by the consent requirement, and narrowly so. The consent
+          // screen has to name the account it is about, and this is the call a
+          // client makes before it can render anything at all. The READ only:
+          // PATCH /v1/me is gated like every other write.
+          consent: "exempt-account-identity",
           tokenScope: "read:me",
           bola: {
             strategy: "implicit-subject",
@@ -290,6 +295,14 @@ export function registerMeRoutes(
         ...annotate({
           authz: "user-scoped",
           dast: "exclude",
+          // NEVER gated by the consent requirement, and this is the exemption
+          // that matters most. Erasure is a right under GDPR Article 17 and the
+          // CCPA, and conditioning a statutory right on agreeing to a contract is
+          // not a position anybody could defend. It is also the only honest exit
+          // for a user who has read the Terms and declined them - section 15 of
+          // the Terms tells exactly that user to delete their account, so a gate
+          // that blocked deletion would contradict the document it enforces.
+          consent: "exempt-data-subject-right",
           bola: {
             strategy: "implicit-subject",
             objectType: "subject",
@@ -382,6 +395,10 @@ export function registerMeRoutes(
         ...annotate({
           authz: "user-scoped",
           dast: "exclude",
+          // Portability is a right (GDPR Article 20, and the CCPA right to know),
+          // so it is not conditioned on accepting the Terms. A user who declines
+          // must still be able to take their data with them before deleting.
+          consent: "exempt-data-subject-right",
           bola: {
             strategy: "implicit-subject",
             objectType: "subject",
@@ -458,6 +475,15 @@ export function registerMeRoutes(
                 type: "array",
                 items: { type: "object", additionalProperties: true },
               },
+              // Declared, or fast-json-stringify drops it: the M12 property that
+              // keeps credentials off the wire also keeps undeclared properties
+              // off it, including ones we meant to send.
+              legalConsents: {
+                type: "array",
+                description:
+                  "Every acceptance of a Pull.fm legal document, with the version and content digest of the exact text accepted. Excludes the IP address and user agent recorded alongside it: those corroborate the act for our benefit and are not data the subject provided.",
+                items: { type: "object", additionalProperties: true },
+              },
             },
             required: ["format", "formatVersion", "generatedAt", "notice"],
           },
@@ -466,6 +492,9 @@ export function registerMeRoutes(
         ...annotate({
           authz: "user-scoped",
           dast: "exclude",
+          // The other half of Article 20. Gating the download while allowing the
+          // request would be a right that produces a link nobody can use.
+          consent: "exempt-data-subject-right",
           bola: {
             strategy: "query-param",
             objectType: "export_ticket",

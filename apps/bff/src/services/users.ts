@@ -8,6 +8,7 @@
  */
 
 import type { Database, Queryable } from "../lib/db.js";
+import type { AcceptedEpochs } from "../lib/legal-documents.js";
 
 export interface User {
   readonly id: string;
@@ -48,8 +49,53 @@ function toUser(row: UserRow): User {
   };
 }
 
+/**
+ * A subject as the authentication path needs it: the profile plus the highest
+ * legal-document epoch it has accepted.
+ *
+ * The epochs ride along on the SUBJECT LOOKUP rather than being fetched by the
+ * consent gate separately, and that is the whole reason the gate can be
+ * unconditional. Every authenticated request already performs exactly one
+ * indexed read here, so folding the aggregate into it costs a lateral join and no
+ * additional round trip. A gate that added a query per request would be a gate
+ * somebody eventually made conditional to save the query, and a conditional
+ * consent gate is not one.
+ */
+export interface AuthenticatedUser extends User {
+  readonly acceptedEpochs: AcceptedEpochs;
+}
+
+interface AuthenticatedUserRow extends UserRow {
+  /** `{ "terms-of-service": 1, ... }`, or `{}` when nothing was accepted. */
+  accepted_epochs: Record<string, number>;
+}
+
+function toAuthenticatedUser(row: AuthenticatedUserRow): AuthenticatedUser {
+  return { ...toUser(row), acceptedEpochs: row.accepted_epochs };
+}
+
 const COLUMNS = `id, workos_user_id, email, display_name, created_at, deleted_at,
                  auth_method, email_verified_at, last_authenticated_at`;
+
+/**
+ * The subject columns plus the accepted epochs, in one statement.
+ *
+ * `max(consent_epoch)` rather than "the latest row", because the question the
+ * gate asks is "is any accepted epoch at least the current one" and a user who
+ * re-accepted an older version after a newer one has still accepted the newer.
+ * `jsonb_object_agg` over the grouped subquery keeps it to one row regardless of
+ * how many documents exist, and COALESCE makes "accepted nothing" an empty object
+ * rather than a null the caller has to remember to handle.
+ */
+const AUTH_COLUMNS = `${COLUMNS},
+                 COALESCE(
+                   (SELECT jsonb_object_agg(g.document_id, g.epoch)
+                      FROM (SELECT document_id, max(consent_epoch) AS epoch
+                              FROM legal_consents
+                             WHERE user_id = users.id
+                             GROUP BY document_id) g),
+                   '{}'::jsonb
+                 ) AS accepted_epochs`;
 
 export interface UpsertInput {
   readonly workosUserId: string;
@@ -104,24 +150,26 @@ export class UserService {
    * `deleted_at IS NULL` is a predicate rather than a post-check so a token
    * minted before deletion cannot outlive the account it belongs to.
    */
-  async findActiveByWorkOsId(workosUserId: string): Promise<User | null> {
-    const { rows } = await this.#db.query<UserRow>(
-      `SELECT ${COLUMNS} FROM users
+  async findActiveByWorkOsId(
+    workosUserId: string,
+  ): Promise<AuthenticatedUser | null> {
+    const { rows } = await this.#db.query<AuthenticatedUserRow>(
+      `SELECT ${AUTH_COLUMNS} FROM users
         WHERE workos_user_id = $1 AND deleted_at IS NULL`,
       [workosUserId],
     );
     const row = rows[0];
-    return row === undefined ? null : toUser(row);
+    return row === undefined ? null : toAuthenticatedUser(row);
   }
 
-  async findActiveById(id: string): Promise<User | null> {
-    const { rows } = await this.#db.query<UserRow>(
-      `SELECT ${COLUMNS} FROM users
+  async findActiveById(id: string): Promise<AuthenticatedUser | null> {
+    const { rows } = await this.#db.query<AuthenticatedUserRow>(
+      `SELECT ${AUTH_COLUMNS} FROM users
         WHERE id = $1 AND deleted_at IS NULL`,
       [id],
     );
     const row = rows[0];
-    return row === undefined ? null : toUser(row);
+    return row === undefined ? null : toAuthenticatedUser(row);
   }
 
   /**

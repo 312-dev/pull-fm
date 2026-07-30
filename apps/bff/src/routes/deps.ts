@@ -24,6 +24,7 @@ import type { ExpirySweeper } from "../services/expiry-sweeper.js";
 import type { DiscoveryService } from "../services/discovery.js";
 import type { EventsService } from "../services/events.js";
 import type { ExportService } from "../services/export.js";
+import type { LegalConsentService } from "../services/legal-consent.js";
 import type { MagicAuthService } from "../services/magic-auth.js";
 import type { TokenService } from "../services/tokens.js";
 import type { UserService } from "../services/users.js";
@@ -102,6 +103,17 @@ export interface Services {
   readonly wishlist: WishlistService;
   readonly deletion: DeletionService;
   readonly exports: ExportService;
+  /**
+   * The published legal documents and the recorded acceptances of them.
+   *
+   * On the bundle because THREE things read it and they must not disagree: the
+   * two consent routes, the deletion cascade (which writes the surviving
+   * receipt), and - through `Subject.acceptedEpochs` rather than through this
+   * object - the gate in plugins/auth.ts. The gate takes the document list
+   * separately at plugin registration, because a preValidation hook must not
+   * reach into the service bundle to decide whether a request is allowed.
+   */
+  readonly legal: LegalConsentService;
   readonly workos: WorkOsClient;
   /**
    * Every third-party client, and the cache that fronts them. Exposed on the

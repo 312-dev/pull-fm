@@ -76,6 +76,7 @@ import type { Queryable } from "../lib/db.js";
 import { ApiError } from "../lib/errors.js";
 import { deleteByPrefix } from "../lib/redis.js";
 import type { ErasureDurability, ErasureLedger } from "./erasure-ledger.js";
+import type { ConsentRecord } from "./legal-consent.js";
 import type { WorkOsClient } from "./workos.js";
 
 export interface DeletionOutcome {
@@ -118,6 +119,17 @@ export interface DeletionServiceDeps {
    * forget to consider durability.
    */
   readonly ledger: ErasureLedger;
+  /**
+   * Reads the consent rows before they are destroyed.
+   *
+   * NOT optional, for the same reason `ledger` is not: the receipt is the half of
+   * the consent design that makes the ON DELETE CASCADE on `legal_consents`
+   * defensible, and a dependency that could be absent is a code path that can
+   * forget to write it. Migration 0008 carries the argument.
+   */
+  readonly legal: {
+    receiptFor: (userId: string) => Promise<readonly ConsentRecord[]>;
+  };
   /** Optional. Never receives anything but ids and a failure kind. */
   readonly log?: { warn: (obj: unknown, msg?: string) => void } | undefined;
 }
@@ -155,6 +167,10 @@ const OWNED_TABLES = [
   "idempotency_keys",
   "api_tokens",
   "connect_states",
+  // Cascades like the rest, and unlike the rest it leaves a receipt behind in
+  // `deletion_log.consents`. See migration 0008: the personal data in the row
+  // goes with the account, the fact that a contract was formed does not.
+  "legal_consents",
 ] as const;
 
 export class DeletionService {
@@ -270,6 +286,28 @@ export class DeletionService {
       throw ledgerUnavailable();
     }
 
+    /**
+     * The consent receipt, read BEFORE the cascade and outside the transaction.
+     *
+     * Before, because after the DELETE there is nothing to read. Outside, because
+     * a failure here must not roll back an erasure: the receipt is evidence of a
+     * contract, and refusing a data subject their Article 17 right because a
+     * SELECT failed would be a far worse outcome than an erasure whose receipt is
+     * empty. An empty receipt is also the correct value for the case that will be
+     * most common at first - a user who never accepted anything - so a reader
+     * cannot tell "no consent" from "read failed" and the log line is what
+     * distinguishes them.
+     */
+    let consents: readonly ConsentRecord[] = [];
+    try {
+      consents = await this.#deps.legal.receiptFor(userId);
+    } catch (err) {
+      this.#deps.log?.warn(
+        { userId, err: err instanceof Error ? err.name : "unknown" },
+        "could not read the consent receipt before erasure; deletion_log.consents will be empty",
+      );
+    }
+
     const rowsDeleted = await this.#deps.db.transaction(async (client) => {
       const counts: Record<string, number> = {};
       for (const table of OWNED_TABLES) {
@@ -327,12 +365,18 @@ export class DeletionService {
 
       await this.#deps.db.query(
         `UPDATE deletion_log
-            SET completed_at = now(), rows_deleted = $2, workos_deleted = $3, notes = $4
+            SET completed_at = now(), rows_deleted = $2, workos_deleted = $3,
+                consents = $4, notes = $5
           WHERE id = $1`,
         [
           logId,
           JSON.stringify({ ...rowsDeleted, redisKeys: redisKeysDeleted }),
           workosDeleted,
+          // The surviving evidence that a contract was formed: document, version,
+          // digest, epoch, timestamp and which gate presented it. No IP, no user
+          // agent, no session id, no client build - those are the identifying
+          // parts and they leave with the account.
+          JSON.stringify(consents),
           notes,
         ],
       );

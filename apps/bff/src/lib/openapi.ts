@@ -43,6 +43,46 @@ export interface BolaDescriptor {
   readonly deny: readonly number[];
 }
 
+/**
+ * Whether the first-launch consent gate applies to this operation, and if not,
+ * WHY NOT.
+ *
+ * A bare boolean was rejected. Every exemption here is a hole in a control that
+ * exists because a contract does not form without it, so the reason a route is
+ * exempt has to be legible at the route rather than inferable from its path. The
+ * reason is also the review criterion: a new value in this union is a new CLASS of
+ * exemption and should be argued, while adding a route to an existing class is a
+ * judgement about that route.
+ *
+ * `enforced` is the DEFAULT and is what an operation with no annotation gets.
+ * That direction matters more than the values do: the failure mode of a
+ * fail-closed default is a route that refuses a user who owes consent, which is
+ * visible in one test run, and the failure mode of a fail-open default is a route
+ * that quietly works without a contract, which is visible in a deposition.
+ */
+export type ConsentGate =
+  | "enforced"
+  /** The consent endpoints themselves. Gating them would deadlock the gate. */
+  | "exempt-consent-flow"
+  /**
+   * Export and deletion. GDPR Article 17 and 20, and the CCPA equivalents:
+   * conditioning a data-subject right on agreeing to a contract is not a
+   * defensible position, and deletion is additionally the only honest exit for a
+   * user who has read the Terms and refused them.
+   */
+  | "exempt-data-subject-right"
+  /**
+   * Sign-out. A user who refuses the Terms must be able to end their session,
+   * and "you cannot log out until you agree" is indefensible in every direction.
+   */
+  | "exempt-session-control"
+  /**
+   * Reading one's own account. The consent screen has to say which account it is
+   * about, and the client's launch sequence reads this before it can render
+   * anything. Narrow on purpose: the READ is exempt, `PATCH /v1/me` is not.
+   */
+  | "exempt-account-identity";
+
 export interface PullfmAnnotations {
   readonly authz: AuthzClass;
   /** Whether the ZAP active scan may drive this operation. */
@@ -50,6 +90,17 @@ export interface PullfmAnnotations {
   readonly bola?: BolaDescriptor;
   /** Scope a personal API token must hold. Documented, not just enforced. */
   readonly tokenScope?: string;
+  /**
+   * Consent-gate classification. Omitted means `enforced`.
+   *
+   * Declared HERE, on the schema, rather than as an option to `requireAuth`,
+   * even though `requireAuth` is what enforces it. Two declarations of one fact
+   * drift, and the one that drifted would be the enforcement rather than the
+   * documentation. The hook reads this off `request.routeOptions.schema`, so
+   * there is exactly one place a route says whether the gate applies, and it is
+   * the same place the security tooling reads it from.
+   */
+  readonly consent?: ConsentGate;
 }
 
 /** The key under which annotations ride on a Fastify route schema. */
@@ -137,6 +188,11 @@ export function applyAnnotations(
       }
       operation["x-pullfm-authz"] = found.annotations.authz;
       operation["x-pullfm-dast"] = found.annotations.dast;
+      // Written for EVERY operation, defaulted rather than omitted, so the
+      // exemption set can be enumerated from the document. An absent key would
+      // be indistinguishable from an operation nobody classified, which is the
+      // ambiguity the `enforced` default exists to remove.
+      operation["x-pullfm-consent"] = found.annotations.consent ?? "enforced";
       if (found.annotations.bola !== undefined) {
         operation["x-pullfm-bola"] = found.annotations.bola;
       }

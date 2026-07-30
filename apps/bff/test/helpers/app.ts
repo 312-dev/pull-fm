@@ -23,6 +23,7 @@ import type { FastifyInstance } from "fastify";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 import { loadConfig, type Config } from "../../src/config.js";
+import type { LegalDocument } from "../../src/lib/legal-documents.js";
 import { buildServer } from "../../src/server.js";
 import { buildServices, closeServices } from "../../src/wiring.js";
 import type { Services } from "../../src/routes/deps.js";
@@ -208,6 +209,17 @@ export interface TestAppOptions {
    * that an operator's override lands on the instance the entrypoint runs.
    */
   readonly jobEnv?: NodeJS.ProcessEnv;
+  /**
+   * The legal documents this application requires acceptance of.
+   *
+   * Defaults to the real registry. Overridden by the consent suite, which is the
+   * only way to test the behaviour the gate exists for: "a MATERIAL revision makes
+   * an existing user accept again, and a corrected typo does not" needs one
+   * subject run against two registries, and there is no way to edit a markdown
+   * file mid-test. Two applications over the SAME database is the shape; the
+   * second mints its own token for the same WorkOS subject id.
+   */
+  readonly legalDocuments?: readonly LegalDocument[];
 }
 
 export async function buildTestApp(
@@ -294,6 +306,9 @@ export async function buildTestApp(
       // developer's shell would otherwise silently retune a retention window
       // mid-run and turn a real failure into a green test.
       jobEnv: opts.jobEnv ?? {},
+      ...(opts.legalDocuments === undefined
+        ? {}
+        : { legalDocuments: opts.legalDocuments }),
     },
   );
 

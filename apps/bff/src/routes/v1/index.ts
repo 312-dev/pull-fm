@@ -17,6 +17,7 @@ import { problemResponses } from "../../lib/schemas.js";
 import type { Services } from "../deps.js";
 import { registerAuthRoutes } from "./auth.js";
 import { registerConnectionRoutes } from "./connections.js";
+import { registerConsentRoutes } from "./consent.js";
 import { registerMeRoutes } from "./me.js";
 import { registerProductRoutes } from "./product.js";
 import { registerTokenRoutes } from "./tokens.js";
@@ -107,6 +108,11 @@ export async function registerV1Routes(
 
   registerAuthRoutes(app, services);
   registerMeRoutes(app, services);
+  // Registered next to the account surface rather than under a /legal prefix
+  // because both routes are about a SUBJECT's standing, not about the documents:
+  // there is no unauthenticated "fetch the terms" route here, and the documents
+  // are not in the deployed image to serve. See consent.ts.
+  registerConsentRoutes(app, services);
   registerTokenRoutes(app, services);
   registerConnectionRoutes(app, services);
   registerWishlistRoutes(app, services);

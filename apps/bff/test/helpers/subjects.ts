@@ -39,10 +39,29 @@ export interface Subject {
 
 let counter = 0;
 
-/** Creates a real user and mints a real session token for it. */
+export interface ProvisionOptions {
+  /**
+   * Whether to record acceptance of the legal documents this application
+   * requires. Defaults to TRUE.
+   *
+   * The default is what it is because of what a subject without consent now
+   * means: `plugins/auth.ts` refuses every enforced route for a subject who has
+   * accepted nothing, so an unaccepted fixture would fail every suite in this
+   * directory with a 403 that has nothing to do with what the suite is testing.
+   * A real user cannot reach a wishlist without having accepted either, so the
+   * default is also the honest one - a fixture that skipped the gate would be
+   * testing a state the product does not produce.
+   *
+   * Pass false to test the gate itself.
+   */
+  readonly consent?: boolean;
+}
+
+/** Creates a real user, mints a real session token, and accepts the terms. */
 export async function provisionSubject(
   ctx: TestApp,
   role = "subject",
+  opts: ProvisionOptions = {},
 ): Promise<Subject> {
   counter += 1;
   const suffix = `${String(counter)}_${randomUUID().slice(0, 8)}`;
@@ -62,8 +81,57 @@ export async function provisionSubject(
 
   const sessionId = `session_${suffix}`;
   const token = await ctx.idp.mint(workosUserId, { sessionId });
+  const subject: Subject = {
+    id: user.id,
+    workosUserId,
+    email,
+    token,
+    sessionId,
+  };
 
-  return { id: user.id, workosUserId, email, token, sessionId };
+  if (opts.consent !== false) await acceptRequiredDocuments(ctx, subject);
+
+  return subject;
+}
+
+/**
+ * Accepts every document this application requires, through the real route.
+ *
+ * Through the route rather than by INSERT, deliberately: the version and digest
+ * validation, the derived `gate` value, the audit write and the response contract
+ * are all part of what a suite depends on, and a fixture that bypassed them would
+ * let all four rot while every suite stayed green.
+ *
+ * Derived from `ctx.services.legal.documents` rather than from a literal list, so
+ * a suite that builds an application with a synthetic registry gets acceptances
+ * for THAT registry.
+ */
+export async function acceptRequiredDocuments(
+  ctx: TestApp,
+  subject: Subject,
+): Promise<void> {
+  const documents = ctx.services.legal.documents;
+  if (documents.length === 0) return;
+
+  const res = await ctx.app.inject({
+    method: "POST",
+    url: "/v1/me/consent",
+    headers: { authorization: `Bearer ${subject.token}` },
+    payload: {
+      accept: documents.map((doc) => ({
+        documentId: doc.id,
+        version: doc.version,
+        contentSha256: doc.contentSha256,
+      })),
+      client: { build: "test-harness", platform: "vitest" },
+    },
+  });
+  if (res.statusCode !== 200) {
+    throw new Error(
+      `could not accept the legal documents for the fixture subject: ` +
+        `${String(res.statusCode)} ${res.body.slice(0, 300)}`,
+    );
+  }
 }
 
 export interface Fixtures {

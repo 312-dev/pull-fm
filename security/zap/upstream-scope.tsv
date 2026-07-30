@@ -81,6 +81,8 @@ DELETE /v1/me	none	workos	Deletion cascade calls WorkOS deleteUser. Already dast
 PATCH /v1/me	none	workos	WorkOS updateUser. Already dast:exclude.
 GET /v1/me/export	none	-	Local export job. Already dast:exclude and in the ZAP context excludePaths.
 GET /v1/me/export/download	none	-	Serves a local artefact. Already dast:exclude.
+GET /v1/me/consent	none	-	Reads legal_document_revisions and legal_consents plus an in-memory document registry. No provider client exists on this path and no input can put one there.
+POST /v1/me/consent	none	-	Inserts a consent row after comparing the supplied version and content digest to the registry. No provider client on the path; dast:exclude anyway, because a scanner cannot produce a valid digest and so could only exercise the refusal branches, while a fuzzer that DID get through would be writing rows into the table whose value is that every row corresponds to a real human act.
 
 # --- Personal API tokens. Entirely local. -------------------------------------
 GET /v1/tokens	none	-	Postgres only.

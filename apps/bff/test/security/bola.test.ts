@@ -364,6 +364,19 @@ function bodyFor(row: MatrixRow, as: Subject | null): object | null {
       };
     case "/v1/tokens":
       return { name: `probe ${randomUUID().slice(0, 8)}` };
+    case "/v1/me/consent":
+      // A valid acceptance of every document this application publishes. The
+      // version AND the digest have to be right or the route answers 409, and a
+      // 409 would satisfy nothing: the positive control above demands a 2xx for
+      // the owner, so a wrong body here would report a broken route as a denial.
+      // Re-accepting what the fixture already accepted is a no-op by design.
+      return {
+        accept: ctx.services.legal.documents.map((doc) => ({
+          documentId: doc.id,
+          version: doc.version,
+          contentSha256: doc.contentSha256,
+        })),
+      };
     default:
       return {};
   }

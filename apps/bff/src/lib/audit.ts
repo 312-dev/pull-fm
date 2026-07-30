@@ -52,6 +52,15 @@ export type AuditAction =
   | "token.rotated"
   | "token.revoked"
   | "token.used_expired"
+  // Recorded assent to a published legal document. `subjectRef` is
+  // `<documentId>@<version>` and `detail` carries the epoch, the content digest
+  // and which gate presented it. This is the audit-trail HALF of the evidence;
+  // `legal_consents` is the record. Both exist because they answer different
+  // questions: the table answers "what does this user's contract consist of", and
+  // the trail answers "what happened on this account, in order, including the
+  // acceptance". The trail is also anonymized at 91 days, which is why it is not
+  // the record.
+  | "account.terms_accepted"
   | "account.export_requested"
   | "account.export_downloaded"
   | "account.deleted"

@@ -226,6 +226,21 @@ try {
       SELECT id, 'lastfm', 'acct', 'kek:v1', '\\x00', decode(repeat('ab',40),'hex') FROM users;
     INSERT INTO idempotency_keys (user_id, key, request_hash)
       SELECT id, 'k', 'h' FROM users;
+    -- legal_consents is a USER-OWNED table and it cascades like every other one.
+    -- That was a decision rather than a default: the alternative was the
+    -- deletion_log shape, no foreign key, so the evidence of assent outlives the
+    -- account. Migration 0008 argues why the cascade won, and the counterweight
+    -- that makes it defensible is deletion_log.consents, which the application
+    -- writes from these rows before destroying them. THIS assertion is the half
+    -- that has to hold in the schema: an exempted table would make account
+    -- deletion something other than one statement, and the first exemption is the
+    -- precedent every later table cites.
+    INSERT INTO legal_document_revisions
+      (document_id, version, consent_epoch, content_sha256, is_material, url)
+      VALUES ('terms-of-service', 'v1', 1, repeat('a', 64), true, 'https://example/terms');
+    INSERT INTO legal_consents
+      (user_id, document_id, document_version, consent_epoch, content_sha256, gate, auth_method)
+      SELECT id, 'terms-of-service', 'v1', 1, repeat('a', 64), 'first-launch', 'session' FROM users;
   `,
   );
   psql(SCRATCH_DB, "DELETE FROM users");
@@ -233,7 +248,8 @@ try {
     SCRATCH_DB,
     `SELECT (SELECT count(*) FROM wishlist_items)
           + (SELECT count(*) FROM user_connections)
-          + (SELECT count(*) FROM idempotency_keys)`,
+          + (SELECT count(*) FROM idempotency_keys)
+          + (SELECT count(*) FROM legal_consents)`,
   );
   if (orphans === "0") {
     pass("deleting a user removes all dependent rows in one statement");
@@ -343,6 +359,219 @@ try {
       sql: `INSERT INTO audit_log (action, outcome, anonymized_at)
             VALUES ('webhook.rejected', 'denied', now())`,
       expect: null,
+    },
+    // -----------------------------------------------------------------------
+    // Legal revisions and recorded consent (migration 0008).
+    //
+    // These are the structural half of the first-launch consent gate. The gate
+    // itself is enforced in the application, and the application is where a bug
+    // lives; the properties below are the ones that must hold even when the
+    // application is wrong, because the rows they protect are the only evidence
+    // that a contract was formed at all. `Sgouros v. TransUnion Corp.`,
+    // 817 F.3d 1029 (7th Cir. 2016): without formation, the liability cap, the
+    // venue selection and the SeatGeek third-party beneficiary grant are all
+    // unenforceable, so a forged or ambiguous consent row is not a data-quality
+    // problem, it is the whole agreement.
+    //
+    // Each check uses its OWN document id, because the epoch guard is per
+    // document and shared ids would make these assertions depend on the order
+    // they happen to run in.
+    // -----------------------------------------------------------------------
+    {
+      // The first revision of a document is material by definition: there is no
+      // earlier acceptance for anybody to carry over.
+      name: "the first revision of a document must be epoch 1",
+      sql: `INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-first-epoch', 'v1', 3, repeat('b', 64), true, 'https://x')`,
+      expect: "legal_document_revisions_epoch_guard",
+    },
+    {
+      name: "an epoch cannot be skipped",
+      sql: `INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-skip', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-skip', 'v2', 3, repeat('c', 64), true, 'https://x')`,
+      expect: "legal_document_revisions_epoch_guard",
+    },
+    {
+      // A regressed epoch would silently satisfy the gate for every user who
+      // accepted only the older text, which is the single most damaging thing a
+      // bad revision row could do.
+      name: "an epoch cannot regress",
+      sql: `INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-regress', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-regress', 'v2', 2, repeat('c', 64), true, 'https://x');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-regress', 'v3', 1, repeat('d', 64), false, 'https://x')`,
+      expect: "legal_document_revisions_epoch_guard",
+    },
+    {
+      // Materiality cannot lie in either direction, and both lies are harmful.
+      // This one would claim a substantive amendment while leaving every existing
+      // acceptance in force.
+      name: "a revision that raises the epoch cannot claim to be cosmetic",
+      sql: `INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-lie-a', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-lie-a', 'v2', 2, repeat('c', 64), false, 'https://x')`,
+      expect: "legal_document_revisions_epoch_guard",
+    },
+    {
+      // And this one would force every user in the product to re-accept a
+      // corrected typo, which is how an operator learns to stop declaring
+      // revisions at all.
+      name: "a revision that keeps the epoch cannot claim to be material",
+      sql: `INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-lie-b', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-lie-b', 'v2', 1, repeat('c', 64), true, 'https://x')`,
+      expect: "legal_document_revisions_epoch_guard",
+    },
+    {
+      // The legal sequence, end to end: material first publication, cosmetic
+      // reissue at the same epoch, material revision raising it by one.
+      name: "material, then cosmetic, then material is accepted",
+      sql: `INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-happy', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-happy', 'v1a', 1, repeat('c', 64), false, 'https://x');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-happy', 'v2', 2, repeat('d', 64), true, 'https://x')`,
+      expect: null,
+    },
+    {
+      // The idempotent publish the application performs on every start. A BEFORE
+      // INSERT trigger fires BEFORE `ON CONFLICT` resolution, so the guard sees
+      // this row every time and must not mistake a re-publish for a revision.
+      name: "re-publishing an unchanged revision is a no-op, not a violation",
+      sql: `INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-again', 'v1', 1, repeat('b', 64), true, 'https://x')
+            ON CONFLICT (document_id, version) DO NOTHING;
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-again', 'v1', 1, repeat('b', 64), true, 'https://x')
+            ON CONFLICT (document_id, version) DO NOTHING`,
+      expect: null,
+    },
+    {
+      // Editing a published revision would retroactively change what every
+      // consent row referencing it means. That is the one edit in this schema that
+      // converts evidence into fiction without leaving a trace.
+      name: "a published revision cannot be edited",
+      sql: `INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-frozen', 'v1', 1, repeat('b', 64), true, 'https://x');
+            UPDATE legal_document_revisions SET content_sha256 = repeat('e', 64)
+             WHERE document_id = 'doc-frozen'`,
+      expect: "legal_immutable_row",
+    },
+    {
+      // Every field an UPDATE could move here is a one-statement forgery: the
+      // timestamp is when the contract formed, the epoch is what it satisfies, and
+      // the digest is which text it was.
+      name: "a recorded acceptance cannot be edited",
+      sql: `INSERT INTO users (workos_user_id) VALUES ('u_consent_upd');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-upd', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_consents
+              (user_id, document_id, document_version, consent_epoch, content_sha256, gate, auth_method)
+              SELECT id, 'doc-upd', 'v1', 1, repeat('b', 64), 'first-launch', 'session'
+                FROM users WHERE workos_user_id = 'u_consent_upd';
+            UPDATE legal_consents SET accepted_at = now() - interval '1 year'
+             WHERE document_id = 'doc-upd'`,
+      expect: "legal_immutable_row",
+    },
+    {
+      // A consent row for a revision that was never published is unreadable as
+      // evidence: nothing says what the version it names contained.
+      name: "assent cannot be recorded for a revision that was never published",
+      sql: `INSERT INTO users (workos_user_id) VALUES ('u_consent_fk');
+            INSERT INTO legal_consents
+              (user_id, document_id, document_version, consent_epoch, content_sha256, gate, auth_method)
+              SELECT id, 'doc-unpublished', 'v9', 1, repeat('b', 64), 'first-launch', 'session'
+                FROM users WHERE workos_user_id = 'u_consent_fk'`,
+      expect: "legal_consents_revision_fk",
+    },
+    {
+      // Session only. A personal API token is a long-lived script credential, and
+      // a script accepting a contract on a person's behalf is exactly the defect
+      // Sgouros describes: no human act, so no assent. Enforced at the route as
+      // well; here so that widening it costs a migration.
+      name: "assent from anything other than an interactive session is rejected",
+      sql: `INSERT INTO users (workos_user_id) VALUES ('u_consent_tok');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-token', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_consents
+              (user_id, document_id, document_version, consent_epoch, content_sha256, gate, auth_method)
+              SELECT id, 'doc-token', 'v1', 1, repeat('b', 64), 'first-launch', 'token'
+                FROM users WHERE workos_user_id = 'u_consent_tok'`,
+      expect: "legal_consents_auth_method_chk",
+    },
+    {
+      // One row per (user, document, version). History runs along the VERSION
+      // axis, which is the axis a dispute asks about; a second row for the same
+      // version would let a retry move the effective acceptance date.
+      name: "the same user cannot have two acceptances of one version",
+      sql: `INSERT INTO users (workos_user_id) VALUES ('u_consent_dupe');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-dupe', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_consents
+              (user_id, document_id, document_version, consent_epoch, content_sha256, gate, auth_method)
+              SELECT id, 'doc-dupe', 'v1', 1, repeat('b', 64), 'first-launch', 'session'
+                FROM users WHERE workos_user_id = 'u_consent_dupe';
+            INSERT INTO legal_consents
+              (user_id, document_id, document_version, consent_epoch, content_sha256, gate, auth_method)
+              SELECT id, 'doc-dupe', 'v1', 1, repeat('b', 64), 'revision', 'session'
+                FROM users WHERE workos_user_id = 'u_consent_dupe'`,
+      expect: "legal_consents_user_id_document_id_document_version_key",
+    },
+    {
+      // 'first-launch' means no contract existed; 'revision' means an earlier one
+      // was being replaced. Conflating them by typo would erase the distinction a
+      // formation challenge turns on.
+      name: "an unknown consent gate is rejected",
+      sql: `INSERT INTO users (workos_user_id) VALUES ('u_consent_gate');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-gate', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_consents
+              (user_id, document_id, document_version, consent_epoch, content_sha256, gate, auth_method)
+              SELECT id, 'doc-gate', 'v1', 1, repeat('b', 64), 'somewhere-else', 'session'
+                FROM users WHERE workos_user_id = 'u_consent_gate'`,
+      expect: "legal_consents_gate_chk",
+    },
+    {
+      // The digest is what makes a consent row say WHICH TEXT was agreed to. A
+      // value that is not a sha256 hex digest means a bug wrote something else,
+      // and the row is then evidence of nothing.
+      name: "a consent digest that is not a sha256 hex digest is rejected",
+      sql: `INSERT INTO users (workos_user_id) VALUES ('u_consent_dig');
+            INSERT INTO legal_document_revisions
+              (document_id, version, consent_epoch, content_sha256, is_material, url)
+            VALUES ('doc-dig', 'v1', 1, repeat('b', 64), true, 'https://x');
+            INSERT INTO legal_consents
+              (user_id, document_id, document_version, consent_epoch, content_sha256, gate, auth_method)
+              SELECT id, 'doc-dig', 'v1', 1, 'not-a-digest', 'first-launch', 'session'
+                FROM users WHERE workos_user_id = 'u_consent_dig'`,
+      expect: "legal_consents_digest_shape_chk",
     },
     {
       name: "duplicate wishlist entry for the same recording is rejected",

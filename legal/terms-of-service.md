@@ -43,11 +43,30 @@
 > must not survive into a published version.
 >
 > **Why this document is a hard blocker rather than paperwork:** SeatGeek's API
-> Terms of Use clause 4.3 requires an Application EULA containing terms at least
-> as protective of SeatGeek as those API terms, and requires that the SeatGeek
-> Entities be expressly designated as third-party beneficiaries entitled to
-> enforce it against end users. Until that exists, Pull.fm may not ship live
-> event data at all. Section 8 and section 9 are that clause discharged.
+> Terms of Use clause 4.3 requires
+>
+> > an Application EULA that the Application displays and that each End User must
+> > accept before using it, containing terms - expressly including warranty
+> > disclaimers and limitations of liability - **at least as protective of the
+> > SeatGeek Entities as SeatGeek's own API Terms**, complying with any
+> > third-party app-store requirements, and **expressly designating the SeatGeek
+> > Entities as third-party beneficiaries entitled to enforce it against End
+> > Users directly**; plus (i) all reasonable efforts to enforce it and (ii) no
+> > action on behalf of, collection of information from or regarding, or device
+> > access for any End User without that End User's affirmative authorisation.
+>
+> Until that exists, Pull.fm may not ship live event data at all. Sections 8, 9,
+> 11, 13 and 14 are that clause discharged, and the third bullet of section 13 is
+> where "at least as protective" became a specific number rather than an
+> aspiration.
+>
+> **That wording is quoted, not summarised, and it must stay identical wherever
+> it appears.** The full verbatim clause is at
+> [`../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md`](../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md),
+> which also records why: until 2026-07-29 this repository rendered the same
+> requirement three different ways in three documents, and the one being relied on
+> was the shortest of the three, which had dropped the protectiveness standard
+> entirely.
 
 **Version:** DRAFT-0 (unpublished)
 **Last updated:** 2026-07-29
@@ -70,11 +89,37 @@ These Terms are a binding agreement between you and 312.dev LLC. They cover:
 By creating an account, installing a Pull.fm client, or using the API, you agree
 to these Terms. If you do not agree, do not use Pull.fm.
 
-`[OPEN]` **That sentence is currently a claim rather than a mechanism, and it is
-the most consequential gap in this document.** Nothing in the product yet
-presents these Terms and records assent. Distribution is a sideloaded app file
-from GitHub Releases, so there is no store flow and no installer dialogue in
-which a user is shown terms and acts on them.
+`[OPEN]` **That sentence is still a claim rather than a mechanism, but the gap is
+now half the size it was, and the half that remains is named precisely rather
+than left as "build a consent gate".** Distribution is a sideloaded app file from
+GitHub Releases, so there is no store flow and no installer dialogue in which a
+user is shown terms and acts on them.
+
+**What now exists, server-side, and can be relied on:** these documents carry
+machine-readable versions and a content digest; the API records who accepted
+which version of which document, when, from which session and on which client
+build, in an append-only table an UPDATE cannot rewrite; a **material** revision
+raises a consent epoch and every user must accept again, while a corrected typo
+does not; the API reports what an authenticated user still owes at
+`GET /v1/me/consent` and records an acceptance at `POST /v1/me/consent`; and an
+authenticated user who has accepted **nothing** is refused every route except
+signing out, reading their own account, the consent endpoints themselves, and the
+data-subject rights in sections 15 and 19 (export and deletion), which are never
+conditioned on accepting these Terms. A user who has accepted an earlier epoch
+keeps their read access and is refused writes until they accept the current one.
+The record is held server-side rather than in app storage, so it survives a
+reinstall.
+
+**What still does not exist, and is what keeps this marker open:** no client
+presents the documents. Nothing above obtains assent by itself - a server that
+records an acceptance it was told about cannot know that a human was shown
+anything - and under Illinois law the interface is the whole question. Two
+further things are outstanding and both are prerequisites for the client half:
+these documents are not yet published at a stable URL, and the client must fetch
+the **canonical document bytes** and echo their digest when it accepts, because
+the API refuses to record an acceptance whose digest does not match the version it
+publishes. Publishing a rendered page whose bytes differ from the canonical source
+would make acceptance impossible rather than merely inconsistent.
 
 Under Illinois law that matters more than the wording of any individual clause.
 In `Sgouros v. TransUnion Corp.`, 817 F.3d 1029 (7th Cir. 2016), no contract was
@@ -91,9 +136,33 @@ does not currently obtain.
 
 The remedy is a first-launch consent gate in the client: present these Terms and
 the privacy policy, require an affirmative action, and record what was accepted
-and when. It costs one screen and it is worth more than any clause in this
-document. **This is a requirement on the client application, which does not exist
-yet, so it is recorded here rather than left to be discovered after launch.**
+and when. **The recording half is built** (`packages/db/migrations/0008_legal_consent.sql`,
+`apps/bff/src/lib/legal-documents.ts`, `apps/bff/src/routes/v1/consent.ts`). The
+**presenting** half is one screen in a client application that does not exist yet,
+and it is worth more than any clause in this document, so it is recorded here
+rather than left to be discovered after launch. Editing either of these documents
+without deciding whether the change is material is a build failure, not a silent
+drift, so the versions this marker relies on cannot rot.
+
+**There is now a second, independent, contractual reason for the same screen, and
+it was found on 2026-07-29 when SeatGeek's terms were read in full rather than in
+paraphrase.** Their clause 4.3 does not merely require that an Application EULA
+exist. It requires that the Application **displays** it and that each End User be
+**required to accept it before using the Application**, and it separately obliges
+us to "use all reasonable efforts to enforce" it and to ensure the Application
+"collects any information from or regarding any End User" only where that End User
+has "affirmatively authorized or directed" it. So the missing screen is not only a
+contract-formation weakness under Illinois law; on the day live events are enabled
+it is a **breach of the SeatGeek agreement in three places at once**, and one of
+those places (the affirmative-authorisation duty) is not limited to SeatGeek data
+at all. Enabling events without it would be worse than leaving events disabled.
+
+**The recording half described above is what makes 4.3(i) dischargeable at all.**
+"Use all reasonable efforts to enforce the Application EULA" is not something a
+document can do; it needs a system that knows who accepted which version and that
+refuses service to someone who has accepted nothing. That system now exists. What
+it cannot do is manufacture the acceptance it records, which is the whole of the
+remaining gap and the reason this marker stays open.
 
 **Pull.fm is free and non-commercial.** We charge nothing, we sell nothing, we
 run no advertising, we take no affiliate or referral revenue, and we do not sell
@@ -361,9 +430,11 @@ that is a bug and we ask you to report it under our
 
 **No warranty on events.** Event data is provided by SeatGeek "as is". Times,
 venues, line-ups, and availability change. Confirm with the venue or SeatGeek
-before relying on anything. Our own agreement with SeatGeek caps their liability
-to us at a nominal amount, so nothing in Pull.fm is designed to depend on their
-availability, and neither should anything you do.
+before relying on anything. Our own agreement with SeatGeek caps their total
+liability to us at **fifty United States dollars**, so nothing in Pull.fm is
+designed to depend on their availability, and neither should anything you do.
+Section 13 applies the same figure to any claim you might have against them
+through us.
 
 ---
 
@@ -410,11 +481,10 @@ reference, not a reason to have relied on it. Section 14 is added because it
 already names the SeatGeek Entities and was missing from this list.
 -->
 
-
 Except as stated in this section, these Terms create no rights in any person who
 is not a party to them.
 
-`[CONFIRM with counsel: that this clause is drafted so as to be effective under Illinois law, which section 16 now selects, and that "at least as protective as" under SeatGeek clause 4.3 is satisfied by the combination of sections 7, 8, 9, 11, 13, and 14. This is the specific judgement a non-lawyer cannot make and it is the whole point of the clause.]`
+`[CONFIRM with counsel: that this clause is drafted so as to be effective under Illinois law, which section 16 now selects, and that "at least as protective of the SeatGeek Entities as the terms hereof" under SeatGeek clause 4.3 is satisfied by the combination of sections 7, 8, 9, 11, 13, and 14. Three specific questions, now that the SeatGeek terms have been read rather than paraphrased. First, whether the USD 50 cap in the third bullet of section 13 discharges 4.3's express reference to "limitations of liability" given that SeatGeek's own clause 8.2 caps them at exactly USD 50, so we match rather than better it. Second, whether "at least as protective" reaches CONSPICUOUSNESS as well as substance: their 8.2 is in capitals, ours now is too for the SeatGeek bullet only, and under Illinois law a limitation of liability must be conspicuous to be enforceable at all. Third, whether section 9 plus section 13 together survive Sosa v. Onfido, 8 F.4th 631, which turned on a third party falling outside the defined class the limitation protected. This is the specific judgement a non-lawyer cannot make and it is the whole point of the clause.]`
 
 ---
 
@@ -490,11 +560,73 @@ To the maximum extent permitted by law:
   limited to **one hundred United States dollars (USD 100)**.
 - The same limitations apply, to the same extent, for the benefit of the
   **SeatGeek Entities** and every other upstream provider named in section 7.
+- **THE MAXIMUM AGGREGATE LIABILITY OF THE SEATGEEK ENTITIES FOR ALL DAMAGES,
+  LOSSES, AND CAUSES OF ACTION IN CONNECTION WITH SEATGEEK MATERIALS, WHETHER IN
+  CONTRACT, TORT (INCLUDING NEGLIGENCE), OR OTHERWISE, IS FIFTY UNITED STATES
+  DOLLARS (USD 50.00).** This is lower than our own cap, deliberately, and it is
+  the figure SeatGeek's own API Terms of Use set for themselves.
 
 Some jurisdictions do not allow these limitations, so parts of this section may
 not apply to you. Nothing in these Terms limits liability that cannot lawfully be
 limited, including for fraud, or for death or personal injury caused by
 negligence.
+
+<!--
+THE SEATGEEK CAP WAS USD 100 UNTIL 2026-07-29 AND THAT WAS A BREACH OF THE
+CLAUSE THIS WHOLE DOCUMENT EXISTS TO SATISFY.
+
+WHAT WAS WRONG. This section capped our liability at USD 100 and then extended
+"the same limitations" to the SeatGeek Entities by name. So the number protecting
+them was USD 100.
+
+SeatGeek's API Terms of Use clause 8.2 caps THEIR OWN maximum aggregate liability
+at USD 50, verbatim and in capitals. Clause 4.3 requires our Application EULA to
+contain terms "at least as protective of the SeatGeek Entities as the terms
+hereof" and names "limitations of liability" as an express example of what it
+means by that. A USD 100 exposure is twice the USD 50 exposure their own terms
+permit, so the clause extending our protection to them left them LESS protected
+than the contract requires, in the one respect 4.3 calls out by name.
+
+WHY THIS WAS INVISIBLE FOR SO LONG. Nobody had read clause 8.2. Every prior
+analysis in this repository worked from a paraphrase of the terms in which 4.3
+was not marked verbatim and 8.2 was mis-numbered as "9.2" and reduced to "SeatGeek's
+total liability is capped at fifty dollars" - a sentence read as a fact about
+THEIR risk appetite rather than as a ceiling on OURS. The connection between
+"their cap is 50" and "so our cap for them cannot be 100" needs both clauses on
+the same page, and until 2026-07-29 they never were. The full text is now
+transcribed at packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md.
+
+WHY THIS SHAPE, and not the three alternatives that were considered.
+
+  Lowering OUR cap to 50 as well. Rejected: nothing requires it, it reduces what
+  a user of a free service can recover from us, and it would have been a silent
+  change to the operator's own risk position made as a side effect of a vendor
+  compliance fix.
+
+  Capping "our suppliers" generally at 50. Rejected: the other upstream providers
+  impose no such number, and inventing one for them makes this document assert a
+  contractual position that no contract supports.
+
+  Making the SeatGeek figure "the lesser of USD 50 or the amount permitted by
+  law". Rejected as drafting theatre: the trailing paragraph of this section
+  already says that limitations that cannot lawfully be applied do not apply.
+
+  So the shape is a THIRD bullet that is specific to the SeatGeek Entities and
+  strictly lower, leaving the general rule intact. Capitals because SeatGeek's own
+  8.2 is in capitals and conspicuousness is plausibly part of what "at least as
+  protective" buys; the CONFIRM in section 9 now asks counsel about exactly that.
+
+DO NOT "TIDY" THIS INTO THE BULLET ABOVE. A single bullet that reads "USD 100,
+or USD 50 for the SeatGeek Entities" is the same sentence and a worse one: the
+protection this clause extends to a third-party beneficiary should be findable by
+searching for that beneficiary's name.
+
+IF SEATGEEK CHANGE 8.2, THIS NUMBER MOVES WITH IT, DOWNWARD ONLY. Section 1 of
+their terms lets them change the terms at any time with continued use as
+acceptance, and if their cap on themselves ever drops below 50 this bullet is
+immediately non-compliant with no notice to us. That is one of the reasons the
+vendor-spec file says to re-audit quarterly.
+-->
 
 ---
 
@@ -570,10 +702,24 @@ re-argued from scratch:
   section 15 duty is conditioned on collecting or possessing one. This service
   collects none, verified against the schema and the auth flow, so there is no
   duty and nothing to waive.
-- **The external pressure was unverifiable.** SeatGeek clause 4.3 requires terms
-  "at least as protective" as theirs, so if their consumer terms compelled
-  arbitration this section might have had to match. Their terms could not be
-  read (see section 9), so that input is absent rather than satisfied.
+- **The external pressure is absent, and this is now checked rather than
+  assumed.** SeatGeek clause 4.3 requires terms "at least as protective" as
+  theirs, so if their API terms compelled arbitration this section might have had
+  to match. They do not. Their clause 12.2 selects New York law and the exclusive
+  venue of the state and federal courts of New York County, and contains **no
+  arbitration clause and no class-action waiver**. So the requirement we are
+  matching does not include one, and our omission cannot fall short of it.
+
+  **An earlier version of this bullet said their terms "could not be read", and
+  that was true when it was written.** Every automated fetch of `seatgeek.com`
+  returns 403, including its public press page, so this was recorded as an input
+  that was absent rather than satisfied. It turned out to be blanket bot-blocking
+  rather than a login wall: the operator opened the page in an ordinary browser
+  on 2026-07-29 and transcribed the clauses, which is why the verbatim text now
+  sits in
+  [`../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md`](../packages/upstream/vendor-specs/seatgeek-api-terms-2025-03-17.md).
+  Leaving the old sentence would have had this document assert its own source was
+  unreadable in the same revision that quotes it.
 
 **RE-OPEN THIS IF EITHER PREMISE CHANGES**, and both are foreseeable. If a
 feature ever touches voice, face or fingerprint data, BIPA attaches and this
@@ -585,7 +731,7 @@ If one is ever added: name **JAMS** and expressly invoke its Mass Arbitration
 Procedures, which charge a flat filing fee regardless of case count, rather than
 AAA, which charges per case and scales linearly against the defendant. Include an
 express bar on class arbitration and state that the waiver is non-severable,
-because *Kinkel* severed a waiver and enforced the clause without it, sending the
+because _Kinkel_ severed a waiver and enforced the clause without it, sending the
 defendant into class arbitration.
 
 ---

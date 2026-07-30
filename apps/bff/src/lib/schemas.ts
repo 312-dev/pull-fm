@@ -15,6 +15,48 @@
  *        400 from the validator before any code runs.
  */
 
+/**
+ * A published legal document a user must accept.
+ *
+ * Shared, because it appears in three places that must agree: the consent status
+ * response, the acceptance response, and the `consent` extension member of the
+ * 403 that refuses an un-accepted subject. Three hand-written copies of this
+ * object would drift, and the one that drifted would be the one a client parsed.
+ */
+export const legalDocumentSchema = {
+  type: "object",
+  properties: {
+    documentId: { type: "string" },
+    version: {
+      type: "string",
+      description:
+        "The publication version. Echo this back when accepting; an acceptance for any other version is refused with 409.",
+    },
+    consentEpoch: {
+      type: "integer",
+      description:
+        "Raised only by a MATERIAL revision. An acceptance of an earlier epoch no longer satisfies the gate; an acceptance of this epoch does, even after the version changes for a corrected typo.",
+    },
+    contentSha256: {
+      type: "string",
+      description:
+        "sha256 of the canonical document with line endings normalised and trailing whitespace stripped. Fetch the document, compute this, and echo it when accepting: an acceptance whose digest does not match is refused, so a client cannot record assent against a stale bundled copy.",
+    },
+    url: { type: "string" },
+    effectiveAt: {
+      type: ["string", "null"],
+      description:
+        "Reported for display. Null means published but not yet effective. The gate never consults it; the consentEpoch is what binds.",
+    },
+    publishedAt: {
+      type: ["string", "null"],
+      description:
+        "When this server first recorded the revision, from its own append-only revision table rather than from the deployed build.",
+    },
+  },
+  required: ["documentId", "version", "consentEpoch", "contentSha256", "url"],
+} as const;
+
 /** RFC 9457 problem document, as produced by lib/errors.ts. */
 export const problemSchema = {
   type: "object",
@@ -33,6 +75,30 @@ export const problemSchema = {
           message: { type: "string" },
         },
       },
+    },
+    /**
+     * DECLARED HERE RATHER THAN ONLY SET BY THE HANDLER, AND IT HAS TO BE.
+     *
+     * Fastify serialises a problem body with fast-json-stringify against the
+     * route's declared schema for that status, which emits declared properties
+     * only. An RFC 9457 extension member that is not declared here is therefore
+     * not "undocumented", it is DELETED on the way out, and the client that
+     * needed it sees a 403 with no idea what to render.
+     *
+     * Present only on `https://pull.fm/problems/consent-required`.
+     */
+    consent: {
+      type: "object",
+      description:
+        "Only on a consent-required refusal. `reason` is never-accepted (no contract exists, every route except sign-out, reading your own account, the consent endpoints and the export/deletion rights is refused) or revision-pending (an earlier version was accepted, so reads still work and writes do not).",
+      properties: {
+        reason: {
+          type: "string",
+          enum: ["never-accepted", "revision-pending"],
+        },
+        outstanding: { type: "array", items: legalDocumentSchema },
+      },
+      required: ["reason", "outstanding"],
     },
   },
   required: ["type", "title", "status"],

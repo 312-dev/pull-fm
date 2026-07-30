@@ -68,6 +68,20 @@ export interface ExportDocument {
   readonly connections: unknown[];
   readonly wishlist: unknown[];
   readonly apiTokens: unknown[];
+  /**
+   * The subject's recorded acceptances of the legal documents.
+   *
+   * Included because it is personal data ABOUT the subject that the subject
+   * cannot reconstruct from anything else: it is the record of what agreement
+   * they are under and when they entered it. An Article 20 export that omitted it
+   * would hand a user everything except the terms they are bound by.
+   *
+   * `ip` and `user_agent` are excluded. They are corroboration of the act for our
+   * benefit rather than data the subject provided, and echoing an address back
+   * into a portable file that a user may forward is a disclosure with no
+   * portability value.
+   */
+  readonly legalConsents: unknown[];
 }
 
 const EXCLUSION_NOTICE =
@@ -236,6 +250,14 @@ export class ExportService {
       [userId],
     );
 
+    const consents = await this.#db.query(
+      `SELECT document_id, document_version, consent_epoch, content_sha256,
+              accepted_at, gate, client_build, client_platform
+         FROM legal_consents WHERE user_id = $1
+        ORDER BY accepted_at`,
+      [userId],
+    );
+
     return {
       format: "pullfm-export",
       formatVersion: 1,
@@ -245,6 +267,7 @@ export class ExportService {
       connections: connections.rows,
       wishlist: wishlist.rows,
       apiTokens: tokens.rows,
+      legalConsents: consents.rows,
     };
   }
 }

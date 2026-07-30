@@ -707,6 +707,12 @@ export function registerAuthRoutes(
         ...annotate({
           authz: "user-scoped",
           dast: "exclude",
+          // Not gated by the consent requirement even though it is a POST. A user
+          // who has read the Terms and refused them must be able to end their
+          // session, and "you cannot sign out until you agree" would be both
+          // indefensible and a security defect: it would keep a live session open
+          // on a device its owner is trying to leave.
+          consent: "exempt-session-control",
           bola: {
             strategy: "implicit-subject",
             objectType: "subject",

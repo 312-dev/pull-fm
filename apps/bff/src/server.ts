@@ -439,6 +439,11 @@ export async function buildServer(
       cipher: opts.services.sessionCookies,
       name: cfg.sessionCookieName,
     },
+    // The consent gate rides inside `requireAuth`, so the document set is a
+    // plugin option rather than something the hook reaches out of the service
+    // bundle for. Taken from the same service the routes use, so the list the
+    // gate enforces and the list `GET /v1/me/consent` reports cannot differ.
+    legalDocuments: opts.services.legal.documents,
   });
 
   /**
