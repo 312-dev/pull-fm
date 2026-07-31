@@ -19,6 +19,29 @@ else
 fi
 
 # Format/lint only the staged files. Skipped cleanly before the first install.
+#
+# THE RUNNER IS RESOLVED RATHER THAN ASSUMED, and that is a correction.
+#
+# This read `pnpm exec lint-staged`. On a machine without pnpm the hook exited
+# 127 before running anything, so `git commit` failed for a missing package
+# manager rather than for a problem with the commit. The predictable response is
+# `--no-verify`, which skips the SECRET SCAN as well, and on a public repository
+# that is the expensive half. A gate that fails for the wrong reason does not
+# get fixed; it gets bypassed, and it takes the rest of the gate with it.
+#
+# So the runner degrades the way the scanner above already does. `lint-staged`
+# lives in node_modules either way, so this runs exactly the same check through
+# whichever launcher exists. It still fails when the check genuinely cannot run.
 if [ -d node_modules ]; then
-  pnpm exec lint-staged
+  if command -v pnpm >/dev/null 2>&1; then
+    pnpm exec lint-staged
+  elif [ -x node_modules/.bin/lint-staged ]; then
+    echo "pre-commit: pnpm not found, running node_modules/.bin/lint-staged"
+    node_modules/.bin/lint-staged
+  else
+    echo "pre-commit: ERROR - lint-staged is installed nowhere this can reach."
+    echo "            node_modules exists, so this is a broken install rather"
+    echo "            than a fresh checkout. Reinstall dependencies."
+    exit 1
+  fi
 fi
