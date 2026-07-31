@@ -49,7 +49,7 @@
 **Version:** DRAFT-0 (unpublished)
 **Last updated:** 2026-07-30
 **Effective:** not yet effective
-**Highlights checked against:** `terms-of-service@DRAFT-1`, `privacy-policy@DRAFT-1`
+**Highlights checked against:** `terms-of-service@DRAFT-1#180d130e2d6f`, `privacy-policy@DRAFT-1#f18244518ebd`
 
 The `Highlights checked against` line above is **machine-checked**, not
 decorative. `apps/bff/test/integration/legal-versions.test.ts` compares it to the
@@ -58,6 +58,15 @@ disagree. Section 3.1 quotes four specific figures and four specific section
 numbers out of the Terms; without that line, a Terms revision that moved the
 liability cap or renumbered a section would leave this screen stating a false
 figure to every new user, with nothing to catch it. See section 2.3.
+
+**The pin carries a content digest as well as a version, and the version alone
+was not enough.** A version only moves when somebody decides to move it, and an
+unpublished draft is edited in place: redefining a version nobody has ever been
+served is not a revision. Both source documents were rewritten twice on
+2026-07-30 while remaining `DRAFT-1`, and this interlock stayed green throughout,
+certifying as re-read a set of figures sitting in text nobody had re-read. The
+digest closes that: any change to either document's bytes turns this file red,
+whether or not its version moved.
 
 ---
 
