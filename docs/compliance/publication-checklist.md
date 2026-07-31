@@ -345,8 +345,14 @@ lawyer in the loop and no test that would catch it. Here, a stale name is a
 documentation defect. There, it was a misrepresentation. Verifiability was the
 right instinct; the published legal instrument was the wrong place for it.
 
-**Keep this table current.** It is the only remaining link between a legal claim
-and the code that has to be true for it.
+**This table is enforced, not merely maintained.**
+`apps/bff/test/integration/legal-claims.test.ts` parses it, classifies every
+backticked token, and asserts that each file, environment variable, package
+script, table and column named here actually exists. Renaming
+`users.auth_method` fails a test that names the policy sentence depending on it.
+The suite also refuses to pass if fewer than fifteen tokens resolve, so emptying
+this table or breaking the parser is itself a failure rather than a quiet
+reduction in coverage.
 
 | Policy statement                                                                         | Implementation                                                                                                                                                               |
 | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
