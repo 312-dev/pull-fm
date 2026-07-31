@@ -189,7 +189,7 @@ export const CONSENT_DOCUMENTS: readonly LegalDocument[] = [
     consentEpoch: 1,
     material: true,
     contentSha256:
-      "58801e48df45b3682454f64efe05e7174cce2ff8d14f60fdd8b38d9fd54f5a57",
+      "180d130e2d6f5e5d8bd66e89015588ce0692d858bc655d432ab15dfe25923963",
     effectiveAt: null,
     notes:
       "DRAFT-1 rewrites section 17 (Changes to these Terms). MATERIAL: it changes how an amendment binds, which is as substantive as a clause gets. DRAFT-0 said 'Continuing to use Pull.fm after a change takes effect means you accept it', which failed on two counts. It is the arrangement rejected in Sgouros v. TransUnion Corp., 817 F.3d 1029 (7th Cir. 2016), binding over Illinois and therefore over these Terms. And it described a WEAKER mechanism than the code implements: the consent epoch in this registry refuses writes until a material revision is affirmatively accepted, so the service never infers agreement from continued use. The clause simultaneously leaned on a rejected theory and understated the control that makes the theory unnecessary. EPOCH STAYS 1 because DRAFT-0 was never published: both live databases hold zero revisions and zero consents, so there is no acceptance to invalidate and no predecessor for this to supersede. The BEFORE INSERT guard in migration 0008 requires a document's first revision to be epoch 1 and material, which this is. Raising it to 2 would assert this supersedes a publication users accepted, and the guard would refuse. Still NOT YET EFFECTIVE pending legal review, hence effectiveAt null.",
@@ -201,10 +201,10 @@ export const CONSENT_DOCUMENTS: readonly LegalDocument[] = [
     consentEpoch: 1,
     material: true,
     contentSha256:
-      "e3f63c850eda58fc1a47410b57924948c59a0c7987dd85b3d08452facaa55bbb",
+      "f18244518ebddf6d0c2a45a7740835e92dfdce7a51d2c23ef6b6f9846843782b",
     effectiveAt: null,
     notes:
-      "Residency and retention corrections after the 2026-07-29 cutover out of the European Union. THE CHANGE IS MATERIAL and is recorded as such: three factual disclosures about the user's own data moved. Backups went from an EU-pinned bucket to object storage pinned to NO jurisdiction, so the true claim is 'not EU-pinned' and never 'stored in the United States'; the point-in-time-recovery window went from 6 hours to 7 days, a 28-fold increase in how long deleted data stays restorable; and the four processor agreements became executed and dated. WHY THE EPOCH IS 1 AND NOT 2, since material normally means +1: DRAFT-0 was never published. It was checked rather than assumed - `legal_document_revisions` is empty on staging, the table does not yet exist on prod, and `legal_consents` holds zero rows in both - so there is no first publication for this to supersede and no acceptance anywhere for a raised epoch to invalidate. DRAFT-1 IS the first revision, which the epoch guard in migration 0008 requires to be epoch 1 and material, and epoch 2 is refused by that trigger for exactly this reason. Recording material: true is what keeps this from being a precedent that residency corrections are cosmetic; the epoch is 1 because nothing preceded it, not because the change was small.",
+      "Residency and retention corrections after the 2026-07-29 cutover out of the European Union. THE CHANGE IS MATERIAL and is recorded as such: three factual disclosures about the user's own data moved. Backups went from an EU-pinned bucket to object storage pinned to NO jurisdiction, so the true claim is 'not EU-pinned' and never 'stored in the United States'; the point-in-time-recovery window went from 6 hours to 7 days, a 28-fold increase in how long deleted data stays restorable; and the four processor agreements became executed and dated. WHY THE EPOCH IS 1 AND NOT 2, since material normally means +1: DRAFT-0 was never published. It was checked rather than assumed - `legal_document_revisions` is empty on staging, the table does not yet exist on prod, and `legal_consents` holds zero rows in both - so there is no first publication for this to supersede and no acceptance anywhere for a raised epoch to invalidate. DRAFT-1 IS the first revision, which the epoch guard in migration 0008 requires to be epoch 1 and material, and epoch 2 is refused by that trigger for exactly this reason. Recording material: true is what keeps this from being a precedent that residency corrections are cosmetic; the epoch is 1 because nothing preceded it, not because the change was small. EDITED IN PLACE ON 2026-07-30, VERSION DELIBERATELY HELD, after an audit of section 10 against the United States state privacy statutes. What changed: Connecticut now has its own subsection, because Public Act 25-113 took effect on 2026-07-01 and removed the volume threshold from two of the CTDPA's three applicability triggers, which means the surrounding 'below the threshold' reasoning does not reach it and the real reason Pull.fm is outside it is the absence of sensitive data. That subsection carries an [OPEN] marker for the question counsel has to answer, whether listening history is data 'revealing' religious belief or sexual orientation within that definition, which section 3.6 already concedes is arguable. Also added: a 'Checked, and deliberately not implemented' subsection recording that Global Privacy Control, ADMT disclosure and the CCPA disclosure set were each examined and each correctly omitted, so a later reader does not re-open them; Rhode Island named as the lowest numeric bar in the country and therefore the first threshold growth would cross; and the current CPI-adjusted CCPA revenue figure quoted for orientation only, with the statutory figure kept as the operative one because the adjustment is automatic. HELD AT DRAFT-1 RATHER THAN BUMPED, on the precedent recorded under consent-presentation: editing an unpublished draft in place is not a revision, ensureRevisions only refuses REDEFINING a published version, DRAFT-1 has existed in a single commit since 2026-07-29, and both live databases hold zero revisions. The stronger reason not to bump is that DRAFT-2 would be the FIRST row in legal_document_revisions, which the epoch guard in migration 0008 requires to be epoch 1 AND material, and this change is cosmetic under this document's own rubric because it moves no factual disclosure about a user's own data - it is legal analysis about which statutes reach the operator. Bumping would therefore have forced a material: true label invented to satisfy a guard rather than because the change was material. NOTE THE GAP THIS EXPOSES, which is recorded rather than worked around: the 'Highlights checked against' interlock pins id@version, so an in-place edit of an unpublished draft does not turn the consent screen red the way a version bump would. Here that is harmless, because section 3.1 of consent-presentation quotes the Terms and no section number in this document moved, but the interlock is weaker than it reads and should be digest-pinned rather than version-pinned.",
   }),
 ];
 
@@ -261,7 +261,7 @@ export const CONSENT_PRESENTATION: LegalDocument = consentDocument({
   consentEpoch: 1,
   material: true,
   contentSha256:
-    "e46cd3ea8965b58d96e4eb59929f7e86539c3b54b662af5f75db0d454a670b68",
+    "a1973cb393e34433ac4c0b04e02686749cb2d22f2db0e17337c4ea88eda5e80f",
   effectiveAt: null,
   notes:
     "First recorded revision of the consent screen copy: what is displayed, what the affirmative act is, what the button says, what a decline does, and what a returning user is told after a material revision. Epoch 1 and material because it is the first revision of this document, which the epoch guard in migration 0008 requires and which is also the fact - nothing preceded it. NOT A DOCUMENT ANYBODY ACCEPTS: it is published and recorded so that a change to the words around the button is a versioned, reviewable decision rather than a client string edit, and so that the words live on a given date are retrievable afterwards. The materiality rubric for THIS document is in its own section 2 and is narrower than the other two: the question is whether the change alters whether, or to what, assent was communicated. HELD AT DRAFT-0 THROUGH THE 2026-07-30 TERMS REVISION, and the asymmetry with terms-of-service is deliberate. Section 3.1 quotes the liability caps, so the 'Highlights checked against' line had to advance from terms-of-service@DRAFT-0 to DRAFT-1, which moved this file's digest. That edit is COSMETIC under this document's own rubric: it records that a human re-read the highlights and found the quoted figures unchanged, and it alters neither what a user is shown nor what they are asked, which is the only question that makes a change to this document material. The version is held rather than bumped because DRAFT-0 has never been published anywhere: it was written on 2026-07-30, both live databases hold zero revisions, and ensureRevisions only refuses REDEFINING a published version. Editing an unpublished draft in place is not a revision. terms-of-service was bumped to DRAFT-1 instead because its DRAFT-0 has existed across many commits and may sit in a developer database, where redefining it would fail. Note also that a cosmetic bump here would be REFUSED by the epoch guard: the first revision of any document must be epoch 1 AND material, so a DRAFT-1 marked cosmetic could not be the first row.",
@@ -370,19 +370,62 @@ export function declaredVersion(raw: string): string | null {
  * Returns null when the line is absent, so the test can say so specifically rather
  * than failing on an empty comparison.
  */
+/**
+ * THE PIN CARRIES A DIGEST BECAUSE A VERSION WAS NOT ENOUGH.
+ *
+ * This declared `id@version` until 2026-07-30, and a version only moves when
+ * somebody decides to move it. An UNPUBLISHED draft is edited in place: the
+ * documented precedent in this repository is that redefining a version nobody
+ * has ever been served is not a revision, so `DRAFT-1` can mean different bytes
+ * on two different days. Both consent documents were rewritten twice that day
+ * without their versions changing, and this interlock stayed green through all
+ * of it, certifying as re-read a set of figures sitting in text nobody had
+ * re-read.
+ *
+ * That is the defect the digest lock exists to prevent, reintroduced one layer
+ * up: a check that reports success because the thing it compares did not happen
+ * to be the thing that changed.
+ *
+ * So the pin is `id@version#digest`, where the digest is a prefix of the
+ * content hash the registry holds. A prefix rather than all 64 characters
+ * because this line is read by people and a wrapped hash is a line nobody
+ * checks; twelve hex characters is 48 bits, far past coincidence for a drift
+ * check and not defending against a crafted collision. The registry keeps the
+ * full digest either way.
+ *
+ * An entry written in the old `id@version` form is returned with
+ * `digest: null`, which the test rejects by name: silently accepting it would
+ * restore exactly the hole this closes.
+ */
+export interface HighlightSource {
+  readonly version: string;
+  /** Prefix of the source document's content digest, or null in the old form. */
+  readonly digest: string | null;
+}
+
 export function declaredHighlightSources(
   raw: string,
-): Readonly<Record<string, string>> | null {
+): Readonly<Record<string, HighlightSource>> | null {
   const line = /^\*\*Highlights checked against:\*\*\s*(.+)$/m.exec(raw);
   if (line === null) return null;
-  const out: Record<string, string> = {};
-  for (const [, id, version] of line[1]?.matchAll(
-    /`([a-z][a-z0-9-]{2,63})@([A-Za-z0-9][A-Za-z0-9._-]{0,63})`/g,
+  const out: Record<string, HighlightSource> = {};
+  for (const [, id, version, digest] of line[1]?.matchAll(
+    /`([a-z][a-z0-9-]{2,63})@([A-Za-z0-9][A-Za-z0-9._-]{0,63}?)(?:#([0-9a-f]{8,64}))?`/g,
   ) ?? []) {
-    if (id !== undefined && version !== undefined) out[id] = version;
+    if (id === undefined || version === undefined) continue;
+    out[id] = { version, digest: digest ?? null };
   }
   return out;
 }
+
+/**
+ * How much of a content digest the `Highlights checked against` line carries.
+ *
+ * Twelve is a floor rather than a format: a longer prefix in the document is
+ * accepted and compared at this length, so writing a more careful line later
+ * does not invalidate it.
+ */
+export const HIGHLIGHT_DIGEST_PREFIX = 12;
 
 /** The highest epoch a subject has accepted, per document id. */
 export type AcceptedEpochs = Readonly<Record<string, number>>;

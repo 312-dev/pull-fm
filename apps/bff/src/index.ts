@@ -7,6 +7,10 @@
  */
 
 import { loadConfig } from "./config.js";
+import {
+  assertLegalTriggersSatisfied,
+  realTriggerContext,
+} from "./lib/legal-triggers.js";
 import { buildServer } from "./server.js";
 import { buildServices, closeServices } from "./wiring.js";
 
@@ -14,6 +18,22 @@ async function main(): Promise<void> {
   // Before the logger exists, so a configuration error prints plainly and the
   // process exits non-zero rather than starting up half-configured.
   const cfg = loadConfig();
+
+  /**
+   * Refuse to start when a capability is switched on whose legal preconditions
+   * are not met.
+   *
+   * Deliberately here rather than in `loadConfig`: this reads the legal
+   * documents from disk, and configuration parsing should stay a pure function
+   * of the environment. Deliberately before `buildServices`, because the point
+   * is to refuse the process rather than to serve traffic while a breach of an
+   * upstream agreement is logged somewhere.
+   *
+   * `lib/legal-triggers.ts` explains why this is a registry and not a comment.
+   * The short version is that the comment was tried, in config.ts, and it was
+   * wrong within a day.
+   */
+  assertLegalTriggersSatisfied(realTriggerContext(cfg));
 
   // A bootstrap logger for the wiring phase. Replaced by the Fastify logger for
   // everything after; this exists only so a construction-time failure is not

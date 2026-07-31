@@ -48,6 +48,7 @@ import {
   NON_CONSENT_LEGAL_FILES,
   PUBLISHED_DOCUMENTS,
   declaredHighlightSources,
+  HIGHLIGHT_DIGEST_PREFIX,
   declaredVersion,
   legalDigest,
   normalizeLegalText,
@@ -212,15 +213,47 @@ describe("the consent screen copy", () => {
         `It must name every document its highlights quote, as \`id@version\`.`,
     ).not.toBeNull();
 
+    // Every entry must carry a digest. The old `id@version` form parses to
+    // `digest: null`, and accepting it would restore the hole this closes.
+    const missingDigest = Object.entries(declared!)
+      .filter(([, v]) => v.digest === null)
+      .map(([id]) => id);
+    expect(
+      missingDigest,
+      `these entries pin only a version: ${missingDigest.join(", ")}. Write ` +
+        `them as \`id@version#digest\`, where digest is at least ` +
+        `${String(HIGHLIGHT_DIGEST_PREFIX)} hex characters of the source document's ` +
+        `content hash. A version alone does not move when an unpublished draft ` +
+        `is edited in place, which is how this interlock stayed green through ` +
+        `two rewrites of both source documents on 2026-07-30.`,
+    ).toEqual([]);
+
     const expected = Object.fromEntries(
-      CONSENT_DOCUMENTS.map((doc) => [doc.id, doc.version]),
+      CONSENT_DOCUMENTS.map((doc) => [
+        doc.id,
+        {
+          version: doc.version,
+          digest: doc.contentSha256.slice(0, HIGHLIGHT_DIGEST_PREFIX),
+        },
+      ]),
+    );
+    // Compare the declared prefix against the same length of the real digest,
+    // so a line written with a longer prefix is still accepted.
+    const normalised = Object.fromEntries(
+      Object.entries(declared!).map(([id, v]) => [
+        id,
+        {
+          version: v.version,
+          digest: (v.digest ?? "").slice(0, HIGHLIGHT_DIGEST_PREFIX),
+        },
+      ]),
     );
     expect(
-      declared,
+      normalised,
       `\n\n${CONSENT_PRESENTATION.path} quotes figures and section numbers out of ` +
         `the documents below, and the versions it was checked against are no longer ` +
         `the current ones.\n\n` +
-        `  declared: ${JSON.stringify(declared)}\n` +
+        `  declared: ${JSON.stringify(normalised)}\n` +
         `  current:  ${JSON.stringify(expected)}\n\n` +
         `Do NOT just update the line. Re-read section 3.1 of ` +
         `${CONSENT_PRESENTATION.path} against the new text, then decide:\n\n` +
@@ -242,6 +275,70 @@ describe("the consent screen copy", () => {
     expect(read(CONSENT_PRESENTATION.path)).toContain(
       "No Pull.fm client presents this screen",
     );
+  });
+});
+
+describe("the highlight pin parser", () => {
+  // The interlock above passes against the real file, which proves only that it
+  // does not fail a correct repository. These prove it can fail, which is the
+  // half that makes it worth having.
+  const pin = (body: string): string =>
+    `# X\n\n**Highlights checked against:** ${body}\n\nbody\n`;
+
+  test("extracts the digest from the id@version#digest form", () => {
+    const got = declaredHighlightSources(
+      pin("`terms-of-service@DRAFT-1#180d130e2d6f`"),
+    );
+    expect(got).toEqual({
+      "terms-of-service": { version: "DRAFT-1", digest: "180d130e2d6f" },
+    });
+  });
+
+  test("reports a digest-less entry as such rather than accepting it", () => {
+    // The old form. Parsing it to `digest: null` is what lets the interlock
+    // reject it by name; silently treating it as satisfied would reopen the
+    // hole, because an unpublished draft edited in place keeps its version.
+    const got = declaredHighlightSources(pin("`terms-of-service@DRAFT-1`"));
+    expect(got).toEqual({
+      "terms-of-service": { version: "DRAFT-1", digest: null },
+    });
+  });
+
+  test("the version stops at the hash, so neither field absorbs the other", () => {
+    const got = declaredHighlightSources(
+      pin("`privacy-policy@DRAFT-1#f18244518ebd`"),
+    );
+    expect(got!["privacy-policy"]!.version).toBe("DRAFT-1");
+    expect(got!["privacy-policy"]!.digest).toBe("f18244518ebd");
+  });
+
+  test("a stale digest is distinguishable from a current one", () => {
+    // The exact scenario this closes: same version, different bytes.
+    const current = CONSENT_DOCUMENTS.find((d) => d.id === "terms-of-service")!;
+    const stale = declaredHighlightSources(
+      pin("`terms-of-service@DRAFT-1#000000000000`"),
+    );
+    expect(stale!["terms-of-service"]!.version).toBe(current.version);
+    expect(stale!["terms-of-service"]!.digest).not.toBe(
+      current.contentSha256.slice(0, HIGHLIGHT_DIGEST_PREFIX),
+    );
+  });
+
+  test("the declared prefix is long enough to mean something", () => {
+    // A two-character prefix would collide constantly and the interlock would
+    // pass through most real edits.
+    expect(HIGHLIGHT_DIGEST_PREFIX).toBeGreaterThanOrEqual(8);
+    const declared = declaredHighlightSources(read(CONSENT_PRESENTATION.path))!;
+    for (const [id, v] of Object.entries(declared)) {
+      expect(v.digest, `${id} pins no digest`).not.toBeNull();
+      expect(v.digest!.length).toBeGreaterThanOrEqual(HIGHLIGHT_DIGEST_PREFIX);
+    }
+  });
+
+  test("absent line is null, not an empty object", () => {
+    // An empty object would compare equal to nothing and make the interlock
+    // silently vacuous; null lets the test say the line is missing.
+    expect(declaredHighlightSources("# X\n\nno pin here\n")).toBeNull();
   });
 });
 
