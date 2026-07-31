@@ -143,7 +143,7 @@ export function describeOverdue(overdue: readonly OverdueAudit[]): string {
   return overdue
     .map(
       (o) =>
-        `  ${o.audit.id} was due ${o.dueOn} and is ${o.daysOverdue} day(s) ` +
+        `  ${o.audit.id} was due ${o.dueOn} and is ${String(o.daysOverdue)} day(s) ` +
         `overdue.\n    What: ${o.audit.what}\n    Why it matters: ${o.audit.why}\n` +
         `    Evidence lives in: ${o.audit.evidence}\n` +
         `    Tracked as checklist item ${o.audit.blocks}.\n` +

@@ -181,7 +181,7 @@ export const seatgeekCapMatchesTheirs: CheckablePrecondition = {
           "requires ours to be at least as protective.",
       );
     }
-    if (!/SEATGEEK ENTITIES/.test(terms)) {
+    if (!terms.includes("SEATGEEK ENTITIES")) {
       return unsatisfied(
         "The USD 50.00 cap is present but no longer names the SeatGeek " +
           "Entities. Protection extended to a third-party beneficiary must be " +
@@ -215,7 +215,7 @@ export const seatgeekBeneficiaryGrantIntact: CheckablePrecondition = {
           "third-party beneficiary status, which SeatGeek clause 4.3 requires.",
       );
     }
-    if (!/section 13 \(limitation of liability\)/.test(terms)) {
+    if (!terms.includes("section 13 (limitation of liability)")) {
       return unsatisfied(
         "The beneficiary grant no longer enumerates section 13 (limitation of " +
           "liability). An enumeration pointing away from the cap is the defect " +
@@ -242,13 +242,13 @@ export const privacyDisclaimsPreciseLocation: CheckablePrecondition = {
     "that the events feature accepts a city name only",
   check: ({ readLegal }) => {
     const privacy = readLegal(PRIVACY);
-    if (!/No precise location/.test(privacy)) {
+    if (!privacy.includes("No precise location")) {
       return unsatisfied(
         "Privacy policy section 3.6 no longer disclaims precise location, " +
           "which the events feature depends on being true.",
       );
     }
-    if (!/city name only/.test(privacy)) {
+    if (!privacy.includes("city name only")) {
       return unsatisfied(
         "Privacy policy section 3.6 no longer states that the events feature " +
           "accepts a city name only. SeatGeek's terms forbid personal data " +
@@ -496,7 +496,7 @@ export function assertLegalTriggersSatisfied(ctx: TriggerContext): void {
     )
     .join("\n\n");
   throw new Error(
-    `refusing to start: ${failures.length} legal precondition(s) are not ` +
+    `refusing to start: ${String(failures.length)} legal precondition(s) are not ` +
       `satisfied for capabilities that are switched on.\n\n${detail}\n\n` +
       `Each of these is a condition of a published legal document or an ` +
       `upstream agreement, not an engineering preference. Turn the capability ` +

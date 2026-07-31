@@ -222,7 +222,7 @@ describe("the consent screen copy", () => {
       missingDigest,
       `these entries pin only a version: ${missingDigest.join(", ")}. Write ` +
         `them as \`id@version#digest\`, where digest is at least ` +
-        `${HIGHLIGHT_DIGEST_PREFIX} hex characters of the source document's ` +
+        `${String(HIGHLIGHT_DIGEST_PREFIX)} hex characters of the source document's ` +
         `content hash. A version alone does not move when an unpublished draft ` +
         `is edited in place, which is how this interlock stayed green through ` +
         `two rewrites of both source documents on 2026-07-30.`,

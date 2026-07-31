@@ -105,7 +105,7 @@ describe("section F of the checklist names things that exist", () => {
     const resolvable = classified.filter((c) => c.kind !== "prose");
     expect(
       resolvable.length,
-      `only ${resolvable.length} of ${tokens.length} section F tokens were ` +
+      `only ${String(resolvable.length)} of ${String(tokens.length)} section F tokens were ` +
         `resolvable. Either section F was emptied or the classifier stopped ` +
         `matching; both make this suite vacuous.`,
     ).toBeGreaterThanOrEqual(15);

@@ -59,7 +59,7 @@ function baseConfig(overrides: Record<string, string> = {}): Config {
     MB_LOCAL_ENABLED: "false",
     DOCS_ENABLED: "false",
     ...overrides,
-  } as NodeJS.ProcessEnv);
+  });
 }
 
 function ctx(
@@ -237,10 +237,10 @@ describe("preconditions fail when the thing they protect is broken", () => {
   // One case per checkable predicate. The `expectedFailures` list is compared
   // against the registry at the end, so a predicate added without a case here
   // fails the suite rather than going untested.
-  const cases: Array<{
+  const cases: {
     id: string;
     context: TriggerContext;
-  }> = [
+  }[] = [
     {
       id: "events-credential-present",
       context: ctx(baseConfig()), // SEATGEEK_CLIENT_ID unset
@@ -325,7 +325,9 @@ describe("enforcement", () => {
     // train people to delete the check rather than satisfy it.
     const failures = evaluateLegalTriggers(ctx(baseConfig()));
     expect(failures).toEqual([]);
-    expect(() => assertLegalTriggersSatisfied(ctx(baseConfig()))).not.toThrow();
+    expect(() => {
+      assertLegalTriggersSatisfied(ctx(baseConfig()));
+    }).not.toThrow();
   });
 
   test("enabling events today is refused, because the consent gate does not exist", () => {
@@ -342,9 +344,9 @@ describe("enforcement", () => {
     expect(ids).toContain("consent-gate-presents-documents");
     expect(ids).toContain("documents-published-at-stable-url");
     expect(ids).toContain("counsel-confirmed-seatgeek-clauses");
-    expect(() => assertLegalTriggersSatisfied(ctx(config))).toThrow(
-      /refusing to start/,
-    );
+    expect(() => {
+      assertLegalTriggersSatisfied(ctx(config));
+    }).toThrow(/refusing to start/);
   });
 
   test("the refusal names the flag, the capability and what to do", () => {
@@ -371,8 +373,10 @@ describe("enforcement", () => {
     // ones, so it is the clean case for proving that enabling something with a
     // broken document is refused.
     const config = baseConfig({ MB_LOCAL_ENABLED: "true" });
-    expect(() => assertLegalTriggersSatisfied(ctx(config))).not.toThrow();
-    expect(() =>
+    expect(() => {
+      assertLegalTriggersSatisfied(ctx(config));
+    }).not.toThrow();
+    expect(() => {
       assertLegalTriggersSatisfied(
         ctx(
           config,
@@ -388,13 +392,13 @@ describe("enforcement", () => {
             "SomeOtherDatabase",
           ),
         ),
-      ),
-    ).toThrow(/musicbrainz-attribution-present/);
+      );
+    }).toThrow(/musicbrainz-attribution-present/);
   });
 
   test("an inert capability can be switched on freely", () => {
-    expect(() =>
-      assertLegalTriggersSatisfied(ctx(baseConfig({ DOCS_ENABLED: "true" }))),
-    ).not.toThrow();
+    expect(() => {
+      assertLegalTriggersSatisfied(ctx(baseConfig({ DOCS_ENABLED: "true" })));
+    }).not.toThrow();
   });
 });

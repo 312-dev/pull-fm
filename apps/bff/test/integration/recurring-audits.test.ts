@@ -82,7 +82,7 @@ describe("the registry is well formed", () => {
     // A future completion date would silently extend every interval.
     const today = new Date().toISOString().slice(0, 10);
     for (const a of RECURRING_AUDITS) {
-      expect(a.lastCompletedOn, `${a.id}`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(a.lastCompletedOn, a.id).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(
         a.lastCompletedOn <= today,
         `${a.id} claims to have been completed on ${a.lastCompletedOn}, which ` +
@@ -93,8 +93,8 @@ describe("the registry is well formed", () => {
 
   test("intervals are sane", () => {
     for (const a of RECURRING_AUDITS) {
-      expect(a.intervalDays, `${a.id}`).toBeGreaterThanOrEqual(7);
-      expect(a.intervalDays, `${a.id}`).toBeLessThanOrEqual(365);
+      expect(a.intervalDays, a.id).toBeGreaterThanOrEqual(7);
+      expect(a.intervalDays, a.id).toBeLessThanOrEqual(365);
     }
   });
 
