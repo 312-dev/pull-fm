@@ -488,15 +488,23 @@ const schema = z.object({
    * `providers.events: ok` while docs/PLAN.md §3 and §11.7 both say the route
    * is 501 pending Gate L.
    *
-   * Gate L is not an engineering gate and it has not passed: the DPAs are
-   * unsigned, no EU Article 27 representative is appointed, and the EULA that
-   * has to name the SeatGeek Entities as third-party beneficiaries under their
-   * clause 4.3 is not published. Serving events before those are true is a
-   * breach of their terms, not a missing feature, so the failure mode of a
-   * forgotten environment variable must be "off". Turning events ON is now the
-   * act that takes a deliberate `SEATGEEK_ENABLED=true`; turning them off
-   * remains a config flip and a restart, which is what the hours-not-deploys
-   * obligation above actually requires.
+   * Serving events before the legal preconditions hold is a breach of their
+   * terms rather than a missing feature, so the failure mode of a forgotten
+   * environment variable must be "off". Turning events ON takes a deliberate
+   * `SEATGEEK_ENABLED=true`; turning them off remains a config flip and a
+   * restart, which is what the hours-not-deploys obligation above requires.
+   *
+   * THE PRECONDITIONS ARE NOT LISTED HERE, AND THAT IS THE LESSON. This comment
+   * used to enumerate them: the DPAs unsigned, no Article 27 representative
+   * appointed, the EULA unpublished. Two of the three were false within a day.
+   * All four processor agreements were executed on 2026-07-30, and the Article
+   * 27 representative became moot when the service moved to a United States
+   * posture and the GDPR stopped applying. Nothing failed, because prose has no
+   * relationship to the thing it describes.
+   *
+   * They now live in `lib/legal-triggers.ts`, which the process reads at
+   * startup and refuses to boot against. Setting this to `true` today is
+   * refused, naming the three conditions that are still unmet.
    */
   SEATGEEK_ENABLED: z
     .enum(["true", "false"])
